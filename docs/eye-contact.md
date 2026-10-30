@@ -1,83 +1,105 @@
-# Human eye contact: shared 3D target, head pose, and pupil gaze
+# Gaze coordination and visual servoing — fixed base first, moving head later
 
-## User-facing goal
+**Canonical gaze-control specification.** Existing code: firmware/components/attention (single-target geometry planner), firmware/components/vision_attention (multiple face/eye tracks) and firmware/components/face (LVGL eyes). This document defines how those pieces **should be integrated**, not a claim of running camera-to-face code. Product behavior/wake policy is specified separately in [behavior-lifecycle.md](behavior-lifecycle.md).
 
-The bot should appear to notice the **actual person** in the room: turn or lift its head smoothly, then meet the user's eyes with a calm, centered gaze. Avoid independent pupil convergence, hunting between people, staring after a person leaves, and the false impression of eye contact when the robot actually faces elsewhere.
+## 1. Distinguish the three meanings of “gaze”
 
-**A face detected by the camera is not the same as the person looking at the bot.** Mutual eye contact is a distinct state that requires an independently trained/calibrated head-pose/eye-gaze estimator, sufficient confidence, a shared physical target direction, stable alignment and dwell. The current firmware does NOT contain the vision inference or actuator drivers.
+1. **Human eye location**: midpoint between two human eye landmarks in camera coordinates. This is the BOT's spatial target for display eye tracking or future motor pointing.
+2. **Human looking at Bot**: separate, uncertain estimate of where the human eyeballs/head point, based on eye ROIs, calibration and display intersection. A face aimed forward or a dark pupil is NOT proof.
+3. **Bot appearing to look at human**: one shared symbolic eye vector shown by both rendered eyes. This is expressive 2D UI, not a mechanically steerable optical sensor.
 
-## One target, three consumers
+Only one official target is selected by **attention_manager**, under bot_runtime permission. Perception can observe multiple people simultaneously; its primary_track_id should be treated as a *suggestion* when attention_manager exists, not another authority.
 
-```text
-Camera -> person/face detection -> target track ID + confidence
-       -> (later) head pose + human pupil gaze -> looking-at-robot confidence
-       -> 2D pixel + camera intrinsics -> angular yaw/pitch relative to camera
-       -> camera/head calibration + measured head joint angles
-                    |
-                    v
-             ATTENTION COORDINATOR     firmware/components/attention
-                    |
-          +---------+---------+
-          |                   |
-    shared eye vector     head yaw/pitch setpoints
-          |                   |
-  Face API -> Renderer   future motor driver
-     (one gaze)          (rate/angle limits)
-```
+## 2. V1: fixed (non-actuated) camera and head, manually movable whole robot
 
-The **Attention** module is the owner of target acquisition, alignment and control policy. The **Face** module is only a renderer/controller consuming a normalized gaze vector and expression. The **Motor** module will own servo hardware, feedback, limits and safety. The **Vision** module will own face selection, direction and human look-at-bot estimation. The Mac/Linux **Brain** can host heavyweight vision inference if needed, but must send timestamped target directions instead of directly steering each pupil.
+- No head actuator and no gyroscope installed. **Stationary mode is an explicit runtime hardware capability**, not a fake 0-degree measured servo state.
+- The whole device can still be carried, turned or tilted. The screen, camera and mic rotate together, maintaining a known **rigid camera-to-screen** relation.
+- Use **latest observed camera-relative** eye midpoint for rendered gaze. No North, tabletop level, world map or absolute yaw/roll is needed to update the eyes when the human remains in view.
+- Human moves OR Bot is moved → face location in new camera frame changes → update gaze target. No need to decide which one moved to close this simple relative feedback loop.
+- **NO physical camera re-aiming possible.** If Bot is turned so the target leaves FOV, only retain engagement as a separate policy state and optionally try bounded association on subsequent frames. Do NOT declare stable eye contact with an unseen person or silently assign the same track ID to a different face.
+- **DO NOT recenter eyes just because time passes** while the active human remains off-center and the head has not actually turned. The gaze remains comfortably sideward, within rendering limits.
+- If no valid target / low quality / stale: stop trusting previous position, ease towards neutral and await new visual evidence, while runtime may preserve conversation state.
+- Human may look away while still speaking; conversation target is not automatically dropped because looking_at_bot=false.
 
-## Geometry and synchronization
+### Geometry and calibration in stationary mode
 
-- Standard convention: **positive yaw = robot's right**, positive pitch = **up**. LCD eye y is positive downward; a target above the robot maps to a negative eye y. An x/y target from the camera is NOT directly usable after the head turns.
-- Vision converts pixel offsets into camera-relative bearings using camera intrinsics (focal length/field of view); at large off-axis angles use calibrated projection, not a naive normalized fraction.
-- The preferred visual target is the **midpoint between the person's eyes** (from stable face landmarks), not the torso, an arbitrary bounding-box corner or a second independent target for each robot pupil. When landmarks are unreliable, degrade confidence rather than guessing.
-- Moving camera bearings transform into fixed robot-base bearings using measured head yaw/pitch and calibrated camera-to-face boresight offsets. Head actual/estimated angle is mandatory; a motor command is not proof of motion.
-- For accurate 3D geometry, implement rigid camera extrinsics, full rotations, and distance/parallax correction (camera is not at the midpoint of the drawn eyes). The current controller uses a small-angle additive yaw/pitch approximation. Validate limitations on the real prototype before claiming precise eye contact.
-- Assign one track ID to the active person. The future Vision target selector should use confidence and hysteresis so the bot does not rapidly switch between multiple faces.
-- In local firmware use a monotonic millisecond clock. Observations arriving from the Brain MUST be converted into local time/age; do not directly compare unsynchronized Mac and ESP32 wall clocks.
+Use an upright, unmirrored, normalized camera image convention (u,v in 0..1, top left origin). Convert human-eye midpoint to optical bearings with camera intrinsics, e.g. under pinhole approximation:
 
-## How head and eyes cooperate
+~~~text
+pixel_x = u * width, pixel_y = v * height
+camera_yaw   = atan2(pixel_x - cx, fx)
+camera_pitch = atan2(cy - pixel_y, fy)
+~~~
 
-1. Aim head toward the user when required, within measured safe yaw/pitch joint limits. A small angular comfort zone means micro face movement is absorbed by pupils rather than causing servo jitter.
-2. The pupils correct the **residual angle between the user's bearing and the current actual head orientation**. Both eyes receive the **identical gaze vector**; never steer pupils to two different tracked pixel coordinates.
-3. Eye movement is intentionally limited to the inner 75% of the normalized range. When the user is far to the side, the head begins turning while the eyes look modestly in the same direction. Do not claim aligned eye contact until the actual pose permits it.
-4. On lost/stale detection, smoothly recenter the eyes and rate-limit the head back toward neutral. No random hunting or tracking a frozen bounding box.
-5. Only set an internal mutual-contact flag when the user is independently estimated to be looking toward the robot, the observations are fresh, the angular residual is reachable, and the state persists for a dwell interval. Even then, it is an estimate, not a guarantee of what a human is attending to.
+Then account for camera-to-visual-eye placement and near-field parallax. Camera lens above/beside the screen midpoint means a person looking at the display might not look directly into the lens. A calibrated empirical mapping to Face's -100..100 gaze range is appropriate; monotonic clamping and smooth interpolation prevent an unnatural extreme appearance. Save lens orientation, mirror state, camera/display offsets and field-of-view calibration in the platform config.
 
-**Current illustrative defaults** (not calibrated servo settings): head yaw -45°..45°, pitch -18°..25°, head setpoint slew 55°/s, comfortable pupil residual ~5° yaw / 4° pitch, max visible tracking ~12° yaw / 9° pitch, report expiry 800ms, contact report freshness 180ms, dwell 320ms. They MUST be tuned against real hardware and user observations. The module does not drive a motor.
+On high roll/tilt, camera image orientation and screen geometry must be handled explicitly. With no IMU, do not claim to know gravity-relative roll; tracking remains relative to observed eye landmarks. Apparent human face roll/eye-line can give a limited visual cue, not a robust gravity measurement.
 
-## Code interface
+## 3. Motion handling and target continuity
 
-```c
-attention_config_t cfg = attention_default_config();
-attention_controller_t tracking;
-attention_controller_init(&tracking, &cfg);
+**Current without IMU:** use new visible face/eye observations, short-lived per-track motion prediction and optional full-frame visual ego-motion estimates. Do not blindly treat a camera-wide pixel shift as the human walking; don't promise perfect identity continuity under crossings or complete occlusion.
 
-// Vision module delivers timestamped camera-relative person bearing +
-// separately estimated look-at-robot flag. Use measured joint pose.
-attention_controller_observe(&tracking, &obs, &measured_head);
+Snapshots should include track ID, focus_generation, capture timestamp, visible/unknown, current eye midpoint, velocity and confidence. Eye velocity in current code is **camera-relative**; when the head itself moves in a future build, it must be compensated using measured joint/camera pose before extrapolating target motion.
 
-// Run 20-50 Hz in attention/motor task, NOT inside an LVGL render callback:
-attention_output_t plan = attention_controller_step(
-    &tracking, &measured_head, esp_millis, motors_available);
+- Light visual tracking update must not wait for look-at-Bot confidence/dwell timer.
+- Reuse only fresh target data; bounded prediction horizon, e.g. <=100ms after last solid observation, is a tuning suggestion, not a verified guarantee.
+- Separate short localization loss (~hundreds of ms) from longer conversation/focus retention (~seconds). A retained relationship is NOT a valid gaze measurement.
 
-// Future motor driver checks physical end stops and servo feedback:
-// pan_tilt_request(plan.head_target_yaw_deg, plan.head_target_pitch_deg);
-// Face update on LVGL task / under BSP lock:
-face_set_gaze(face, plan.eye_x, plan.eye_y);
-```
+## 4. Future: actively moving pan/tilt head
 
-## Acceptance tests before claiming real mutual gaze
+Future physically actuated head introduces frames:
+- C camera optical frame
+- H articulated head frame
+- B device base frame
+- optional local fixed reference W (not geographic North)
 
-- A person appears left, right, high and low: head tracks the correct direction; both pupils move the same way and never cross.
-- Person moves while the head rotates: target does not drift as coordinate frames change.
-- A person is detected but looks away: bot may look at the person but must not report **mutual** gaze.
-- Loss and reacquisition under variable lighting, glasses, camera occlusion, and multiple-person switching; require continuity/hysteresis.
-- Person beyond joint limits: no servo collision or sustained maximum pupil deflection; no false aligned status.
-- Test at near and far distances (camera/display parallax), seated/standing heights and off-axis positions; manual qualitative review by actual observers.
-- Micro-movement filters avoid servo buzzing, fast ping-pong and unnatural over-following; maintain natural blinks.
+Use actual actuator pose, camera extrinsics and 3D rotations to transform a target camera ray into a stable mechanical aiming task. At small angles the current C attention planner approximates target_base_yaw = measured_head_yaw + camera_offset + target_camera_yaw. This is not enough for arbitrary body tilt or substantial pan/tilt, which need full rigid transforms and actuator reachability checks.
 
-## Status
+**Eye–head coordination**:
+1. New target appears: rendered eyes lead slightly; head begins turning almost simultaneously when required.
+2. While head moves: eyes compensate so the **combined gaze** stays toward the same human eye midpoint.
+3. As head physically aligns: eye residual decreases, eyes return to near center.
+4. Once aligned: head holds comfortable orientation with rate limits / dead zone to prevent mechanical hunting.
+5. If joint limit or user holds device: clamp safely; no false "eye contact aligned" state.
 
-Implemented and native-C-tested: geometry coordinator, one shared gaze vector, confidence and dwell gating, lost-target recovery, rate-limited head setpoints and safety limits. **Not implemented:** camera inference, gaze-to-robot classifier, timestamp sync for remote observations, target arbitration, physical servos/feedback and real-world calibration.
+The current attention code sets illustrative defaults such as eye_max_yaw_deg=12, eye_comfort_yaw_deg=5, head_speed_deg_per_s=55 and contact_dwell_ms=320. Those are unverified tuning values, NOT servo or human-gaze specifications. In future FACE_TO_FACE mode head should converge close to human eye target (small deadband) so the eyes truly recenter; TRACKING mode may leave larger comfortable residual. Fixed mode has **no mechanical recenter**.
+
+Physical head pose must be measured or honestly estimated; commanded motor setpoint is not proof of movement. Add safety around collision, hands holding the head and extreme base tilt before real actuation.
+
+## 5. Optional future head-mounted IMU
+
+An added 6-axis gyro/accelerometer may rapidly estimate rotational disturbance and gravity-relative tilt, improving short-term eye/head stabilization. It does **not** directly identify people, give accurate translation or provide drift-free absolute heading. Vision corrects long-term target bearing when visible. Full 3D transforms are needed under tilting; pan/tilt motors cannot independently cancel arbitrary roll.
+
+No IMU or motor is required to implement the **current camera-relative rendered-eye follow**.
+
+## 6. Acoustic cue is not visual re-aiming
+
+The two-mic array may later estimate sound direction after a valid 小呆小呆 wake. DOA is a spatial hint with front/back and elevation ambiguity (see [audio-direction.md](audio-direction.md)). With no motor it cannot cause the camera to turn. Once a face is acquired, its eye midpoint is the fine target; human iris direction only judges whether they look back at Bot.
+
+## 7. Core API relationship
+
+~~~text
+vision_attention  -- all tracks + eye midpoint + look evidence -->
+attention_manager -- exactly one active focus + freshness -------->
+attention         -- one common gaze_x/gaze_y + optional head plan -->
+face              -- LVGL: both eyes render common gaze; expressions independently
+
+head_motion (future) --> actual joint pose --> attention
+audio DOA (future)   --> candidate speaker direction --> attention_manager
+bot_runtime          --> policy/capability/permissions; never per-frame pupil math
+~~~
+
+Only the Face GUI task or a holder of the BSP/LVGL display lock may call face_set_gaze. Remote/manual face.set gaze requests are renderer debug commands, NOT authoritative live tracking. Avoid duplicate gaze dwell timers in vision_attention and attention: looking-at-Bot recognition and mechanically achieved mutual alignment are different stages, but two arbitrary delays should not accumulate unnoticed.
+
+## 8. Failure / manual observation criteria
+
+- Face merely present → may follow location when engaged; cannot mark human-looking-at-Bot true without gaze evidence.
+- Engaged A turns head/eyes away → retain target as policy permits; no fake mutual eye contact.
+- Bot manually turned while A still in FOV → visually remeasure and adjust both rendered eyes consistently.
+- Bot manually turned so A leaves FOV → localization lost; cannot physically recenter camera in stationary mode.
+- A and B cross or hide each other → association may be ambiguous; no unbounded continuity claim.
+- Bot sleeping / night dark → camera/inference paused; only full local wake phrase reactivates. Eye gaze is not a wake trigger.
+- Two-axis motor later → head follows; rendered eyes recenter only if confirmed actual pose aligns, and safe joint constraints permit.
+- No camera, wake model, motor or IMU validated on the real board is implied by this document.
+
+See [visual-attention.md](visual-attention.md) for the multi-face perception model and [hardware-power.md](hardware-power.md) for device capabilities and screen sleep limitations. No CI (AGENTS.md).
