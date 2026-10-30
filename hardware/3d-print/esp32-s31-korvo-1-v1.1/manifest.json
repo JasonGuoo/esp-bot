@@ -1,0 +1,57 @@
+{
+  "model": "ESP32-S31-Korvo-1 V1.1",
+  "source_repo": "espressif/esp-dev-kits",
+  "source_commit": "bd4d4ac18657e73583af3d7c0b0a23c3cddf3735",
+  "source_folder": "examples/esp32-s31-korvo/3d-printed-case/",
+  "recorded_on": "2026-10-30",
+  "files": [
+    {
+      "name": "ESP32-S31-Korvo-1_Case_btm_20260603.STEP",
+      "sha_git_blob": "62b48ed8a7c0fb19d174ad0b9244419a2126a84c",
+      "size_bytes": 800952,
+      "committed_in_repo": true
+    },
+    {
+      "name": "ESP32-S31-Korvo-1_Case_btm_20260603.STL",
+      "sha_git_blob": "52d129ff335d65b18e095cba12460048b72c70b4",
+      "size_bytes": 534284,
+      "committed_in_repo": true
+    },
+    {
+      "name": "ESP32-S31-Korvo-1_Case_light_guide_20260603.STEP",
+      "sha_git_blob": "9b345a88038d0a82f0a7b4122ff25ea4f176bbe0",
+      "size_bytes": 53774,
+      "committed_in_repo": true
+    },
+    {
+      "name": "ESP32-S31-Korvo-1_Case_light_guide_20260603.STL",
+      "sha_git_blob": "598695d421e884ca5f682ce0c9c06882e1037fb7",
+      "size_bytes": 4084,
+      "committed_in_repo": true
+    },
+    {
+      "name": "ESP32-S31-Korvo-1_Case_stand_20260603.STEP",
+      "sha_git_blob": "044a3115d037306803345352650251e247a9ecce",
+      "size_bytes": 53734,
+      "committed_in_repo": true
+    },
+    {
+      "name": "ESP32-S31-Korvo-1_Case_stand_20260603.STL",
+      "sha_git_blob": "a24ffb6f9285ee26e2483869c509ce9779e13dbf",
+      "size_bytes": 86084,
+      "committed_in_repo": true
+    },
+    {
+      "name": "ESP32-S31-Korvo-1_Case_top_20260603.STEP",
+      "sha_git_blob": "6674468e808fc25e35f7e4c7d08a94f7f0c95827",
+      "size_bytes": 3924083,
+      "committed_in_repo": false
+    },
+    {
+      "name": "ESP32-S31-Korvo-1_Case_top_20260603.STL",
+      "sha_git_blob": "d6794792a740238a78596982be11d4cc6165f6f1",
+      "size_bytes": 2152684,
+      "committed_in_repo": false
+    }
+  ]
+}
