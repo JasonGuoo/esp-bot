@@ -6,6 +6,9 @@ Product requirement: passive companion with **local always-listening full phrase
 
 ## New physical direction (2026-10-30)
 
+**Practical vendor-backed sourcing shortlist:** [off-the-shelf-hardware.md](off-the-shelf-hardware.md) — verified Espressif case CAD, Hiwonder/DFRobot pan/tilt, passive 4Ω 3W stereo speaker parts, control/power cautions, no claim of direct fit.
+
+
 **Current installed board remains stationary. The preferred next build** is an attractive, fully enclosed, **off-the-shelf pan/tilt head with external speakers**; do not design an entirely new PCB or servo mechanism before reviewing ready-made bracket kits, official CAD and known-good servo controllers. This is an aspirational *mechanical assembly*, not a claim that pan/tilt/feedback exists now.
 
 **Important existing hardware**: official V1.1 board already includes an ES8389 stereo audio codec, **two NS4150B class-D power amplifiers**, and **two 2.00 mm pitch speaker outputs each for 4 Ω / 3 W speaker**, so only appropriate loudspeakers/wiring/acoustic vents need selecting, not an additional amplifier PCB. Confirm power rail headroom, ground arrangement, connector polarity, clearance and acoustics before mounting servos and loudspeakers. Servo supply **must not** be taken from an arbitrary ESP GPIO / unverified 3.3 V rail. Prefer a properly rated external servo rail, common signal ground and overcurrent/safe-stop behavior.

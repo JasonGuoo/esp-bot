@@ -65,3 +65,15 @@ Canonical system decision: [local-first-hybrid-brain.md](local-first-hybrid-brai
 4. Test board **revision**, pin allocation and codec sample rates before importing a driver.
 5. Document which features are **implemented, planned, validated on real hardware**, not just advertised.
 6. Treat this catalog as a maintained decision record; review upstream versions before each adoption, without replacing canonical architecture.
+
+## 4. Further verified hardware and Bluetooth references (2026-10-30)
+
+See [off-the-shelf-hardware.md](off-the-shelf-hardware.md) for vendor specs, assembly/weight/connector cautions and practical purchasing shortlist.
+
+- [Official Espressif Korvo-1 V1.1 3D case STL/STEP](https://github.com/espressif/esp-dev-kits/tree/master/examples/esp32-s31-korvo/3d-printed-case): **top/bottom/stand/light-guide** models for exact board; verify commercial CAD rights before deriving shell designs.
+- [Hiwonder 2 DoF metal pan tilt with 2 LD-1501MG servos](https://www.hiwonder.com/collections/all-product/products/pan-tilt): preferred sturdier candidate; fit, servo power, moving-head load NOT validated.
+- [DFRobot FIT0004 standard-servo tilt/pan bracket](https://www.dfrobot.com/product-340.html): economical metal alternative, **servos not included**.
+- [Little Bird passive stereo speaker pair 2 × 45mm 4Ω/3W PH2.0](https://littlebirdelectronics.com.au/products/2-x-45mm-4ohm-4-3w-stereo-speaker-with-ph2-0-plug): may suit on-board two 3W PAs **after connector polarity/housing verification**.
+- [cgro00/desk-robot](https://github.com/cgro00/desk-robot): real moving robot with screen, speaker and PC-side Brain; alternate board (XIAO S3), not a drop-in enclosure.
+- [han0519/esp32-xiaofeng](https://github.com/han0519/esp32-xiaofeng): S31 Bluetooth **A2DP Sink**/AVRCP/HFP example and ESP-GMF media UI, potentially useful for Mac-to-Bot speaker playback over BT. **Its declared audio codec and PSRAM differ from official ES8389/16MB Korvo V1.1; inspect real board init before attempting reuse.** BT speaker receive does not solve Bot microphone or secure control fallback.
+- [stack-chan/stack-chan](https://github.com/stack-chan/stack-chan): existing open case, mechanics and motion design; 2.0-inch StackChan chassis is not sized for 4.3-inch Korvo.
