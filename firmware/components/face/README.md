@@ -1,24 +1,26 @@
-# Face component (standalone LVGL 9 module)
+# Reusable Face component (LVGL 9)
 
-The reusable ESP32-side visual expression module lives here, not inside the Brain client. It has **no Wi-Fi, audio, camera or LLM dependency**.
+Independently owns expression state, blinking, gaze interpolation, subtitles and settings navigation. **Does not** import camera, servo, Brain, NVS or Wi-Fi libraries. Public API in `include/face.h`.
 
-Public header: include/face.h
+```c
+face_view_t *face = face_create(lv_screen_active());
+face_set_theme(face, "sky");
+face_set_expression(face, "listening");
+face_set_gaze(face, 45, -20);    // a single direction shared by both pupils
+face_set_subtitle(face, "Hello!");
+face_reveal_settings(face);
+```
 
-Example (call from LVGL task or with bsp_display_lock):
+## Appearance drivers
 
-    face_view_t *face = face_create(lv_screen_active());
-    face_set_theme(face, "sky");
-    face_set_expression(face, "listening");
-    face_set_gaze(face, 45, -20);
-    face_set_subtitle(face, "I'm listening...");
-    face_reveal_settings(face);
+`face_renderer.h/.c` defines the abstract driver (`create`/`render`/`destroy`) and registry, independent of `face.c`. Built-ins: `renderer_outline.c` (macaron stroke eyes) and `renderer_pill.c` (solid capsule eyes). Both accept identical expression and gaze state. To install a new eye family, add another renderer and manifest entry; do not modify the controller or Brain protocol. Pack ID, renderer, palette and blink/gaze parameters live in `shared/themes.json`, compiled into `include/face_themes_generated.h`.
 
-Theme names: mint, sakura, lavender, butter, sky. The theme changes the background, **both** eyes, captions and settings as a unit. Colors originate in shared/themes.json; regenerate the C header from repository root with:
+## UI and persistence
 
-    python3 tools/generate_face_themes.py
+Default is just eyes (and optional subtitle). Screen tap → gear visible **five seconds** → full-screen Settings → **外观** → choose candidate → **应用** → return to face, repaint entire UI. Back or close does not commit. App registers `face_on_theme_applied()` and saves to NVS; the face component never accesses NVS itself. Firmware `app_main.c` loads last saved appearance on startup.
 
-Expressions: idle, listening, happy, curious, thinking, surprised, sleepy, shy, blink. Happy has no mouth; only surprised/shy may display a dot or tiny curve. Idle and listening blink automatically. The eyes themselves are simple LVGL objects.
+## Eye contact integration
 
-Future modules should call this API to set expression and gaze, not edit the eye LVGL children themselves. For a FreeRTOS worker task, acquire/release the BSP LVGL display lock around calls.
+The face must never receive separate left/right pupil targets. A separate Attention module owns the common target direction and plans combined head yaw/pitch and eye offsets using actual measured/estimated head angles. Rendering styles must respect this shared direction. See `firmware/components/attention/` and `docs/eye-contact.md`.
 
-The current board target is ESP32-S31-Korvo-1 (800x480, GT1151 touch). Boot and display are initialized in firmware/main/app_main.c; the face component never configures GPIO pins. Chinese captions require a CJK-capable LVGL font in the on-device build. The current code has not been hardware-validated.
+**Verification status:** Python/JS/native-C tests run in CI; physical S31 firmware build, touch behavior, LCD brightness, performance, exact CJK glyph set, camera and motors still need testing on real hardware. The component calls require LVGL task context or the BSP display lock.

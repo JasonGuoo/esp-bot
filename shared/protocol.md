@@ -15,7 +15,7 @@ Scope: a minimal working LAN command protocol. ESP32 **polls** the Brain, which 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Process health (public) |
-| GET | `/v1/themes` | Canonical themes |
+| GET | `/v1/themes` | Appearance-pack descriptors (renderer, palette, motion) |
 | GET | `/v1/expressions` | Available expression IDs |
 | GET | `/v1/devices` | Connected/recently polled devices |
 | GET | `/v1/commands/next?device_id=korvo-01` | Dequeue next command or `{"command":null}` |
@@ -52,7 +52,7 @@ Authorization: Bearer <token>
 
 Expressions: `idle`, `listening`, `happy`, `curious`, `thinking`, `surprised`, `sleepy`, `shy`, `blink`.
 
-Only supplied payload fields are updated. `face.set` may specify any subset of `theme`, `expression`, `subtitle`, `gaze_x`, `gaze_y`. Gaze integer range: -100..100; subtitle string <= 180 Unicode code points. Empty string clears subtitle. Both eyes use the **same** palette.
+Only supplied payload fields are updated. `face.set` may specify any subset of `theme`, `expression`, `subtitle`, `gaze_x`, `gaze_y`. Gaze integer range: -100..100; subtitle string <= 180 Unicode code points. Empty string clears subtitle. Each appearance pack chooses a renderer, palette and animation profile; both eyes share the **same target gaze vector**, regardless of renderer. A remote `face.set` can change appearance temporarily, but the on-device Settings → Appearance → Apply flow persists a selection in NVS.
 
 Commands are removed from the queue on polling and are **not durable**; delivery/ack/retry are future work. The ESP32 network task must always acquire the LVGL/BSP display lock before updating the face. Devices must not invoke external LLM services or hold provider API keys.
 
@@ -66,4 +66,9 @@ The Brain's tool registry only executes **registered named functions** with vali
 
 ### Discovery (planned)
 
-Wi-Fi discovery via mDNS/UDP, secure pairing and BLE provisioning are **not implemented** in this version. For the first integration, configure a fixed `Brain URL` on the ESP32 via ESP-IDF menuconfig. The touch gear presently opens the **theme selector**, not a deceptive device discovery dialog.
+Wi-Fi discovery via mDNS/UDP, secure pairing and BLE provisioning are **not implemented** in this version. For the first integration, configure a fixed `Brain URL` on the ESP32 via ESP-IDF menuconfig. The touch-revealed gear opens a full-screen **Settings** menu, then **Appearance**, where the user selects a candidate and taps **Apply** to return to the face. This menu does not pretend Bluetooth or Wi-Fi discovery has been implemented.
+
+
+### Human eye-contact integration (future, NOT in this HTTP API yet)
+
+Real tracking will not be a series of arbitrary `face.set gaze_x/gaze_y` guesses. The future camera/vision pipeline must report a timestamped target track ID, camera-relative bearing angles, face confidence and a **separate** person-looking-at-bot estimate; the future motion driver reports actual head pose. The C Attention coordinator converts these to a shared pupil gaze vector and bounded pan/tilt commands. Brain-to-device target transport, clock synchronization, face/gaze inference and motor actuation are **not implemented**. The current Brain `face.set` gaze_x/y is a manual renderer-testing interface only. See [docs/eye-contact.md](../docs/eye-contact.md).

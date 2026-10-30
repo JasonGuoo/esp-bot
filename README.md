@@ -9,7 +9,8 @@ A stationary, expressive desktop companion: **ESP32-S31-Korvo-1** provides the e
 | Path | Responsibility |
 | --- | --- |
 | `firmware/` | ESP-IDF device program; official S31 Korvo-1 BSP, reusable LVGL face component, Wi-Fi Brain client |
-| `firmware/components/face/` | Standalone face API: expressions, animation, gaze, subtitles, touch settings, themes |
+| `firmware/components/face/` | Reusable expression controller, pluggable eye renderers, subtitles and Settings -> Appearance UI |
+| `firmware/components/attention/` | Independent eye-contact geometry: shared gaze direction, head setpoints and confidence gating |
 | `server/` | Cross-platform Python Brain server (macOS/Linux), command queue, optional OpenAI-compatible LLM and safe tools |
 | `shared/` | Canonical theme tokens and documented JSON/HTTP contract |
 | `preview/` | Browser-based interactive face preview; no board required |
@@ -31,7 +32,7 @@ python3 -m http.server 8765 --bind 127.0.0.1
 # open http://127.0.0.1:8765/preview/
 ```
 
-Select any of five **independent full-screen themes** (mint/sakura/lavender/butter/sky). **Both eyes always use the same theme.** Change expressions, move the gaze and edit subtitle text in the preview.
+Touch the simulated screen to show the corner gear (auto-hides after five seconds). Open **Settings → Appearance**, select one of the five installed pastel appearances (mint/sakura/lavender/butter/sky), then press **Apply** to return to the face. Selection does nothing until Apply, and the preview persists the choice in localStorage. All five shipped styles share an outline renderer; future appearance packs can choose entirely different eye geometries, assets and motion profiles. Use the debug panels below the screen to test expressions, gaze direction and subtitles.
 
 ### Brain server (Python 3.10+)
 
@@ -67,15 +68,19 @@ face_set_gaze(face, 35, -20);        // normalized -100..100
 face_set_subtitle(face, "Hello!");
 ```
 
-One face, multiple palettes; **not** a different color in each eye. The only optional mouth marks are a surprise dot and a brief shy curve. No iris, gradients, highlights or other facial clutter. The settings icon appears when the screen is touched.
+One face API, multiple appearance packs. A pack selects a renderer, colors and motion timings (not just different colors in each eye). The installed macaron packs use matching colors for both eyes; the future alternative pill renderer is already implemented. The only optional mouth marks are a surprise dot and a tiny shy curve. The gear is touch-revealed for five seconds, then opens **Settings → Appearance → Apply**. Applied choices are persisted to ESP32 NVS by the application, not by the face component.
 
 ## Roadmap and boundaries
 
-**In this baseline:** real LVGL face module, 5 themes, gaze/blink, touch theme selector, subtitle area; a Python HTTP Brain with device command queue, configurable OpenAI-compatible text model, an allowlisted tool registry, and an optional ESP32 polling client.
+**In this baseline:** LVGL Face component with independent renderers and five installed macaron appearances; two-level Settings → Appearance → Apply navigation with NVS persistence; touch-revealed gear; blinking, shared pupil gaze and subtitle area; a host-testable Attention coordinator that calculates coupled head/gaze targets and refuses false mutual-eye-contact claims; Python Brain HTTP command queues, optional text-model adapter and allowlisted tool registry; optional ESP32 Wi-Fi polling.
 
-**Later:** board-validated full input/audio pipeline, camera-based attention, Wi-Fi discovery/mDNS and BLE pairing, microphone streaming, TTS playback and synchronized head-motor control, secure pairing and TLS. None of these are represented as already working.
+**Later:** full ESP-IDF and real-board build/flash verification; camera face detection and a *separate* classifier for whether the person looks at the robot; 3D camera-to-display/head calibration; servo feedback and pan/tilt actuation; speech streaming, TTS, Wi-Fi discovery, pairing and encryption. The current Attention module is a geometric **planner**, not a working camera or motor driver.
 
-Read [docs/face-design.md](docs/face-design.md) and [shared/protocol.md](shared/protocol.md) before integrating new components.
+Read [face design](docs/face-design.md), [appearance pack contract](shared/appearance-packs.md), [human eye-contact architecture](docs/eye-contact.md), and [device/Brain protocol](shared/protocol.md) before integrating new components.
+
+## Validation
+
+GitHub Actions run Python Brain/palette checks, Node tests for the settings state machine and pluggable browser renderers, plus native C tests for attention geometry. No board-flash/servo/camera validation is claimed.
 
 ## References
 
