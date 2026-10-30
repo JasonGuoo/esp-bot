@@ -13,6 +13,8 @@ The **new physical target** is a good-looking enclosed **pan/tilt** head with in
 - **[Local-First Hybrid Brain: canonical new deployment + BLE fallback](docs/local-first-hybrid-brain.md)**
 - **[Upstream reuse catalog: verified project links, ports, licenses, adoption priorities](docs/upstream-reuse-catalog.md)**
 - **[Off-the-shelf hardware shortlist: official Korvo shell STL/STEP, pan/tilt kits and speakers](docs/off-the-shelf-hardware.md)**
+**精确型号/打印文件与采购顺序：** [3D 打印 + 扬声器 + 云台 + 电源 BOM V2](docs/print-files-and-bom-v2.md)（含制造商、型号、数量、渠道、STL/STEP、兼容风险与装配示意要求）。
+
 - **[Current system authority / behavior architecture](docs/architecture.md)**
 
 **Status:** These are updated decisions and research. No claims of compiled BLE, working local Mac speech engine, motor assembly or production secure pairing.
