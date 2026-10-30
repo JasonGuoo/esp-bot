@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "identity": {
+    "display_name": "小呆",
+    "locale": "zh-CN",
+    "spoken_name": "小呆"
+  },
+  "wake": {
+    "phrase": "小呆小呆",
+    "pinyin_numbered": "xiao3 dai1 xiao3 dai1",
+    "locale": "zh-CN",
+    "phrase_is_one_keyword": true,
+    "bare_name_is_wake": false,
+    "accept_split_keyword_events": false,
+    "active_while_display_sleeping": true,
+    "recognition_location": "device",
+    "recognition_model": "unprovisioned",
+    "unrecognized_audio_upload": false
+  }
+}
