@@ -11,9 +11,10 @@ static float clampf(float x,float a,float b) {
 }
 static uint8_t sample(const vatt_gray8_t *im,float px,float py) {
     int x=(int)(px+.5f),y=(int)(py+.5f);
-    if(x<0)x=0;if(y<0)y=0;
-    if(x>=im->width)x=im->width-1;
-    if(y>=im->height)y=im->height-1;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x >= im->width) x = im->width - 1;
+    if (y >= im->height) y = im->height - 1;
     return im->data[(size_t)y*im->stride+(size_t)x];
 }
 bool vatt_pupil_candidate(const vatt_gray8_t *im,
