@@ -8,6 +8,8 @@ Albert.io-inspired *simplicity only*, not imitation of artwork. Two large eyes d
 
 ## Behavior
 
+**Authority rule (2026-10-30):** bot_runtime owns passive/engaged/waking/sleeping/night behavior; attention_manager owns the active human target; attention alone calculates spatial gaze. Face only renders expression and a single shared gaze vector. Camera face presence or a person's stare does NOT authorize Face to wake/speak. See [behavior-lifecycle.md](behavior-lifecycle.md) and [architecture.md](architecture.md).
+
 - **idle**: symmetrical open rounded eyes; soft tiny pupil motion / occasional quick blink.
 - **listening**: eyes attentive, pupil shifts respond to attention angle; no listening badge.
 - **happy**: two upside-down U arcs, no mouth.
@@ -30,7 +32,7 @@ Interpolation and expression state are part of the Face controller, while *speci
 
 ## Animation budgets and integration
 
-Animation tick ~33ms. Occasional blink ~3.5 seconds during idle/listening; pupil gaze interpolation smooth over successive ticks. Avoid GPU-like rendering and large frame sprites. Use simple LVGL shapes to keep RAM/CPU budgets low. No audio or motor control is assumed by the face module.
+Animation tick ~33ms when display is awake (initial design budget, not board-validated). Occasional blink around ~3.5s only **when allowed by runtime behavior state**; no normal blinking animation in SLEEPING/NIGHT_DARK. In IDLE→BORED→DROWSY the rendering profile can subtly slow eye activity, but it must not initiate speech or target acquisition. When tracking an engaged human, subtle expression changes (thinking/listening/shy) may change eye SHAPE, never silently replace the spatial gaze vector with a conflicting idle look. Camera-relative tracking may keep the pupils off-center with a fixed head; eyes return to center only when a future motor has physically aligned the head, or tracking is no longer valid. Avoid GPU-like rendering and large sprites; no audio or motor control inside Face.
 
 Touch behavior: a screen tap reveals the corner gear for five seconds; gear opens Settings, then Appearance, then selection/Apply. Settings is not an always-visible bar. Touching a candidate card is not the same as applying it. Appearance tiles are rendered using the theme's own selected drawing driver. The module should remain callable from remote commands, speech/sentiment module, visual-attention module and motion coordinator.
 
@@ -44,6 +46,12 @@ Touch behavior: a screen tap reveals the corner gear for five seconds; gear open
 6. Layout stays usable at 800×480; touch and CJK font are tested on real board in the next integration phase.
 
 
-## Human eye-contact constraints
+## Gaze and passive lifecycle constraints
 
-Future mutual gaze MUST combine stable target tracking, camera-to-head calibration, measured head yaw/pitch, independent look-at-robot evidence, and a slow pan/tilt controller. Both pupils receive the same gaze direction. Head moves to handle larger offsets; eyes handle a small residual. No stale tracking or cross-eyed pupils. See [human eye-contact specification](eye-contact.md) and [C attention module](../firmware/components/attention/README.md). Current code includes a host-tested planner only: no real vision/motor integration is claimed.
+**V1 fixed camera, no motors/IMU:** a single calibrated, camera-relative gaze vector from attention drives both rendered eyes when a selected engaged human remains visible. If the Bot or the human moves, updated camera observations adjust eyes; if the human leaves camera FOV, eyes cannot physically re-aim the camera. While the target is still off-axis the eyes should not recenter merely because the passage of time or a 'thinking' expression changed the shape. Human looking-at-Bot evidence is separate from where Bot looks.
+
+**Future moving head:** attention integrates measured joint pose and camera calibration, moves eyes promptly and head more slowly, recentering rendered eyes as physical alignment is achieved. Two rendered eyes share one direction; no independently crossing pupils, stale positions or arbitrary model-controlled gaze.
+
+**Passive/sleeping:** eye contact and face presence do not wake the robot. Only the complete local 小呆小呆 wake phrase (or deliberate user action) can initiate engagement. In NIGHT_DARK, Face rendering is suspended and LCD sleep is requested, while local wake audio remains active. Physical full-black backlight is not yet verified.
+
+See [eye-contact.md](eye-contact.md), [behavior-lifecycle.md](behavior-lifecycle.md) and [module-contracts.md](module-contracts.md). Current code contains renderers and a standalone geometric planner only; there is no board-tested live camera or motor integration.
