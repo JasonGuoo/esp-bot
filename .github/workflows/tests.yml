@@ -12,5 +12,11 @@ jobs:
           python-version: '3.12'
       - name: Check generated face palette header
         run: python3 tools/generate_face_themes.py --check
-      - name: Run unit tests
+      - name: Run Brain API and theme manifest tests
         run: python3 -m unittest discover -s server/tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run browser settings and renderer contract tests
+        run: cd preview && npm test
+
