@@ -1,5 +1,7 @@
 # 小呆：现成外壳、双轴运动和外放音频方案（2026-10-30）
 
+**采购与打印细目已更新：** [V2 具体型号、渠道、STL/STEP 清单](print-files-and-bom-v2.md)。本文保留第一轮硬件取舍研究。
+
 **目标：** 保留已有 **ESP32-S31-Korvo-1 V1.1（4.3 英寸 800×480 屏幕）**，尽量使用官方 STEP/STL、现成云台与电机、内置功放，做出好看的双轴桌面机器人。**状态：采购与装配方案研究，并非实物已安装、CAD 已校核或电机已验证。**
 
 关联：[本地 Mac Brain 架构](local-first-hybrid-brain.md) · [上游复用清单](upstream-reuse-catalog.md) · [硬件/供电限制](hardware-power.md)。
