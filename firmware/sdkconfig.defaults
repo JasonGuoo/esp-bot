@@ -1,0 +1,2 @@
+# Settings and appearance labels, including Chinese font.
+CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_16_CJK=y

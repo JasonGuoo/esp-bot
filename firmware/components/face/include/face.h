@@ -1,7 +1,7 @@
 /**
  * ESP Bot reusable face component, LVGL 9.
  *
- * No Wi-Fi, microphone, LLM, camera or board dependency. Call on the LVGL task,
+ * Independent from Wi-Fi, microphone, LLM, camera and board drivers. Call on the LVGL task,
  * or while holding the BSP's display lock from another FreeRTOS task.
  */
 #pragma once
@@ -32,8 +32,16 @@ void face_set_gaze(face_view_t *view, int x, int y);
 /** Set caption text or NULL/"" to hide; truncates at 383 UTF-8 bytes. */
 void face_set_subtitle(face_view_t *view, const char *text);
 
-/** Reveal small top-right settings control for a few seconds. */
+/** Reveal the top-right gear for five seconds; opens Settings -> Appearance. */
 void face_reveal_settings(face_view_t *view);
+
+/** Invoked only when a person taps Apply in Appearance.
+ *  Persistence belongs to the application, NOT to the reusable Face component.
+ *  Programmatic face_set_theme() does not persist automatically.
+ */
+typedef void (*face_theme_applied_cb_t)(const char *theme_id, void *context);
+void face_on_theme_applied(face_view_t *view,
+                           face_theme_applied_cb_t callback, void *context);
 
 /** Current identifiers for diagnostics and other modules; owned by component. */
 const char *face_theme_id(const face_view_t *view);
