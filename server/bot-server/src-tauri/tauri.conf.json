@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ESP Bot Server",
+  "version": "0.1.0",
+  "identifier": "ai.reasonia.espbot.server",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "label": "main", "title": "ESP Bot Server", "width": 960, "height": 700, "minWidth": 700, "minHeight": 540 }],
+    "security": { "csp": null }
+  },
+  "bundle": { "active": false, "icon": [] }
+}

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ESP Bot Server</title>
+  </head>
+  <body>
+    <main id="app">
+      <header class="hero">
+        <div><p class="eyebrow">ESP BOT · LOCAL NETWORK</p><h1>Bot Server</h1><p class="subtitle">Discovery &amp; connection console</p></div>
+        <div class="indicator"><span id="led" class="led"></span><span id="status">Starting…</span></div>
+      </header>
+      <section class="stats">
+        <article><span>DNS-SD service</span><strong>_espbot-server._tcp.local.</strong></article>
+        <article><span>WebSocket listener</span><strong id="port">—</strong></article>
+        <article><span>Connected bots</span><strong id="count">0</strong></article>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><h2>Connected devices</h2><span>Accepted automatically on this LAN</span></div>
+        <div id="devices" class="devices"><p class="empty">Waiting for an ESP Bot to connect…</p></div>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><h2>Connection events</h2><span>Newest first · last 40</span></div>
+        <ol id="events" class="events"><li class="empty">No events yet</li></ol>
+      </section>
+      <footer>Local discovery only · No cloud, LLM or remote-control commands enabled · Development LAN transport is not encrypted</footer>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

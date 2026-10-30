@@ -1,0 +1,22 @@
+:root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #e7eef5; background: #0d1723; font-synthesis: none; }
+* { box-sizing: border-box; } body { margin: 0; } #app { max-width: 1030px; margin: auto; padding: 38px 36px 26px; }
+.hero, .panel-heading, .device, .indicator { display: flex; justify-content: space-between; align-items: center; gap: 24px; }
+.eyebrow { color: #70cbb5; font-size: 11px; letter-spacing: .19em; font-weight: 700; margin: 0 0 8px; }
+h1 { font-size: 38px; letter-spacing: -.04em; margin: 0; } h2 { font-size: 17px; margin: 0; }
+.subtitle, .panel-heading span, .empty, footer { color: #96aabd; } .subtitle { margin: 7px 0 0; }
+.indicator { color: #cbd8e6; font-size: 13px; background: #182939; border: 1px solid #2b4154; border-radius: 99px; padding: 11px 16px; }
+.led { width: 9px; height: 9px; border-radius: 50%; background: #b48e60; flex: none; } .led.on { background: #56d3a1; box-shadow: 0 0 12px #56d3a177; }
+.stats { display: grid; grid-template-columns: 2fr 1.2fr .9fr; gap: 15px; margin: 34px 0 23px; }
+.stats article, .panel { background: #142231; border: 1px solid #273c4f; border-radius: 16px; }
+.stats article { min-width: 0; padding: 20px; } .stats span { color: #98aaba; display: block; font-size: 12px; margin-bottom: 10px; }
+.stats strong { font-size: 15px; overflow-wrap: anywhere; font-weight: 600; }
+.panel { padding: 22px; margin-bottom: 18px; } .panel-heading { margin-bottom: 19px; }
+.panel-heading span { font-size: 12px; } .empty { font-size: 13px; padding: 7px 0; }
+.device { padding: 16px; border: 1px solid #33495a; border-radius: 10px; margin-top: 10px; }
+.device strong { font-size: 15px; } .device p { font-size: 12px; color: #9aafc1; margin: 7px 0 0; }
+.device time, .events time { color: #9aafc1; font-size: 12px; white-space: nowrap; }
+.events { margin: 0; padding: 0; list-style: none; max-height: 270px; overflow-y: auto; }
+.events li { display: grid; grid-template-columns: 90px 140px 1fr; gap: 10px; padding: 11px 0; border-bottom: 1px solid #283b4b; font-size: 12px; }
+.events li:last-child { border-bottom: 0; } .events strong { color: #7ed7c2; text-transform: capitalize; }
+.events span { color: #d4e1ec; overflow-wrap: anywhere; } footer { font-size: 11px; margin-top: 22px; line-height: 1.8; }
+@media(max-width:750px) { #app { padding: 25px 16px; } .hero { align-items: flex-start; flex-direction: column; } .stats { grid-template-columns: 1fr; } .panel-heading { align-items: flex-start; flex-direction: column; gap: 8px; } .events li { grid-template-columns: 75px 1fr; } .events span { grid-column: 2; } }
