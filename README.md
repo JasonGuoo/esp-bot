@@ -1,12 +1,34 @@
 # esp-bot
 
-A stationary, expressive desktop companion: **ESP32-S31-Korvo-1** provides the eyes, touch, camera, microphone and speaker; a **macOS/Linux Brain** provides LLM reasoning and future tools.
+**小呆 (Xiao Dai)** — a quiet, passive desktop companion built around ESP32-S31-Korvo-1. Local gaze, wake and behavior should not depend on Mac/Linux; the future Rust/Tauri Brain provides language reasoning, speech and tools. The only production voice wake phrase is **小呆小呆**, a single continuous four-syllable keyword. A standalone **小呆** must never wake the device.
 
 > Hardware target is **ESP32-S31-Korvo-1 V1.1** (ESP32-S31), **not** ESP32-S3-Korvo-1. The S31 board has an 800×480 RGB display and GT1151 touch panel. Use ESP-IDF 6.1 / `esp32s31`, not `esp32s3`.
 
 ## Identity and wake-word policy
 
 The robot is named **小呆** (Xiao Dai). Its **only production wake phrase is 小呆小呆**, recognized as one complete four-syllable on-device keyword. A single 小呆 must not wake it. A screen-off night state still keeps the local wake listener active. See [wake-word specification](docs/wake-word.md) and [shared identity manifest](shared/bot-identity.json). **The dedicated keyword model and wake integration are not yet provisioned or hardware-validated**; merely setting the display name does not enable custom wake recognition.
+
+## System decisions and authoritative documents
+
+**Hardware V1:** fixed, non-actuated head/camera (the whole device can be moved by hand); **no IMU and no physical pan/tilt**. When a target stays inside camera FOV, the screen eyes can follow its eye midpoint; software cannot mechanically turn the camera back after the person leaves the image. Future pan/tilt and optional IMU use the same target/gaze controller via replaceable adapters.
+
+**Behavior V1:** idle → bored → drowsy → asleep, optional night LCD sleep; no spontaneous greetings and no waking merely because a face appears or someone looks at Bot. Wake is always local by **小呆小呆** (or deliberate touch/manual action). Camera may sleep at night; on-device keyword listening remains active. A dedicated four-syllable wake model has **not** yet been provisioned, and end-to-end hardware wake is NOT implemented.
+
+The canonical system specification is **[docs/architecture.md](docs/architecture.md)**. Related ownership-specific sources:
+
+| Document | Owns |
+| --- | --- |
+| [Module contracts and bot_bus](docs/module-contracts.md) | bot_runtime/bot_bus, events, latest snapshots, permissions, freshness |
+| [Passive behavior and night lifecycle](docs/behavior-lifecycle.md) | Idle, bored, drowsy, sleeping, night dark, waking, conversation |
+| [Wake phrase 小呆小呆](docs/wake-word.md) · [identity manifest](shared/bot-identity.json) | Only wake phrase, offline audio, model resource and negative cases |
+| [Eye–head coordination / visual follow](docs/eye-contact.md) | V1 fixed-camera visual correction, future motors and IMU |
+| [Multi-face visual perception](docs/visual-attention.md) | Eye landmarks, pupils, uncertainty, per-person gaze/track time |
+| [Two-mic acoustic DOA](docs/audio-direction.md) | Sound bearing hints and front/back ambiguity; not a wake engine |
+| [Hardware / sensor / power](docs/hardware-power.md) | Real S31 capability, camera exposure, display sleep limits |
+| [Implementation roadmap](docs/implementation-roadmap.md) | Existing versus planned code, integration order and disclosure |
+| [Appearance design](docs/face-design.md) · [LAN discovery](docs/lan-discovery.md) | UI/Face and existing isolated link architecture |
+
+**No CI:** this project is code-first; do not create CI workflows or block implementation on unavailable test hardware. Report build/device verification honestly (see [AGENTS.md](AGENTS.md)).
 
 ## Repository layout
 
@@ -16,7 +38,7 @@ The robot is named **小呆** (Xiao Dai). Its **only production wake phrase is �
 | `firmware/components/face/` | Reusable expression controller, pluggable eye renderers, subtitles and Settings -> Appearance UI |
 | `firmware/components/attention/` | Independent eye-contact geometry: shared gaze direction, head setpoints and confidence gating |
 | `firmware/components/vision_attention/` | On-board-ready multi-face tracking core with separate per-person eye positions, gaze events, fixation times and provisional pupil localization; not camera-integrated yet |
-| `server/` | Cross-platform Python Brain server (macOS/Linux), command queue, optional OpenAI-compatible LLM and safe tools |
+| `server/` | Older Python Brain prototype and new Rust/Tauri `server/bot-server/` discovery console; not yet combined into final speech/LLM service |
 | `shared/` | Canonical theme tokens and documented JSON/HTTP contract |
 | `preview/` | Browser-based interactive face preview; no board required |
 | `tools/` | Generate firmware color header from the shared theme JSON |
@@ -78,6 +100,8 @@ One face API, multiple appearance packs. A pack selects a renderer, colors and m
 ## Roadmap and boundaries
 
 **In this baseline:** LVGL Face component with independent renderers and five installed macaron appearances; two-level Settings → Appearance → Apply navigation with NVS persistence; touch-revealed gear; blinking, shared pupil gaze and subtitle area; a host-testable Attention coordinator that calculates coupled head/gaze targets and refuses false mutual-eye-contact claims; Python Brain HTTP command queues, optional text-model adapter and allowlisted tool registry; optional ESP32 Wi-Fi polling.
+
+**Architecture update:** bot_runtime, bot_bus, attention_manager, head_motion stationary adapter and unified audio/wake modules are documented **but not implemented**. Rust/Tauri LAN server and lan_link are standalone modules not yet app-integrated. The current shipped app still starts LVGL Face plus optional legacy Python Brain polling.
 
 **Vision core now available separately:** [multi-person visual attention specification](docs/visual-attention.md), [vision_attention C component](firmware/components/vision_attention/README.md). Multi-face tracking and candidate iris localization are implemented as independent cores; ESP-DL camera capture and genuine calibrated gaze recognition are still pending.
 
