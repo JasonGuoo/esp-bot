@@ -81,9 +81,9 @@ One face API, multiple appearance packs. A pack selects a renderer, colors and m
 
 Read [face design](docs/face-design.md), [appearance pack contract](shared/appearance-packs.md), [human eye-contact architecture](docs/eye-contact.md), and [device/Brain protocol](shared/protocol.md) before integrating new components.
 
-## Validation
+## Delivery and validation policy
 
-GitHub Actions run Python Brain/palette checks, Node tests for the settings state machine and pluggable browser renderers, plus native C tests for attention geometry. No board-flash/servo/camera validation is claimed.
+This project intentionally has **no CI workflows**. See [AGENTS.md](AGENTS.md). If suitable equipment or a practical runtime is unavailable, development proceeds by delivering modular source code and documenting what has **not** been built, run or validated on real hardware. Existing optional local test code does not constitute device verification.
 
 ## References
 
