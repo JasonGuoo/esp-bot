@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "One coherent color palette applies to the entire face; both eyes share one eye color.",
+  "description": "Appearance packs: renderer implementation, animation profile and coherent colours. A theme is not just a palette; new renderers may define different eyes/assets.",
   "default_theme": "mint",
   "themes": [
     {
@@ -13,7 +13,13 @@
       "subtitle_bg": "#23413D",
       "subtitle_text": "#EDFFF8",
       "chrome": "#84C9B6",
-      "chrome_text": "#E8FFF8"
+      "chrome_text": "#E8FFF8",
+      "renderer": "outline",
+      "motion": {
+        "blink_interval_ms": 3600,
+        "blink_duration_ms": 130,
+        "gaze_smoothing": 4
+      }
     },
     {
       "id": "sakura",
@@ -25,7 +31,13 @@
       "subtitle_bg": "#44303D",
       "subtitle_text": "#FFF1F6",
       "chrome": "#E8A5C0",
-      "chrome_text": "#FFF1F6"
+      "chrome_text": "#FFF1F6",
+      "renderer": "outline",
+      "motion": {
+        "blink_interval_ms": 3600,
+        "blink_duration_ms": 130,
+        "gaze_smoothing": 4
+      }
     },
     {
       "id": "lavender",
@@ -37,7 +49,13 @@
       "subtitle_bg": "#39334F",
       "subtitle_text": "#F8F1FF",
       "chrome": "#B9A6E7",
-      "chrome_text": "#F8F1FF"
+      "chrome_text": "#F8F1FF",
+      "renderer": "outline",
+      "motion": {
+        "blink_interval_ms": 3600,
+        "blink_duration_ms": 130,
+        "gaze_smoothing": 4
+      }
     },
     {
       "id": "butter",
@@ -49,7 +67,13 @@
       "subtitle_bg": "#433A28",
       "subtitle_text": "#FFF8E8",
       "chrome": "#EEC983",
-      "chrome_text": "#FFF8E8"
+      "chrome_text": "#FFF8E8",
+      "renderer": "outline",
+      "motion": {
+        "blink_interval_ms": 3600,
+        "blink_duration_ms": 130,
+        "gaze_smoothing": 4
+      }
     },
     {
       "id": "sky",
@@ -61,7 +85,13 @@
       "subtitle_bg": "#2A4054",
       "subtitle_text": "#F1F9FF",
       "chrome": "#96C8EC",
-      "chrome_text": "#F1F9FF"
+      "chrome_text": "#F1F9FF",
+      "renderer": "outline",
+      "motion": {
+        "blink_interval_ms": 3600,
+        "blink_duration_ms": 130,
+        "gaze_smoothing": 4
+      }
     }
   ]
 }
