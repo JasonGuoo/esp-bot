@@ -1,8 +1,8 @@
 # Attention coordinator — gaze, pan/tilt and human eye contact
 
-Independent C11 component with no LVGL, camera driver, servo driver, Wi-Fi or Brain dependency. The code generates a single target direction and an anatomically coherent head/eyes plan.
+Independent C11 component with no LVGL, camera driver, servo driver, Wi-Fi or Brain dependency. The code generates a single target direction and a coordinated head/eyes plan. **This is NOT a working visual sensor or motor driver; fixed-base V1 and future moving-head modes are separated in [docs/eye-contact.md](../../../docs/eye-contact.md).**
 
-**Current scope:** geometry, confidence/dwell gates, stale-target fallback, joint limits and servo-setpoint rate limits. This is a planning algorithm, **not implemented physical tracking**; camera gaze detection and the motor driver are future modules.
+**Current scope:** geometry, confidence/dwell gates, stale-target fallback, joint limits and servo-setpoint rate limits. The current code is a geometric planner, NOT an integrated camera/eye-gaze pipeline. **V1 hardware has no actuators or IMU:** camera-relative gaze only updates the screen eyes while a selected human stays in view; actual head turns, joint pose and eyes recentering after alignment are FUTURE capability. The existing attention controller API is not yet wired to vision_attention or a stationary-mode application adapter.
 
 1. Camera observation: 2D angular bearing of detected person from the moving camera optical axis, face-detection confidence, plus *independent* person-looking-at-robot estimate (head pose + ocular gaze).
 2. Convert to the robot base frame using measured yaw/pitch and the calibrated camera-to-display optical offset. A static pixel x/y is insufficient when the head moves.
@@ -29,4 +29,14 @@ attention_output_t output = attention_controller_step(
 
 Important: `measured_head` must come from actual servo feedback or a calibrated motion estimate; do not feed commanded angles back as measured pose without caveats. Physical calibration must include camera/screen axis misalignment and close-range parallax. The eventual human-looking-at-robot classifier is independent of simple face detection.
 
-Native CI compile: `cc -std=c11 -Wall -Wextra -Werror -pedantic -Ifirmware/components/attention/include firmware/components/attention/attention.c firmware/components/attention/tests/test_attention.c -lm -o /tmp/a && /tmp/a`.
+**Project delivery:** no CI workflows or CI gates. Optional local sample tests remain in the repository, but code implementation does not depend on running them without a suitable environment (see [AGENTS.md](../../../AGENTS.md)).
+
+## Integration responsibility
+
+- **vision_attention** observes multiple people, including two eye landmarks, provisional pupil features and per-person looking-back evidence.
+- **attention_manager** (not yet implemented) owns the one official human conversation target, not this controller or the visual primary_track_id heuristic.
+- **bot_runtime** authorizes active versus passive tracking. Seeing a person or being looked at does NOT wake 小呆; only complete local phrase 小呆小呆 (or deliberate user action) allows conversational engagement.
+- This Attention module computes a common two-eye gaze output; **face** renders it and must not override it with an idle animation while tracking.
+- Future **head_motion** will consume optional motor setpoints and provide actual pose. Do NOT treat commanded angles as actual feedback; in V1 no mechanical correction is available.
+
+Overall architecture: [docs/architecture.md](../../../docs/architecture.md); contracts: [docs/module-contracts.md](../../../docs/module-contracts.md).
