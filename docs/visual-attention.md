@@ -1,6 +1,6 @@
 # Visual Attention v0.1 — multi-person eyes, gaze and eye contact
 
-**Target:** ESP32-S31-Korvo-1 V1.1 (`esp32s31`), onboard camera; locally processed, independent of network, Brain, LVGL and motors. **Status:** architecture + standalone core API; camera/ESP-DL and real eye-gaze validation are separate hardware integration gates.
+**Target:** ESP32-S31-Korvo-1 V1.1 (esp32s31), onboard camera; local processing independent of network, Brain, LVGL and motors. **Status:** standalone multi-face tracker and pupil candidate code are on main; LIVE camera/ESP-DL capture and true calibrated eye-gaze integration have NOT been implemented or device-tested. See [architecture.md](architecture.md) for the canonical system architecture.
 
 ## Non-negotiable behavior
 
@@ -62,7 +62,7 @@ The public multi-person perception C API lives in `firmware/components/vision_at
 
 ## Temporal policy (initial *tuning targets*, not measured capability)
 
-- Person confirmed after **2 compatible detections**; scan even when no person.
+- Person confirmed after **2 compatible detections**; continue scanning while visual sensing is policy-enabled, even when the current frame has no face. In SLEEPING/NIGHT_DARK, camera capture/inference is deliberately paused and local full-phrase wake remains active.
 - Looking begins after **~350 ms** valid gaze-on-Bot evidence. This avoids starting a conversation from a single accidental glance.
 - Looking ends after **~450 ms** of continuous valid look-away; `UNKNOWN` gaps (blinking or camera frame lost) tolerated for only **~250 ms**. Confirmed look-away and uncertainty use different timers.
 - Consecutive short looks count as separate fixations once separated by confirmed look-away; maintain `continuous_look_ms` and `cumulative_look_ms` **per track**, and emit `LOOK_END` duration.
@@ -78,7 +78,7 @@ The public multi-person perception C API lives in `firmware/components/vision_at
 - Eye contact: the person's **gaze direction** is an estimated ray **from human eyes toward the Bot display**. It is **not** the same as their eye position and cannot be used unmodified as servo direction.
 - Actuation: target ray transformed through calibrated **camera → moving head → pan/tilt axis** transforms; combine with motor encoder/command feedback. Apply screen-camera offset and optical-axis mounting yaw/pitch.
 - Rendering: face eye-pupil position is driven by the **current target ray minus current physical head orientation**; clamp both rendered eyes symmetrically and account for mechanical lag. Don't send camera x directly to `face_set_gaze` while servos turn.
-- Keep a stable primary target with ownership hysteresis: prefer a person establishing mutual gaze, else current person, else nearest/most centered visible face. Changing primary target is a **separate policy**, never a limitation of multi-person sensing.
+- vision_attention may suggest a primary_track_id using a local heuristic, but **attention_manager** is the SOLE authority for the active interaction target and target-switch hysteresis. Prefer maintaining the current conversation participant over switching to someone who happens to stare at Bot. A detected gaze never initiates a conversation by itself.
 - Motion interpolation/prediction must use observed target velocity with bounded prediction horizon, otherwise it will oscillate or “stare past” a moving person.
 
 ### Suggested scheduler — subject to real device profiling
@@ -94,6 +94,15 @@ The public multi-person perception C API lives in `firmware/components/vision_at
 | Freshness for motion commands | <= 200 ms (else freeze/return neutral) |
 
 For N faces, cap work per frame but schedule **fairly across people**. Never permanently run gaze estimation on only one primary person: another person may become the new engaged target. Profile 1/2/3/4 face latency, image size, memory, LVGL interference, and audio coexistence. Full HD crops at 160×120 detector resolution cannot contain reliable pupils; eye ROIs must originate from the full sensor image.
+
+## Runtime and hardware constraints
+
+- **Passive policy:** idle face detections or human eye contact MUST NOT wake or initiate a conversation. Voice wake is the complete phrase **小呆小呆**, handled exclusively by local audio + bot_runtime; see [behavior-lifecycle.md](behavior-lifecycle.md).
+- **Fixed, non-actuated base V1:** the whole robot can be turned/moved, and displayed eyes can follow a human only while face is still inside FOV. There is no physical camera re-aiming and no installed IMU. The eventual pan/tilt+IMU mode belongs to [eye-contact.md](eye-contact.md).
+- **Focus ownership:** retain all person tracks independently; attention_manager selects the one current human. A visual primary_track_id in the current core is a sensor-side *recommendation*, not an instruction to talk or move.
+- **Timestamp and confidence:** camera-relative eye velocity changes when Bot itself moves. Clamp any prediction to a short horizon; preserve observed capture timestamps and mark old snapshots stale.
+- **Visual loss vs interaction loss:** invalid vision means cannot claim eye contact, but runtime may preserve an ongoing audio conversation for a bounded interval. Night pauses frames and should not be misrepresented as NO_FACE.
+- **No-CI project rule:** no new CI/automated verification jobs. Camera, gaze and wake integration require actual hardware/model resources; absence of those resources is not grounds to fake behavior.
 
 ## Camera/eye calibration and physical limitations
 
@@ -116,7 +125,7 @@ For N faces, cap work per frame but schedule **fairly across people**. Never per
 
 ## Implementation phases
 
-**A — core, independent of board (implemented on feature branch; hardware tests pending):** stable multi-face temporal tracker, value-copy output contract, event/duration accounting, grayscale pupil candidate processing, host deterministic tests. This is not yet a working camera-to-gaze pipeline.
+**A — core, independent of board (merged into main; NOT a live perception pipeline):** multi-face temporal tracker, value-copy output contract, per-person event/duration accounting, provisional grayscale pupil-candidate localizer and optional host-side example tests. These are software building blocks, not camera/eye-gaze hardware verification.
 
 **B — S31 acquisition + ESP-DL adapter:** official ESP-IDF 6.1, BSP, `esp_video`, MSR/MNP face detection and five landmarks, then high-res eye crops. Check all source API versions and memory budgets on real hardware.
 
