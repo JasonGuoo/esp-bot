@@ -2,18 +2,20 @@
 
 ESP32-S31-Korvo-1 target. Standalone pure-C component, **not** the existing single-target `attention` motor/face coordination component.
 
-## What is implemented in this branch
+## What is implemented in main (standalone core, not integrated)
 
 - `vision_attention.c`: bounded **four-face** temporal tracker, short-occlusion ID association, independent fixation clocks, looking begin/end events, primary-target selection and frame/camera health state. Coordinates are normalized and timestamps are monotonic.
 - `pupil_candidate.c`: bounded full-resolution GREY8 eye-ROI dark-iris **candidate** localizer for a supplied left/right ESP-DL eye landmark; returns candidate location, relative offset and contrast quality. This cannot identify pupil reliably under glasses, eyelash shadows, low resolution, dim lighting or reflections and MUST NOT alone authorize `LOOKING_AT_BOT`.
 - `include/vision_attention.h`: stable value-copy event/snapshot interface. No dependencies on LVGL, Wi-Fi, Brain, servo or ESP-DL. ESP-IDF CMake component registered.
 - `tests/test_vision_attention.c`: deterministic host tests for multiple IDs/eye contact, independent gaze durations, debounce, blink/UNKNOWN, no face, camera down and pupil candidates.
 
+**Ownership / passive rule:** vision_attention may publish a sensor-side suggested primary_track_id, but the future attention_manager owns the official focus. The presence of a face or gaze at Bot NEVER wakes the passive robot, and without a provisioned local **小呆小呆** keyword model no actual name-based wake is possible. V1 has a stationary camera and **no motor or IMU**; eye position may drive Face only while the selected human remains visible. See [architecture](../../../docs/architecture.md), [gaze control](../../../docs/eye-contact.md) and [behavior lifecycle](../../../docs/behavior-lifecycle.md).
+
 **Not yet implemented / not claimed:** real board camera `esp_video` stream, ESP-DL MSR/MNP inference adapter, robust iris segmentation model, calibrated gaze-on-Bot estimator, TFLite/ESP-DL eye model, servo-to-screen transform, real-device FPS or measured accuracy. The existing single-target `attention` module remains intact.
 
 The very first hardware iteration must connect these adapters before `LOOKING_AT_BOT` can be genuinely assessed. A detected face or dark pupil candidate must never be labeled `eye_contact_valid=true` without independent calibration.
 
-## Host tests (from repo root)
+## Optional local host example tests (no CI; from repo root)
 
 ~~~sh
 cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic \
@@ -63,3 +65,6 @@ Full design, calibration, timing and acceptance criteria: [docs/visual-attention
 If two people cross/fully occlude one another, box-only association is fundamentally ambiguous. The tracker flags close association costs; it does **not** provide re-identification guarantees. Avoid attaching long-term identity or private user profiles to `track_id`. Multiple people may look at Bot concurrently; state and durations remain per person except where the association is ambiguous.
 
 Times are tunable defaults, not measured board latency. For actual eye gaze, the **eye crop must have sufficient pixels**; a face detector operating at 160×120 alone is inadequate.
+
+
+**Project no-CI policy:** Do not add automated CI or assert hardware verification based on optional host code. The camera/ESP-DL adapter, calibrated eye-contact inference and real-time head motion remain unimplemented.
