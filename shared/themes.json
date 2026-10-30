@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "description": "One coherent color palette applies to the entire face; both eyes share one eye color.",
+  "default_theme": "mint",
+  "themes": [
+    {
+      "id": "mint",
+      "name": "Mint",
+      "name_zh": "薄荷绿",
+      "background": "#142423",
+      "eye": "#A8E8D6",
+      "pupil": "#A8E8D6",
+      "subtitle_bg": "#23413D",
+      "subtitle_text": "#EDFFF8",
+      "chrome": "#84C9B6",
+      "chrome_text": "#E8FFF8"
+    },
+    {
+      "id": "sakura",
+      "name": "Sakura",
+      "name_zh": "樱花粉",
+      "background": "#281D28",
+      "eye": "#F5B7CE",
+      "pupil": "#F5B7CE",
+      "subtitle_bg": "#44303D",
+      "subtitle_text": "#FFF1F6",
+      "chrome": "#E8A5C0",
+      "chrome_text": "#FFF1F6"
+    },
+    {
+      "id": "lavender",
+      "name": "Lavender",
+      "name_zh": "香芋紫",
+      "background": "#211D32",
+      "eye": "#D4C2FB",
+      "pupil": "#D4C2FB",
+      "subtitle_bg": "#39334F",
+      "subtitle_text": "#F8F1FF",
+      "chrome": "#B9A6E7",
+      "chrome_text": "#F8F1FF"
+    },
+    {
+      "id": "butter",
+      "name": "Butter",
+      "name_zh": "奶油黄",
+      "background": "#282419",
+      "eye": "#FFE2A1",
+      "pupil": "#FFE2A1",
+      "subtitle_bg": "#433A28",
+      "subtitle_text": "#FFF8E8",
+      "chrome": "#EEC983",
+      "chrome_text": "#FFF8E8"
+    },
+    {
+      "id": "sky",
+      "name": "Sky",
+      "name_zh": "天空蓝",
+      "background": "#172536",
+      "eye": "#B3DCFC",
+      "pupil": "#B3DCFC",
+      "subtitle_bg": "#2A4054",
+      "subtitle_text": "#F1F9FF",
+      "chrome": "#96C8EC",
+      "chrome_text": "#F1F9FF"
+    }
+  ]
+}

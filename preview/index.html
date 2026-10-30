@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP Bot · Face Lab</title>
+<style>
+:root{color-scheme:light;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+*{box-sizing:border-box}body{margin:0;background:#f5f6fa;color:#273244}main{width:min(1100px,94vw);margin:32px auto 60px}
+header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}h1{margin:0;font-size:clamp(25px,4vw,38px);font-weight:750;letter-spacing:-.05em}
+p{color:#667185}header p{margin:9px 0 22px}.hint{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#768399}
+.frame{background:#fff;border:1px solid #e3e6ee;padding:12px;border-radius:24px;box-shadow:0 20px 60px #1c243315}
+.screen{border-radius:15px;overflow:hidden;aspect-ratio:5/3;position:relative;background:var(--bg,#142423);transition:background .35s}
+.screen svg{width:100%;height:100%;display:block}
+.screen svg .eyes>*{transition:all .24s ease}
+#settings-gear{opacity:0;transition:opacity .2s;cursor:pointer} .screen.touch #settings-gear{opacity:1}
+#sub-bg{opacity:0;transition:opacity .2s}#sub-text{opacity:0;transition:opacity .2s} .screen.has-sub #sub-bg,.screen.has-sub #sub-text{opacity:1}
+#screen-menu{display:none;position:absolute;right:6%;top:17%;width:250px;max-width:75%;padding:16px;border-radius:16px;background:#ffffffef;color:#273244;box-shadow:0 16px 48px #0005;font-size:14px}
+#screen-menu.open{display:block}#screen-menu h3{margin:0 0 10px}#screen-menu p{font-size:13px;margin:5px 0}
+.controls{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:22px}
+section{background:#fff;border-radius:20px;border:1px solid #e7e9ef;padding:22px;box-shadow:0 6px 20px #26345007}
+section h2{margin:0 0 14px;font-size:16px;letter-spacing:-.01em}
+.options{display:flex;flex-wrap:wrap;gap:8px}
+button{background:#f5f6f9;border:1px solid #dfe3ec;border-radius:11px;padding:9px 12px;cursor:pointer;font:inherit;color:#344154}
+button:hover{border-color:#9eacc0}button.active{background:#e7eaf4;border:2px solid #647b9c;padding:8px 11px}
+button.theme{display:flex;align-items:center;gap:8px}.dot{width:18px;height:18px;border-radius:50%;display:inline-block;border:2px solid #ffffff80;box-shadow:0 0 0 1px #0001}
+.field{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}
+input[type=range]{flex:1;min-width:100px}input[type=text]{width:100%;padding:11px;border:1px solid #dbe0e9;border-radius:11px;font:inherit}
+small{display:block;color:#758196;margin-top:12px;line-height:1.6}code{background:#eef0f7;border-radius:5px;padding:2px 5px}
+@media(max-width:700px){.controls{grid-template-columns:1fr}section{padding:16px}.frame{padding:6px;border-radius:17px}}
+</style>
+</head>
+<body>
+<main>
+<header><div><div class="hint">ESP BOT / FACE LAB · V0.1</div><h1>眼睛，就是它的表情。</h1><p>五套完整马卡龙主题 · 一套可复用的动态表情</p></div><p>屏幕模拟 · 800 × 480 · 点击屏幕显示设置</p></header>
+<div class="frame">
+<div class="screen" id="screen">
+<svg viewBox="0 0 800 480" role="img" aria-label="ESP Bot expression preview">
+<g id="eyes" class="eyes"></g>
+<g id="mouth"></g>
+<rect id="sub-bg" x="58" y="395" width="684" height="60" rx="26"/>
+<text id="sub-text" x="400" y="432" font-size="28" font-family="system-ui,sans-serif" text-anchor="middle"></text>
+<g id="settings-gear" transform="translate(752 42)"><circle r="28" fill="none" stroke="currentColor" stroke-width="1.8" opacity=".32"/><path d="M -8 -3 l-5 -3 3 -5 5 2 3 -5 h6 l2 5 5 2 3 5 -4 3 v6 l4 3 -3 5 -5 -2 -3 5 h-6 l-2 -5 -5 -2 -3 -5 4 -3z" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linejoin="round"/><circle r="4.4" fill="none" stroke="currentColor" stroke-width="2"/></g>
+</svg>
+<div id="screen-menu"><h3>设置 · Settings</h3><p>配色：<span id="menu-theme">Mint</span></p><p>Brain：未连接（预览模式）</p><p>Wi-Fi / 蓝牙发现：后续阶段</p></div>
+</div>
+</div>
+<div class="controls">
+<section><h2>01 / 主题 Theme</h2><div id="themes" class="options"></div><small>切换主题会同时替换背景、双眼、字幕和设置图标的颜色；不是左右眼两种颜色。</small></section>
+<section><h2>02 / 表情 Expression</h2><div id="expressions" class="options"></div><small>正常状态没有嘴；仅惊讶显示一个小点，害羞出现一条很短的曲线。</small></section>
+<section><h2>03 / 注视与眨眼</h2><div class="field"><label for="gx">左右</label><input type="range" id="gx" min="-100" max="100" value="0"><output id="gxval">0</output></div><div class="field"><label for="gy">上下</label><input type="range" id="gy" min="-100" max="100" value="0"><output id="gyval">0</output></div><div class="field"><button id="blink">眨一下眼</button><button id="reset">恢复居中</button></div></section>
+<section><h2>04 / 字幕 Subtitle</h2><input id="subtitle" type="text" maxlength="70" placeholder="输入文字，模拟 Brain 发来的字幕"><div class="field"><button id="demo">演示一句话</button><button id="clear">清空字幕</button></div><small>屏幕底部只显示字幕，不显示整段聊天记录。固件默认字体可能需要增加中文字符集。</small></section>
+</div>
+</main>
+<script>
+"use strict";
+const states=[["idle","待机"],["listening","倾听"],["happy","开心"],["curious","好奇"],["thinking","思考"],["surprised","惊讶"],["sleepy","困倦"],["shy","害羞"],["blink","眨眼"]];
+let palettes=[], palette=null, emotion="idle", gazeX=0, gazeY=0, revealTimer=0;
+const $=id=>document.getElementById(id);
+const escapeXml=s=>String(s).replace(/[&<>"]/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[ch]));
+function eye(cx,cy,w,h,type,color,dx,dy){
+ const stroke=20;
+ if(type==="slit")return '<path d="M '+(cx-w*.36)+' '+(cy+12)+' Q '+cx+' '+(cy+22)+' '+(cx+w*.36)+' '+(cy+12)+'" fill="none" stroke="'+color+'" stroke-width="17" stroke-linecap="round"/>';
+ if(type==="happy")return '<path d="M '+(cx-w*.43)+' '+(cy+24)+' Q '+cx+' '+(cy-h*.80)+' '+(cx+w*.43)+' '+(cy+24)+'" fill="none" stroke="'+color+'" stroke-width="'+stroke+'" stroke-linecap="round"/>';
+ const x=cx-w/2,y=cy-h/2,rx=Math.min(w,h)*.43;
+ return '<rect x="'+x+'" y="'+y+'" width="'+w+'" height="'+h+'" rx="'+rx+'" fill="none" stroke="'+color+'" stroke-width="'+stroke+'"/>'+
+ '<circle cx="'+(cx+dx)+'" cy="'+(cy+dy)+'" r="12" fill="'+color+'"/>';
+}
+function render(){
+ if(!palette)return;
+ const sc=$("screen");sc.style.setProperty("--bg",palette.background);
+ const E=palette.eye;
+ let L="open",R="open",lw=146,rw=146,lh=134,rh=134,ly=212,ry=212;
+ if(emotion==="happy"){L="happy";R="happy"}
+ if(emotion==="sleepy"||emotion==="blink"){L="slit";R="slit"}
+ if(emotion==="curious"){rw=134;rh=105;ry=222}
+ if(emotion==="thinking"){R="slit";ry=206}
+ if(emotion==="surprised"){lw=160;rw=160;lh=154;rh=154}
+ if(emotion==="shy"){L="happy";R="happy";ry+=7}
+ const dx=gazeX*.23,dy=gazeY*.18;
+ $("eyes").innerHTML=eye(255,ly,lw,lh,L,E,dx,dy)+eye(545,ry,rw,rh,R,E,dx,dy);
+ $("mouth").innerHTML=emotion==="surprised"?'<circle cx="400" cy="298" r="9" fill="'+E+'"/>':emotion==="shy"?'<path d="M 390 301 Q 400 308 410 301" fill="none" stroke="'+E+'" stroke-width="7" stroke-linecap="round"/>':"";
+ $("sub-bg").setAttribute("fill",palette.subtitle_bg);
+ $("sub-text").setAttribute("fill",palette.subtitle_text);
+ $("settings-gear").style.color=palette.chrome;
+ $("menu-theme").textContent=palette.name;
+ const subtitle=$("subtitle").value;
+ $("sub-text").textContent=subtitle.length>38?subtitle.slice(0,37)+"…":subtitle;
+ sc.classList.toggle("has-sub",!!subtitle);
+ Array.from(document.querySelectorAll("[data-theme]")).forEach(b=>b.classList.toggle("active",b.dataset.theme===palette.id));
+ Array.from(document.querySelectorAll("[data-emotion]")).forEach(b=>b.classList.toggle("active",b.dataset.emotion===emotion));
+}
+function revealSettings(){
+ $("screen").classList.add("touch");clearTimeout(revealTimer);
+ revealTimer=setTimeout(()=>{if(!$("screen-menu").classList.contains("open"))$("screen").classList.remove("touch");},6500);
+}
+$("screen").addEventListener("click",e=>{
+ if(e.target.closest("#screen-menu"))return;
+ if(e.target.closest("#settings-gear")){$("screen-menu").classList.toggle("open");revealSettings();return;}
+ $("screen-menu").classList.remove("open");revealSettings();
+});
+$("gx").addEventListener("input",e=>{gazeX=Number(e.target.value);$("gxval").textContent=gazeX;render()});
+$("gy").addEventListener("input",e=>{gazeY=Number(e.target.value);$("gyval").textContent=gazeY;render()});
+$("subtitle").addEventListener("input",render);
+$("reset").onclick=()=>{$("gx").value=$("gy").value=0;gazeX=gazeY=0;$("gxval").textContent=$("gyval").textContent="0";render()};
+$("clear").onclick=()=>{$("subtitle").value="";render()};
+$("demo").onclick=()=>{$("subtitle").value="你好，我听到你啦！";emotion="happy";render()};
+$("blink").onclick=()=>{const save=emotion;emotion="blink";render();setTimeout(()=>{emotion=save;render()},155)};
+async function init(){
+ try{
+ const res=await fetch("../shared/themes.json");
+ if(!res.ok)throw new Error("HTTP "+res.status);
+ palettes=(await res.json()).themes;palette=palettes[0];
+ for(const p of palettes){const b=document.createElement("button");b.className="theme";b.dataset.theme=p.id;b.innerHTML='<span class="dot" style="background:'+p.eye+'"></span>'+escapeXml(p.name_zh);b.onclick=()=>{palette=p;render()};$("themes").appendChild(b)}
+ for(const [id,label] of states){const b=document.createElement("button");b.dataset.emotion=id;b.textContent=label;b.onclick=()=>{emotion=id;render()};$("expressions").appendChild(b)}
+ render();
+ }catch(err){$("themes").textContent="主题读取失败：请在仓库根目录运行 python3 -m http.server 8765，而不是直接双击 HTML。 "+err}
+}
+init();
+</script>
+</body>
+</html>
