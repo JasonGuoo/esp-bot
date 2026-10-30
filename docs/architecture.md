@@ -2,14 +2,24 @@
 
 **This is the canonical overall architecture.** Older descriptions of the first Python Brain/Face demo are historical implementation snapshots, not competing design authorities. For event schemas use [module-contracts.md](module-contracts.md); for passive UX use [behavior-lifecycle.md](behavior-lifecycle.md); for concrete sensor/actuator boundaries use [eye-contact.md](eye-contact.md) and [hardware-power.md](hardware-power.md).
 
+## 0. Updated strategic direction — Local-First Hybrid Brain (2026-10-30)
+
+The existing behavioral/sensor ownership rules below remain canonical. The deployment and hardware **target** has changed: *reuse successful open-source hardware/software modules* rather than reimplement them. [Full architecture](local-first-hybrid-brain.md); [projects and licenses](upstream-reuse-catalog.md).
+
+- **Server priority:** Rust/Tauri bot-server running on **Apple M4 Pro Mac, 48 GB unified memory**; local ASR, LLM and TTS **first**, ideally through existing HF Speech-to-Speech/MLX processes; internet search can run on Mac, cloud only if authorized. Python Brain remains legacy.
+- **Bluetooth fallback required:** secure Mac↔Bot BLE onboarding/configuration and low-bandwidth app link while Wi-Fi is not configured. Compressed voice over BLE is a performance-gated experiment; Wi-Fi remains primary for low-latency full speech and images.
+- **Reuse S31 board port:** 78/xiaozhi-esp32 has the *exact* S31 Korvo-1 V1.1 board port; official BSP/ESP-SR/ESP-GMF/codec devices take priority over new drivers.
+- **Physical direction:** the present V1 hardware is fixed with no motor. The *next enclosure* should be attractive and **off-the-shelf 2-axis pan/tilt**, with real external loudspeakers driven by the board's existing two 3 W PA outputs. This is a desired hardware build, not installed motors/IMU. Safety contracts and honest capability flags remain mandatory.
+- Bot always owns passive behavior and local complete-phrase wake. No ambient pre-wake audio to Mac; no remote per-frame gaze/motor actuation.
+
 ## 1. Product / hardware decisions
 
 - Name: **小呆**; ONLY full spoken keyword **小呆小呆** wakes from passive behavior. Single 小呆, mere face presence, eye contact and arbitrary human chatter do not initiate interaction. [wake-word.md](wake-word.md); [identity manifest](../shared/bot-identity.json).
 - Personality: quiet passive companion. IDLE → BORED → DROWSY → SLEEPING, NIGHT_DARK when appropriate. Never give unsolicited greetings. Local wake audio must remain available with display/camera off.
-- V1 physical configuration: **ESP32-S31-Korvo-1 V1.1; stationary non-actuated head** with board camera, two microphones, touch LCD, speaker; user may move or rotate entire Bot. No installed IMU, motor, absolute compass or pose feedback.
+- Currently installed V1 physical configuration: **ESP32-S31-Korvo-1 V1.1; stationary non-actuated head** with board camera, two microphones, touch LCD, speaker; user may move or rotate entire Bot. No installed IMU, motor, absolute compass or pose feedback.
 - **Vision-first:** when engaged, perceive multiple faces, retain one officially selected human, align **both displayed eyes** with human eye midpoint using the current camera-relative observation. No physical re-aiming of camera is possible in V1.
-- Future: pan/tilt hardware and optional 6-axis IMU replace/extend adapters; one gaze controller and one target selector remain owners. No promise of arbitrary-orientation stabilization by an unactuated camera.
-- **Mac/Linux target server:** Rust + Tauri Bot Server handles connection/UI and eventually ASR/LLM/TTS/tools. Device must wake/animate and follow a visually present target without depending on server availability.
+- Next physical design target: off-the-shelf pan/tilt hardware with enclosed speakers; optional 6-axis IMU via adapters. One gaze controller and one target selector remain owners. This is planned, not installed. No promise of arbitrary-orientation stabilization by an unactuated camera.
+- **Primary Mac target server:** Rust + Tauri Bot Server on M4 Pro / 48 GB handles connection/UI and coordinates local ASR/LLM/TTS/tool sidecars. Mac-first is a design decision, not an implemented AI endpoint. Device must wake/animate and follow a visually present target without depending on server availability.
 - **No CI:** deliver modular code without artificial validation infrastructure when hardware/environment unavailable; never claim unverified features are working.
 
 ## 2. Authority: local behavior master, bus and server

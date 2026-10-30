@@ -4,6 +4,14 @@
 
 Product requirement: passive companion with **local always-listening full phrase 小呆小呆**, application sleep/black screen at night, vision-first gaze follow and optional future pan/tilt and IMU.
 
+## New physical direction (2026-10-30)
+
+**Current installed board remains stationary. The preferred next build** is an attractive, fully enclosed, **off-the-shelf pan/tilt head with external speakers**; do not design an entirely new PCB or servo mechanism before reviewing ready-made bracket kits, official CAD and known-good servo controllers. This is an aspirational *mechanical assembly*, not a claim that pan/tilt/feedback exists now.
+
+**Important existing hardware**: official V1.1 board already includes an ES8389 stereo audio codec, **two NS4150B class-D power amplifiers**, and **two 2.00 mm pitch speaker outputs each for 4 Ω / 3 W speaker**, so only appropriate loudspeakers/wiring/acoustic vents need selecting, not an additional amplifier PCB. Confirm power rail headroom, ground arrangement, connector polarity, clearance and acoustics before mounting servos and loudspeakers. Servo supply **must not** be taken from an arbitrary ESP GPIO / unverified 3.3 V rail. Prefer a properly rated external servo rail, common signal ground and overcurrent/safe-stop behavior.
+
+Official hardware guide includes PCB dimension PDF + DXF and **S31 V1.1 STL/STEP printable case files**: [Espressif board user guide](https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s31/esp32-s31-korvo-1/user_guide.html). The vendor enclosure is a starting geometry, **not** guaranteed to attach to any commodity pan/tilt assembly without a separate bracket. Mechanical fit needs checking.
+
 ## 1. Board evidence (do not confuse S31 with S3)
 
 - Espressif [S31 BSP README](https://github.com/espressif/esp-bsp/tree/master/bsp/esp32_s31_korvo_1) documents OV3660 camera and the audio codec / dual microphone path. Confirm the populated sensor module before choosing registers/driver; real boards/revisions may differ.

@@ -4,17 +4,29 @@
 
 > Hardware target is **ESP32-S31-Korvo-1 V1.1** (ESP32-S31), **not** ESP32-S3-Korvo-1. The S31 board has an 800×480 RGB display and GT1151 touch panel. Use ESP-IDF 6.1 / `esp32s31`, not `esp32s3`.
 
+## New project direction: reuse-first + Mac-first (2026-10-30)
+
+**小呆 now prioritizes mature open-source modules rather than recreating audio, media, hardware or inference stacks.** Our **M4 Pro / 48 GB Mac with Rust/Tauri `server/bot-server`** is the primary local AI Brain. The device favors secure Wi-Fi mDNS, with **Bluetooth (BLE) Mac provisioning and control fallback** when Wi-Fi is unconfigured or offline. Mac-local STT/LLM/TTS is the default; cloud models/search are optional and permission-controlled. **All device-local wake/behavior stays independent of Mac availability.**
+
+The **new physical target** is a good-looking enclosed **pan/tilt** head with integrated external loudspeakers using off-the-shelf mechanical parts. The *current* physical prototype remains unactuated until hardware has been chosen/installed. Korvo-1 already has **two integrated 3 W speaker amplifiers**; select compatible speakers and wiring rather than another audio amplifier.
+
+- **[Local-First Hybrid Brain: canonical new deployment + BLE fallback](docs/local-first-hybrid-brain.md)**
+- **[Upstream reuse catalog: verified project links, ports, licenses, adoption priorities](docs/upstream-reuse-catalog.md)**
+- **[Current system authority / behavior architecture](docs/architecture.md)**
+
+**Status:** These are updated decisions and research. No claims of compiled BLE, working local Mac speech engine, motor assembly or production secure pairing.
+
 ## Identity and wake-word policy
 
 The robot is named **小呆** (Xiao Dai). Its **only production wake phrase is 小呆小呆**, recognized as one complete four-syllable on-device keyword. A single 小呆 must not wake it. A screen-off night state still keeps the local wake listener active. See [wake-word specification](docs/wake-word.md) and [shared identity manifest](shared/bot-identity.json). **The dedicated keyword model and wake integration are not yet provisioned or hardware-validated**; merely setting the display name does not enable custom wake recognition.
 
 ## System decisions and authoritative documents
 
-**Hardware V1:** fixed, non-actuated head/camera (the whole device can be moved by hand); **no IMU and no physical pan/tilt**. When a target stays inside camera FOV, the screen eyes can follow its eye midpoint; software cannot mechanically turn the camera back after the person leaves the image. Future pan/tilt and optional IMU use the same target/gaze controller via replaceable adapters.
+**Hardware currently installed:** fixed, non-actuated head/camera (the whole device can be moved by hand); **no IMU and no physical pan/tilt yet**. A new off-the-shelf enclosed pan/tilt build is now the physical target. When a target stays inside camera FOV, the screen eyes can follow its eye midpoint; software cannot mechanically turn the camera back after the person leaves the image. Future pan/tilt and optional IMU use the same target/gaze controller via replaceable adapters.
 
 **Behavior V1:** idle → bored → drowsy → asleep, optional night LCD sleep; no spontaneous greetings and no waking merely because a face appears or someone looks at Bot. Wake is always local by **小呆小呆** (or deliberate touch/manual action). Camera may sleep at night; on-device keyword listening remains active. A dedicated four-syllable wake model has **not** yet been provisioned, and end-to-end hardware wake is NOT implemented.
 
-The canonical system specification is **[docs/architecture.md](docs/architecture.md)**. Related ownership-specific sources:
+The canonical system ownership specification is **[docs/architecture.md](docs/architecture.md)**, with deployment/provider/Bluetooth policy in **[docs/local-first-hybrid-brain.md](docs/local-first-hybrid-brain.md)**. Related ownership-specific sources:
 
 | Document | Owns |
 | --- | --- |
