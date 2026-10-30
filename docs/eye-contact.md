@@ -31,6 +31,7 @@ The **Attention** module is the owner of target acquisition, alignment and contr
 
 - Standard convention: **positive yaw = robot's right**, positive pitch = **up**. LCD eye y is positive downward; a target above the robot maps to a negative eye y. An x/y target from the camera is NOT directly usable after the head turns.
 - Vision converts pixel offsets into camera-relative bearings using camera intrinsics (focal length/field of view); at large off-axis angles use calibrated projection, not a naive normalized fraction.
+- The preferred visual target is the **midpoint between the person's eyes** (from stable face landmarks), not the torso, an arbitrary bounding-box corner or a second independent target for each robot pupil. When landmarks are unreliable, degrade confidence rather than guessing.
 - Moving camera bearings transform into fixed robot-base bearings using measured head yaw/pitch and calibrated camera-to-face boresight offsets. Head actual/estimated angle is mandatory; a motor command is not proof of motion.
 - For accurate 3D geometry, implement rigid camera extrinsics, full rotations, and distance/parallax correction (camera is not at the midpoint of the drawn eyes). The current controller uses a small-angle additive yaw/pitch approximation. Validate limitations on the real prototype before claiming precise eye contact.
 - Assign one track ID to the active person. The future Vision target selector should use confidence and hysteresis so the bot does not rapidly switch between multiple faces.
