@@ -1,5 +1,7 @@
 # ESP Bot Brain protocol v1 (HTTP / JSON)
 
+> **LEGACY PROTOTYPE / NOT THE SELECTED FINAL SERVER PROTOCOL.** This document describes the early Python Brain and its ESP HTTP polling client. The selected future design is Rust/Tauri bot-server with separate firmware lan_link; currently those components are isolated and **do not yet** carry ASR/LLM/TTS or eye/head control. The canonical ownership rules are in [docs/architecture.md](../docs/architecture.md) and [docs/module-contracts.md](../docs/module-contracts.md). Remote legacy `face.set` is for manual/demo updates; it must never override on-device active tracking, local wake or actuator safety.
+
 Scope: a minimal working LAN command protocol. ESP32 **polls** the Brain, which keeps an in-memory queue per device. This is a transport boundary, not an audio/video protocol.
 
 ## Security
@@ -64,9 +66,9 @@ Commands are removed from the queue on polling and are **not durable**; delivery
 
 The Brain's tool registry only executes **registered named functions** with validated parameters. Initial examples: `clock.utc`, `math.add`. LLM automatic tool selection, user consent policies and external MCP providers are future milestones.
 
-### Discovery (planned)
+### Discovery (separate modules exist, NOT integrated with this HTTP prototype)
 
-Wi-Fi discovery via mDNS/UDP, secure pairing and BLE provisioning are **not implemented** in this version. For the first integration, configure a fixed `Brain URL` on the ESP32 via ESP-IDF menuconfig. The touch-revealed gear opens a full-screen **Settings** menu, then **Appearance**, where the user selects a candidate and taps **Apply** to return to the face. This menu does not pretend Bluetooth or Wi-Fi discovery has been implemented.
+This **legacy polling client** still uses a configured fixed Brain URL. A separate mDNS/WebSocket discovery implementation exists in `firmware/components/lan_link` and `server/bot-server`, but has not replaced this HTTP path or provided secure pairing. See [docs/lan-discovery.md](../docs/lan-discovery.md) and [shared/lan-discovery-v1.md](lan-discovery-v1.md). For the legacy prototype only, configure a fixed `Brain URL` on the ESP32 via ESP-IDF menuconfig. The touch-revealed gear opens a full-screen **Settings** menu, then **Appearance**, where the user selects a candidate and taps **Apply** to return to the face. This menu does not pretend Bluetooth or Wi-Fi discovery has been implemented.
 
 
 ### Human eye-contact integration (future, NOT in this HTTP API yet)
