@@ -2,7 +2,7 @@
 #include "face_renderer.h"
 #include <stdlib.h>
 
-typedef enum { MODE_OPEN, MODE_ARCH, MODE_SLIT } mode_t;
+typedef enum { MODE_OPEN, MODE_ARCH, MODE_SLIT } eye_mode_t;
 typedef struct {
     lv_obj_t *root;
     lv_obj_t *outer[2], *inner[2], *pupil[2], *mask[2], *slit[2];
@@ -49,7 +49,7 @@ static void *create(lv_obj_t *parent) {
 }
 
 static void eye(outline_t *r, int i, int cx, int cy, int w, int h,
-                mode_t mode, int dx, int dy, int stroke) {
+                eye_mode_t mode, int dx, int dy, int stroke) {
     const bool slit = mode == MODE_SLIT, arch = mode == MODE_ARCH;
     show(r->outer[i], !slit);
     show(r->inner[i], !slit);
@@ -96,7 +96,7 @@ static void render(void *instance, const face_theme_t *theme,
     int stroke = clamp(mini(ew, eh) / 7, 3, 23);
     int cx1 = width * 32 / 100, cx2 = width * 68 / 100, cy = height * 44 / 100;
     int rw = ew, rh = eh, ry = cy, lw = ew, lh = eh;
-    mode_t left = MODE_OPEN, right = MODE_OPEN;
+    eye_mode_t left = MODE_OPEN, right = MODE_OPEN;
     switch (state->expression) {
         case FACE_EX_HAPPY:
         case FACE_EX_SHY: left = MODE_ARCH; right = MODE_ARCH; break;
