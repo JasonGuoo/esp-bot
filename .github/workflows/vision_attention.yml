@@ -1,0 +1,27 @@
+name: vision attention core
+on:
+  pull_request:
+    paths:
+      - "firmware/components/vision_attention/**"
+      - ".github/workflows/vision_attention.yml"
+  push:
+    branches: [main]
+    paths:
+      - "firmware/components/vision_attention/**"
+      - ".github/workflows/vision_attention.yml"
+permissions:
+  contents: read
+jobs:
+  native-c:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and run independent tracking tests
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror -pedantic \
+            -Ifirmware/components/vision_attention/include \
+            firmware/components/vision_attention/vision_attention.c \
+            firmware/components/vision_attention/pupil_candidate.c \
+            firmware/components/vision_attention/tests/test_vision_attention.c \
+            -lm -o /tmp/vision_attention_test
+          /tmp/vision_attention_test
