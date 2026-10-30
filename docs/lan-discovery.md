@@ -41,3 +41,7 @@ Internet discovery, BLE, LLM, ASR, TTS, face or motor integration in this work.
   execution. **No board or end-to-end tests have been performed here.**
 - Guest Wi-Fi, access-point client isolation and VPNs may block mDNS.
   This is a development transport, not authenticated pairing.
+
+## 2026-10-30 next-transport decision (not implemented)
+
+[Local-First Hybrid Brain](local-first-hybrid-brain.md) supersedes the LAN-only **scope** of this v1 implementation for future work. Existing Rust/Tauri mDNS + WS and firmware lan_link remain valid, standalone **Wi-Fi** components. Future additions, in separate modules, will add **secure Mac BLE provisioning + Wi-Fi onboarding and a low-bandwidth BLE control fallback**, using Espressif maintained provisioning rather than another homemade setup stack. Local-first/MLX speech on the Mac remains the default; Bluetooth audio is a measured optional extension and is not a solved feature. See [reuse catalog](upstream-reuse-catalog.md).

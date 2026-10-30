@@ -2,15 +2,21 @@
 
 **Scope:** implementation sequencing for passive desktop robot 小呆 on ESP32-S31-Korvo-1 V1.1. This is a plan, NOT a claim that unintegrated modules already work. The user specifically requires **NO CI**; when hardware/model/build environment is absent, deliver modular code and mark unverified behavior instead of adding testing pipelines.
 
+## New reuse-first integration priority (2026-10-30)
+
+**Strategic revision:** [Local-First Hybrid Brain](local-first-hybrid-brain.md) and [upstream reuse catalog](upstream-reuse-catalog.md) take precedence for *how* speech, media, pairing and hardware are implemented. **Mac M4 Pro 48 GB + Rust/Tauri bot-server is the preferred AI execution host**. Reuse XiaoZhi's existing exact S31-Korvo board support, ESP-SR/GMF and HF Speech-to-Speech on MLX before writing equivalents. BLE pairing/Wi-Fi onboarding + degraded control is required. **Mechanical target** is now an attractive off-the-shelf enclosed 2-axis head with speakers; currently no motors are installed. Do not confuse proposed devices with hardware validation.
+
+Before adding custom audio/motor/transport code: identify upstream equivalent, document its license/version and integrate via adapter when possible. Preserve single ownership of mic, Face, attention and runtime. No CI.
+
 ## 1. Product constraints locked
 
 1. Passive/quiet by default: occasional blink → bored → drowsy → sleeping; at night attempt fully dark LCD; **no unsolicited greeting**.
 2. Device-local full-phrase wake **小呆小呆** only. Bare 小呆 and incidental faces/sounds do NOT wake or initiate conversation.
-3. V1 **fixed, non-actuated** head/camera that can be lifted, rotated or tilted by a human; **no IMU**, no compass or room coordinate map.
+3. Currently installed V1 **fixed, non-actuated** head/camera that can be lifted, rotated or tilted by a human; **no IMU**, no compass or room coordinate map.
 4. V1 vision-first rendering: track a chosen person's **eye midpoint**, keep bot's rendered eyes jointly aimed while target remains visible. **Cannot physically turn camera** in V1.
 5. Vision tracks multiple faces independently; actual conversation target selection belongs to attention_manager. Actual human look-at-Bot inference is distinct from "eyes are located at x/y".
 6. Future head pan/tilt and optional IMU must plug into the same attention controller, rather than owning a second target selector.
-7. Mac/Linux Rust/Tauri Bot Server supplies later ASR/LLM/TTS/tools. Local wake/gaze must survive offline.
+7. **Mac M4 Pro / 48 GB Rust/Tauri Bot Server**, with **reused local AI sidecars**, is the prioritized ASR/LLM/TTS/tool provider; secure BLE provisioning/backup comes before cloud dependency. Local wake/gaze must survive offline.
 8. Audio before wake remains local and transient; no default uploads. No CI.
 
 See [architecture.md](architecture.md) for canonical module ownership, [module-contracts.md](module-contracts.md) for events, [behavior-lifecycle.md](behavior-lifecycle.md), [wake-word.md](wake-word.md), [eye-contact.md](eye-contact.md) and [audio-direction.md](audio-direction.md).
@@ -66,7 +72,7 @@ No live wake-on-name, camera gaze, DOA localization, sleeping physical blackout 
 - Optionally correlate speaking face with sound when reliable; preserve ambiguity for multiple speakers and linear-array front/back uncertainty.
 - Add better per-person calibrated eye gaze and interaction UX after real-world dataset evidence.
 
-### P5 — future actuated pan/tilt and optional IMU
+### P5 — targeted off-the-shelf actuated pan/tilt and optional IMU (not yet installed)
 - Replace stationary adapter with actual feedback/limit-aware servo driver.
 - Extend attention from relative camera error to full coordinated eye–head plans: eyes lead, head follows, eyes recenter **only when physical head aligns**.
 - Compensate head's own camera motion using measured joint pose. If IMU is added, enhance short-term disturbance rejection, but visual feedback remains corrective and authoritative.
