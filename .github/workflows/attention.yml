@@ -1,0 +1,18 @@
+name: Native C attention coordinator
+on:
+  push:
+  pull_request:
+jobs:
+  attention:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile standalone spatial gaze module (C11)
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic \
+            -Ifirmware/components/attention/include \
+            firmware/components/attention/attention.c \
+            firmware/components/attention/tests/test_attention.c \
+            -lm -o /tmp/espbot_attention_test
+      - name: Run native gaze/head safety and stale-target tests
+        run: /tmp/espbot_attention_test
