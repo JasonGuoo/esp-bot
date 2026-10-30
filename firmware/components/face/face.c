@@ -231,7 +231,7 @@ face_view_t *face_create(lv_obj_t *parent) {
     f->caption_bar = shape(f->root);
     lv_obj_set_style_radius(f->caption_bar, 25, 0);
     f->caption = lv_label_create(f->root);
-    lv_label_set_long_mode(f->caption, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(f->caption, LV_LABEL_LONG_MODE_DOTS);
     lv_label_set_text(f->caption, "");
     lv_obj_set_style_text_align(f->caption, LV_TEXT_ALIGN_CENTER, 0);
     show(f->caption_bar, false);
