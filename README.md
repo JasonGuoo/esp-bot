@@ -11,6 +11,7 @@ A stationary, expressive desktop companion: **ESP32-S31-Korvo-1** provides the e
 | `firmware/` | ESP-IDF device program; official S31 Korvo-1 BSP, reusable LVGL face component, Wi-Fi Brain client |
 | `firmware/components/face/` | Reusable expression controller, pluggable eye renderers, subtitles and Settings -> Appearance UI |
 | `firmware/components/attention/` | Independent eye-contact geometry: shared gaze direction, head setpoints and confidence gating |
+| `firmware/components/vision_attention/` | On-board-ready multi-face tracking core with separate per-person eye positions, gaze events, fixation times and provisional pupil localization; not camera-integrated yet |
 | `server/` | Cross-platform Python Brain server (macOS/Linux), command queue, optional OpenAI-compatible LLM and safe tools |
 | `shared/` | Canonical theme tokens and documented JSON/HTTP contract |
 | `preview/` | Browser-based interactive face preview; no board required |
@@ -73,6 +74,8 @@ One face API, multiple appearance packs. A pack selects a renderer, colors and m
 ## Roadmap and boundaries
 
 **In this baseline:** LVGL Face component with independent renderers and five installed macaron appearances; two-level Settings → Appearance → Apply navigation with NVS persistence; touch-revealed gear; blinking, shared pupil gaze and subtitle area; a host-testable Attention coordinator that calculates coupled head/gaze targets and refuses false mutual-eye-contact claims; Python Brain HTTP command queues, optional text-model adapter and allowlisted tool registry; optional ESP32 Wi-Fi polling.
+
+**Vision core now available separately:** [multi-person visual attention specification](docs/visual-attention.md), [vision_attention C component](firmware/components/vision_attention/README.md). Multi-face tracking and candidate iris localization are implemented as independent cores; ESP-DL camera capture and genuine calibrated gaze recognition are still pending.
 
 **Later:** full ESP-IDF and real-board build/flash verification; camera face detection and a *separate* classifier for whether the person looks at the robot; 3D camera-to-display/head calibration; servo feedback and pan/tilt actuation; speech streaming, TTS, Wi-Fi discovery, pairing and encryption. The current Attention module is a geometric **planner**, not a working camera or motor driver.
 
