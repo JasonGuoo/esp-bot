@@ -27,6 +27,7 @@ struct face_view {
     face_render_state_t state;
     lv_timer_t *timer;
     uint32_t blink_start, blink_end, gear_expire;
+    int last_layout_w, last_layout_h;
     int requested_gaze_x, requested_gaze_y;
     face_theme_applied_cb_t on_applied;
     void *on_applied_context;
@@ -77,7 +78,11 @@ static void draw_face(face_view_t *f) {
     lv_obj_set_pos(f->caption, w * 9 / 100, cap_y + 7);
     lv_obj_set_size(f->caption, w * 82 / 100, text_h - 12);
     lv_obj_align(f->gear_button, LV_ALIGN_TOP_RIGHT, -24, 22);
-    if (f->settings) face_settings_layout(f->settings, w, h);
+    if (f->settings && (w != f->last_layout_w || h != f->last_layout_h)) {
+        face_settings_layout(f->settings, w, h);
+        f->last_layout_w = w;
+        f->last_layout_h = h;
+    }
 }
 
 static void applied_from_settings(const char *id, void *context) {

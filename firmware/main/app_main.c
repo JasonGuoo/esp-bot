@@ -65,6 +65,8 @@ void app_main(void) {
         face_on_theme_applied(face, persist_appearance, NULL);
     }
     bsp_display_unlock();
+    /* Official board example explicitly enables LCD backlight. */
+    bsp_display_backlight_on();
     if (!face) {
         ESP_LOGE(TAG, "Cannot allocate face");
         return;
