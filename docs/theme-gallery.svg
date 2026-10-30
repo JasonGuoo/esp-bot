@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-label="Five coordinated pastel themes for ESP Bot eyes">
+<rect width="1200" height="620" fill="#F3F5F9"/>
+
+ <g>
+  <rect x="25" y="18" width="350" height="278" rx="24" fill="#FFFFFF" stroke="#E1E7EF" stroke-width="1.5"/>
+  <rect x="37" y="30" width="326" height="198" rx="16" fill="#142423"/>
+  <g fill="none" stroke="#A8E8D6" stroke-width="12">
+    <rect x="107" y="84" width="68" height="90" rx="32"/>
+    <rect x="225" y="84" width="68" height="90" rx="32"/>
+  </g>
+  <g fill="#A8E8D6">
+    <circle cx="147" cy="120" r="7.5"/>
+    <circle cx="265" cy="120" r="7.5"/>
+  </g>
+  <rect x="74" y="199" width="252" height="15" rx="7.5" fill="#23413D"/>
+  <text x="43" y="261" fill="#344052" font-family="Arial,sans-serif" font-size="20" font-weight="700">Mint</text>
+  <text x="355" y="261" fill="#738095" font-family="sans-serif" font-size="16" text-anchor="end">薄荷绿</text>
+  <circle cx="45" cy="281" r="5" fill="#A8E8D6"/>
+  <text x="57" y="285" fill="#768296" font-family="sans-serif" font-size="11">Both eyes · one palette</text>
+ </g>
+ <g>
+  <rect x="425" y="18" width="350" height="278" rx="24" fill="#FFFFFF" stroke="#E1E7EF" stroke-width="1.5"/>
+  <rect x="437" y="30" width="326" height="198" rx="16" fill="#281D28"/>
+  <g fill="none" stroke="#F5B7CE" stroke-width="12">
+    <rect x="507" y="84" width="68" height="90" rx="32"/>
+    <rect x="625" y="84" width="68" height="90" rx="32"/>
+  </g>
+  <g fill="#F5B7CE">
+    <circle cx="547" cy="120" r="7.5"/>
+    <circle cx="665" cy="120" r="7.5"/>
+  </g>
+  <rect x="474" y="199" width="252" height="15" rx="7.5" fill="#44303D"/>
+  <text x="443" y="261" fill="#344052" font-family="Arial,sans-serif" font-size="20" font-weight="700">Sakura</text>
+  <text x="755" y="261" fill="#738095" font-family="sans-serif" font-size="16" text-anchor="end">樱花粉</text>
+  <circle cx="445" cy="281" r="5" fill="#F5B7CE"/>
+  <text x="457" y="285" fill="#768296" font-family="sans-serif" font-size="11">Both eyes · one palette</text>
+ </g>
+ <g>
+  <rect x="825" y="18" width="350" height="278" rx="24" fill="#FFFFFF" stroke="#E1E7EF" stroke-width="1.5"/>
+  <rect x="837" y="30" width="326" height="198" rx="16" fill="#211D32"/>
+  <g fill="none" stroke="#D4C2FB" stroke-width="12">
+    <rect x="907" y="84" width="68" height="90" rx="32"/>
+    <rect x="1025" y="84" width="68" height="90" rx="32"/>
+  </g>
+  <g fill="#D4C2FB">
+    <circle cx="947" cy="120" r="7.5"/>
+    <circle cx="1065" cy="120" r="7.5"/>
+  </g>
+  <rect x="874" y="199" width="252" height="15" rx="7.5" fill="#39334F"/>
+  <text x="843" y="261" fill="#344052" font-family="Arial,sans-serif" font-size="20" font-weight="700">Lavender</text>
+  <text x="1155" y="261" fill="#738095" font-family="sans-serif" font-size="16" text-anchor="end">香芋紫</text>
+  <circle cx="845" cy="281" r="5" fill="#D4C2FB"/>
+  <text x="857" y="285" fill="#768296" font-family="sans-serif" font-size="11">Both eyes · one palette</text>
+ </g>
+ <g>
+  <rect x="225" y="320" width="350" height="278" rx="24" fill="#FFFFFF" stroke="#E1E7EF" stroke-width="1.5"/>
+  <rect x="237" y="332" width="326" height="198" rx="16" fill="#282419"/>
+  <g fill="none" stroke="#FFE2A1" stroke-width="12">
+    <rect x="307" y="386" width="68" height="90" rx="32"/>
+    <rect x="425" y="386" width="68" height="90" rx="32"/>
+  </g>
+  <g fill="#FFE2A1">
+    <circle cx="347" cy="422" r="7.5"/>
+    <circle cx="465" cy="422" r="7.5"/>
+  </g>
+  <rect x="274" y="501" width="252" height="15" rx="7.5" fill="#433A28"/>
+  <text x="243" y="563" fill="#344052" font-family="Arial,sans-serif" font-size="20" font-weight="700">Butter</text>
+  <text x="555" y="563" fill="#738095" font-family="sans-serif" font-size="16" text-anchor="end">奶油黄</text>
+  <circle cx="245" cy="583" r="5" fill="#FFE2A1"/>
+  <text x="257" y="587" fill="#768296" font-family="sans-serif" font-size="11">Both eyes · one palette</text>
+ </g>
+ <g>
+  <rect x="625" y="320" width="350" height="278" rx="24" fill="#FFFFFF" stroke="#E1E7EF" stroke-width="1.5"/>
+  <rect x="637" y="332" width="326" height="198" rx="16" fill="#172536"/>
+  <g fill="none" stroke="#B3DCFC" stroke-width="12">
+    <rect x="707" y="386" width="68" height="90" rx="32"/>
+    <rect x="825" y="386" width="68" height="90" rx="32"/>
+  </g>
+  <g fill="#B3DCFC">
+    <circle cx="747" cy="422" r="7.5"/>
+    <circle cx="865" cy="422" r="7.5"/>
+  </g>
+  <rect x="674" y="501" width="252" height="15" rx="7.5" fill="#2A4054"/>
+  <text x="643" y="563" fill="#344052" font-family="Arial,sans-serif" font-size="20" font-weight="700">Sky</text>
+  <text x="955" y="563" fill="#738095" font-family="sans-serif" font-size="16" text-anchor="end">天空蓝</text>
+  <circle cx="645" cy="583" r="5" fill="#B3DCFC"/>
+  <text x="657" y="587" fill="#768296" font-family="sans-serif" font-size="11">Both eyes · one palette</text>
+ </g>
+</svg>

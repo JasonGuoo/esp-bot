@@ -16,6 +16,10 @@ A stationary, expressive desktop companion: **ESP32-S31-Korvo-1** provides the e
 | `tools/` | Generate firmware color header from the shared theme JSON |
 | `docs/` | Design rules, integration and staged roadmap |
 
+## Theme gallery
+
+![Five cohesive macaron themes — Mint, Sakura, Lavender, Butter, Sky](docs/theme-gallery.svg)
+
 ## Quick start
 
 ### Face preview (first)
@@ -23,7 +27,7 @@ A stationary, expressive desktop companion: **ESP32-S31-Korvo-1** provides the e
 From the repository root:
 
 ```sh
-python3 -m http.server 8765
+python3 -m http.server 8765 --bind 127.0.0.1
 # open http://127.0.0.1:8765/preview/
 ```
 
