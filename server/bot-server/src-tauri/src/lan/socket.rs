@@ -5,7 +5,7 @@ use std::{
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
         ConnectInfo, State,
     },
     http::StatusCode,
@@ -60,10 +60,36 @@ async fn session(mut socket: WebSocket, ctx: RouteState, peer: SocketAddr) {
     };
 
     let device_id = hello.device_id.clone();
+
+    // Pairing gate: denied devices get the handshake they require and then
+    // an explicit close, so the firmware logs a real refusal instead of a
+    // protocol mystery. Pending and approved devices connect normally;
+    // commands to non-approved devices are blocked inside CommandHub.
+    if ctx.pairing.classify(&device_id, &hello.name) == crate::pairing::PairState::Denied {
+        let _ = socket.send(Message::Text(welcome(&ctx.server_id).into())).await;
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: 4003,
+                reason: "pairing_denied".into(),
+            })))
+            .await;
+        (ctx.sink)(LanEvent::new(
+            "bot_denied",
+            Some(&device_id),
+            "denied device attempted to connect",
+            None,
+        ));
+        return;
+    }
+
     let session_id = Uuid::new_v4().to_string();
     if socket.send(Message::Text(welcome(&ctx.server_id).into())).await.is_err() {
         return;
     }
+    // Register the outbound sender before announcing the bot so a command
+    // triggered by the bot_connected event can never race a missing channel.
+    let (out_tx, mut out_rx) = ctx.hub.create_outbound();
+    ctx.hub.register_session(&device_id, &session_id, out_tx);
     ctx.state.connected(
         Bot {
             device_id: device_id.clone(),
@@ -86,8 +112,18 @@ async fn session(mut socket: WebSocket, ctx: RouteState, peer: SocketAddr) {
                     Some(Ok(Message::Text(text))) if text.len() <= MAX_TEXT_BYTES => {
                         last_received = Instant::now();
                         if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                            if value.get("type").and_then(Value::as_str) == Some("event") {
-                                (ctx.sink)(LanEvent::new("bot_message", Some(&device_id), "event received", Some(value)));
+                            match value.get("type").and_then(Value::as_str) {
+                                Some("event") => {
+                                    (ctx.sink)(LanEvent::new("bot_message", Some(&device_id), "event received", Some(value)));
+                                }
+                                Some("response") => {
+                                    ctx.hub.ack(&device_id, &value);
+                                }
+                                // Unknown frames stay visible in the console
+                                // log instead of being dropped silently.
+                                other => {
+                                    (ctx.sink)(LanEvent::new("bot_frame_unhandled", Some(&device_id), &format!("frame type {other:?}"), Some(value)));
+                                }
                             }
                         }
                     }
@@ -106,8 +142,20 @@ async fn session(mut socket: WebSocket, ctx: RouteState, peer: SocketAddr) {
                     break;
                 }
             }
+            frame = out_rx.recv() => {
+                match frame {
+                    Some(frame) => {
+                        if socket.send(Message::Text(frame.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Sender replaced by a newer session for this device.
+                    None => break,
+                }
+            }
         }
     }
+    ctx.hub.unregister_session(&device_id, &session_id);
     if ctx.state.disconnected(&device_id, &session_id) {
         (ctx.sink)(LanEvent::new("bot_disconnected", Some(&device_id), &peer.to_string(), None));
     }

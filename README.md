@@ -53,7 +53,7 @@ The canonical system ownership specification is **[docs/architecture.md](docs/ar
 | `firmware/components/face/` | Reusable expression controller, pluggable eye renderers, subtitles and Settings -> Appearance UI |
 | `firmware/components/attention/` | Independent eye-contact geometry: shared gaze direction, head setpoints and confidence gating |
 | `firmware/components/vision_attention/` | On-board-ready multi-face tracking core with separate per-person eye positions, gaze events, fixation times and provisional pupil localization; not camera-integrated yet |
-| `server/` | Older Python Brain prototype and new Rust/Tauri `server/bot-server/` discovery console; not yet combined into final speech/LLM service |
+| `server/` | Older Python Brain prototype and the Rust/Tauri `server/bot-server/` local brain console: persistent identity, pairing soft gate, server→device `face.set` command push and local LLM provider adapters |
 | `shared/` | Canonical theme tokens and documented JSON/HTTP contract |
 | `preview/` | Browser-based interactive face preview; no board required |
 | `tools/` | Generate firmware color header from the shared theme JSON |
@@ -116,7 +116,7 @@ One face API, multiple appearance packs. A pack selects a renderer, colors and m
 
 **In this baseline:** LVGL Face component with independent renderers and five installed macaron appearances; two-level Settings → Appearance → Apply navigation with NVS persistence; touch-revealed gear; blinking, shared pupil gaze and subtitle area; a host-testable Attention coordinator that calculates coupled head/gaze targets and refuses false mutual-eye-contact claims; Python Brain HTTP command queues, optional text-model adapter and allowlisted tool registry; optional ESP32 Wi-Fi polling.
 
-**Architecture update:** bot_runtime, bot_bus, attention_manager, head_motion stationary adapter and unified audio/wake modules are documented **but not implemented**. Rust/Tauri LAN server and lan_link are standalone modules not yet app-integrated. The current shipped app still starts LVGL Face plus optional legacy Python Brain polling.
+**Architecture update:** bot_runtime, bot_bus, attention_manager, head_motion stationary adapter and unified audio/wake modules are documented **but not implemented**. The Rust/Tauri bot-server now carries a persistent identity, a pairing soft gate, server→device `face.set` command push (v2 envelope with acks) and OpenAI-compatible/S2S text provider adapters — unit-tested and fake-bot tested, **not** hardware-validated. firmware `lan_link` remains standalone: the shipped device app still starts LVGL Face plus optional legacy Python Brain polling.
 
 **Vision core now available separately:** [multi-person visual attention specification](docs/visual-attention.md), [vision_attention C component](firmware/components/vision_attention/README.md). Multi-face tracking and candidate iris localization are implemented as independent cores; ESP-DL camera capture and genuine calibrated gaze recognition are still pending.
 

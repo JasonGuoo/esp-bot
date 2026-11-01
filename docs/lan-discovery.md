@@ -8,8 +8,8 @@ replace the current executable firmware or Python server yet:
 
 | Module | Location | Scope |
 | --- | --- | --- |
-| Rust/Tauri console | server/bot-server/ | mDNS advertise; WebSocket accept; connected devices; local events |
-| ESP-IDF lan_link | firmware/components/lan_link/ | mDNS query; auto-connect (single server only); manual scan/connect; retry; JSON events |
+| Rust/Tauri console | server/bot-server/ | mDNS advertise with persistent identity; WebSocket accept; pairing soft gate; server→device `face.set` command push with acks; local LLM provider adapters (text only) |
+| ESP-IDF lan_link | firmware/components/lan_link/ | mDNS query; auto-connect (single server only); manual scan/connect; retry; JSON events; forwards post-welcome server frames to the app (consumer not yet integrated) |
 
 The wire contract is shared/lan-discovery-v1.md. There is no cloud broker,
 Internet discovery, BLE, LLM, ASR, TTS, face or motor integration in this work.

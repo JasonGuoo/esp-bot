@@ -32,7 +32,7 @@ See [architecture.md](architecture.md) for canonical module ownership, [module-c
 | DOA | Public Espressif S31 example documented | Board audio-direction module, reliable synchronized stream adapter, calibration and focus fusion |
 | Local coordinator/bus | Architecture and docs | bot_runtime, bot_bus, attention_manager, resource/power lifecycle |
 | Motion/IMU | Pure geometric planner + design | Real motor hardware absent; stationary adapter first; IMU optional future |
-| Connectivity | firmware/components/lan_link, Rust/Tauri server/bot-server discovery and WebSocket skeleton | Main integration, pairing/authenticated channel, audio/video media routing, ASR/LLM/TTS services |
+| Connectivity | firmware/components/lan_link, Rust/Tauri server/bot-server with persistent identity, pairing soft gate, `face.set` command push (v2 envelope + acks) and OpenAI-compatible/S2S text provider adapters (2026-10-31) | Main integration, cryptographic pairing + encrypted channel, audio/video media routing, live STT/TTS |
 | Legacy server/transport | Python server and ESP HTTP polling client exist | Retirement/reconciliation after Rust/Tauri Brain reaches feature parity |
 
 No live wake-on-name, camera gaze, DOA localization, sleeping physical blackout or true mechanical tracking is claimed implemented in hardware.

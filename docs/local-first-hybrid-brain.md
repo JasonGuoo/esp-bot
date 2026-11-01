@@ -84,7 +84,7 @@ Text-only queries should not require audio models; on-device offline commands sh
 
 ## 7. What exists vs. work still required
 
-**Already in repo:** Rust/Tauri mDNS+WebSocket skeleton, ESP-IDF lan_link, Face, attention and vision_attention modules, legacy Python Brain. **Not implemented yet:** BLE provisioning/bridge; secure pairing; identity persistence; binary media; Mac speech-to-speech integration; local MLX model management; TTS/audio sessions; server-side search; movable head motor hardware/driver; full-word wake acoustic model.
+**Already in repo:** Rust/Tauri bot-server with persistent server identity, mDNS+WebSocket transport, pairing soft gate (console approve/deny, `devices.json`), server→device `face.set` command push over the v2 request/response envelope with ack correlation, and Provider adapters (OpenAI-compatible localhost HTTP + experimental HF Speech-to-Speech text WS) selected via `config.json`; ESP-IDF lan_link (not yet app-integrated); Face, attention and vision_attention modules; legacy Python Brain. Unit-tested plus an in-process fake-bot end-to-end session test; **no hardware validation yet**. **Not implemented yet:** cryptographic pairing/keypair and an authenticated encrypted channel (the current pairing is a trusted-LAN soft gate); BLE provisioning/bridge; binary media/audio; Mac speech-to-speech integration beyond the text adapter; local MLX model management/warm pools; TTS/audio sessions; server-side search; movable head motor hardware/driver; full-word wake acoustic model; firmware-side consumption of server command frames.
 
 ### Recommended next development gates
 

@@ -11,3 +11,9 @@ firmware/dependencies.lock
 .env
 .env.*
 !.env.example
+
+# Rust/Tauri bot-server local build artifacts
+server/bot-server/src-tauri/target/
+server/bot-server/src-tauri/gen/
+server/bot-server/node_modules/
+server/bot-server/dist/

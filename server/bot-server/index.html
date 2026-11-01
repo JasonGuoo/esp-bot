@@ -6,26 +6,68 @@
     <title>ESP Bot Server</title>
   </head>
   <body>
-    <main id="app">
-      <header class="hero">
-        <div><p class="eyebrow">ESP BOT · LOCAL NETWORK</p><h1>Bot Server</h1><p class="subtitle">Discovery &amp; connection console</p></div>
-        <div class="indicator"><span id="led" class="led"></span><span id="status">Starting…</span></div>
-      </header>
-      <section class="stats">
-        <article><span>DNS-SD service</span><strong>_espbot-server._tcp.local.</strong></article>
-        <article><span>WebSocket listener</span><strong id="port">—</strong></article>
-        <article><span>Connected bots</span><strong id="count">0</strong></article>
-      </section>
-      <section class="panel">
-        <div class="panel-heading"><h2>Connected devices</h2><span>Accepted automatically on this LAN</span></div>
-        <div id="devices" class="devices"><p class="empty">Waiting for an ESP Bot to connect…</p></div>
-      </section>
-      <section class="panel">
-        <div class="panel-heading"><h2>Connection events</h2><span>Newest first · last 40</span></div>
-        <ol id="events" class="events"><li class="empty">No events yet</li></ol>
-      </section>
-      <footer>Local discovery only · No cloud, LLM or remote-control commands enabled · Development LAN transport is not encrypted</footer>
-    </main>
+    <div id="app">
+      <aside class="sidebar">
+        <header class="side-head">
+          <span class="logo" aria-hidden="true"><i></i><i></i></span>
+          <div class="brand">
+            <strong>Bot Server</strong>
+            <span class="server-line"><span id="led" class="led"></span><span id="server-line">starting…</span></span>
+          </div>
+        </header>
+
+        <div class="side-scroll">
+          <section class="side-section">
+            <h3>Devices <span class="count" id="devices-count" hidden></span></h3>
+            <div id="devices" class="device-list"></div>
+          </section>
+
+          <section class="side-section">
+            <h3>Pairing <span class="count warn" id="pairing-count" hidden></span></h3>
+            <div id="pairing" class="pair-list"></div>
+          </section>
+
+          <section class="side-section">
+            <h3>Provider</h3>
+            <div id="provider-box" class="provider-box"></div>
+          </section>
+        </div>
+
+        <footer class="side-foot">
+          <span id="mock-badge" class="mock-badge" hidden>MOCK PREVIEW</span>
+          <span class="foot-note">LAN only · link not encrypted</span>
+        </footer>
+      </aside>
+
+      <main class="main">
+        <header class="toolbar">
+          <div class="target" id="chat-target">No device selected</div>
+          <div class="toolbar-actions">
+            <button id="chat-test" class="btn ghost" type="button" title="Send a fixed face.set without calling the LLM">Test face</button>
+            <div class="segmented" id="view-switch" role="tablist">
+              <button type="button" data-view="chat" class="on">Chat</button>
+              <button type="button" data-view="events">Events</button>
+            </div>
+          </div>
+        </header>
+
+        <section class="view view-chat" id="view-chat">
+          <div class="chat-scroll" id="chat-log"></div>
+          <p id="chat-error" class="chat-error" hidden></p>
+          <form id="chat-form" class="composer">
+            <input id="chat-input" type="text" placeholder="Message 小呆…" maxlength="4000" autocomplete="off" />
+            <button class="btn primary" type="submit">Send</button>
+          </form>
+        </section>
+
+        <section class="view view-events" id="view-events" hidden>
+          <div class="events-head">
+            <span>Time</span><span>Event</span><span>Detail</span>
+          </div>
+          <div class="events-scroll" id="events"></div>
+        </section>
+      </main>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

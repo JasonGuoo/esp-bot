@@ -1,6 +1,11 @@
+mod cmd;
 mod discovery;
+mod frames;
 mod protocol;
 mod socket;
+
+#[cfg(test)]
+mod e2e;
 
 use axum::{routing::any, Router};
 use serde::Serialize;
@@ -11,8 +16,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::net::TcpListener;
-use uuid::Uuid;
 
+pub use cmd::CommandHub;
+pub use frames::{METHOD_FACE_SET, SUBTITLE_MAX_CHARS};
 pub use protocol::SERVICE_TYPE;
 pub type EventSink = Arc<dyn Fn(LanEvent) + Send + Sync + 'static>;
 
@@ -144,11 +150,21 @@ struct RouteState {
     state: Arc<LanState>,
     sink: EventSink,
     server_id: String,
+    hub: Arc<CommandHub>,
+    pairing: Arc<crate::pairing::PairingStore>,
 }
 
 /// Starts independently of the Tauri window and accepts all well-formed Bot
-/// connections on local interfaces. No LLM/tools/face command execution here.
-pub async fn serve(state: Arc<LanState>, sink: EventSink) -> Result<(), String> {
+/// connections on local interfaces. The `server_id` must be the persistent
+/// identity from [`crate::identity`] so the firmware-side mDNS/welcome id
+/// match survives restarts. No LLM/tools execution happens here.
+pub async fn serve(
+    state: Arc<LanState>,
+    sink: EventSink,
+    server_id: String,
+    hub: Arc<CommandHub>,
+    pairing: Arc<crate::pairing::PairingStore>,
+) -> Result<(), String> {
     let listener = TcpListener::bind("0.0.0.0:0")
         .await
         .map_err(|e| format!("cannot bind LAN listener: {e}"))?;
@@ -156,22 +172,38 @@ pub async fn serve(state: Arc<LanState>, sink: EventSink) -> Result<(), String> 
         .local_addr()
         .map_err(|e| format!("cannot read listener port: {e}"))?
         .port();
-    let server_id = Uuid::new_v4().to_string();
     let mdns = discovery::advertise(&server_id, port)?;
+    state.started(&server_id, port);
+    sink(LanEvent::new("server_started", None, &format!("mDNS and WebSocket on port {port}"), None));
+
+    let result = run_server(listener, state, sink, server_id, hub, pairing).await;
+    let _ = mdns.shutdown();
+    result
+}
+
+/// Listener + router only, so tests can drive a real WebSocket session
+/// without touching the machine's mDNS stack.
+async fn run_server(
+    listener: TcpListener,
+    state: Arc<LanState>,
+    sink: EventSink,
+    server_id: String,
+    hub: Arc<CommandHub>,
+    pairing: Arc<crate::pairing::PairingStore>,
+) -> Result<(), String> {
     let routes = RouteState {
         state: Arc::clone(&state),
         sink: Arc::clone(&sink),
-        server_id: server_id.clone(),
+        server_id,
+        hub,
+        pairing,
     };
     let router = Router::new()
         .route(protocol::WS_PATH, any(socket::upgrade))
         .with_state(routes);
-    state.started(&server_id, port);
-    sink(LanEvent::new("server_started", None, &format!("mDNS and WebSocket on port {port}"), None));
-
-    let result = axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>()).await;
-    let _ = mdns.shutdown();
-    result.map_err(|e| format!("LAN listener failed: {e}"))
+    axum::serve(listener, router.into_make_service_with_connect_info::<std::net::SocketAddr>())
+        .await
+        .map_err(|e| format!("LAN listener failed: {e}"))
 }
 
 #[cfg(test)]
