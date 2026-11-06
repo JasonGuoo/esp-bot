@@ -17,3 +17,16 @@ server/bot-server/src-tauri/target/
 server/bot-server/src-tauri/gen/
 server/bot-server/node_modules/
 server/bot-server/dist/
+
+# Local Mac model/tool environments, weights and private runtime state
+server/bot-server/.venv-tools/
+server/bot-server/local-models/.venv/
+server/bot-server/local-models/models/
+server/bot-server/models/
+server/bot-server/runtime/
+server/bot-server/brain.json
+server/bot-server/tls/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm

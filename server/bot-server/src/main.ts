@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./style.css";
+import { mountCompanion } from "./companion";
 
 type Bot = { device_id: string; name: string; peer: string; connected_at_ms: number };
 type Snapshot = {
@@ -43,7 +44,7 @@ const history: LanEvent[] = [];
 const chatLog: ChatEntry[] = [];
 let activeBotId: string | null = localStorage.getItem("espbot.activeBot");
 let lastSnapshot: Snapshot | null = null;
-let currentView: "chat" | "events" = "chat";
+let currentView: "companion" | "chat" | "events" = "companion";
 
 const $ = <T extends HTMLElement>(selector: string): T => document.querySelector<T>(selector)!;
 const ledEl = $<HTMLElement>("#led");
@@ -61,6 +62,8 @@ const chatInput = $<HTMLInputElement>("#chat-input");
 const eventsEl = $<HTMLElement>("#events");
 const viewChat = $<HTMLElement>("#view-chat");
 const viewEvents = $<HTMLElement>("#view-events");
+const viewCompanion = $<HTMLElement>("#view-companion");
+const companion = mountCompanion(viewCompanion, { mock: MOCK });
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", text = ""): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -132,6 +135,12 @@ function renderDevices(snapshot: Snapshot): void {
 }
 
 function renderTarget(): void {
+  $("#chat-test").hidden = currentView !== "chat";
+  if (currentView === "companion") {
+    targetEl.classList.remove("none");
+    targetEl.replaceChildren(el("span", "", "小呆 · Mac 陪伴"), el("span", "sub", "不需要连接设备"));
+    return;
+  }
   const bot = lastSnapshot?.bots.find((item) => item.device_id === activeBotId);
   targetEl.classList.toggle("none", !bot);
   if (!bot) {
@@ -322,16 +331,20 @@ async function sendTestFace(): Promise<void> {
 
 // ── view switch ───────────────────────────────────────
 $("#view-switch").addEventListener("click", (event) => {
-  const target = event.target as HTMLElement;
-  const view = target.dataset.view as "chat" | "events" | undefined;
+  const target = (event.target as HTMLElement).closest<HTMLButtonElement>("button[data-view]");
+  const view = target?.dataset.view as "companion" | "chat" | "events" | undefined;
   if (!view || view === currentView) return;
   currentView = view;
   const buttons = document.querySelectorAll<HTMLButtonElement>("#view-switch button");
   for (let i = 0; i < buttons.length; i += 1) {
     buttons[i].classList.toggle("on", buttons[i].dataset.view === view);
+    buttons[i].setAttribute("aria-selected", String(buttons[i].dataset.view === view));
   }
+  viewCompanion.hidden = view !== "companion";
+  companion.setVisible(view === "companion");
   viewChat.hidden = view !== "chat";
   viewEvents.hidden = view !== "events";
+  renderTarget();
   if (view === "events") renderEvents();
 });
 
@@ -433,4 +446,5 @@ function mockCommand(command: string, args?: Record<string, unknown>): unknown {
   return null;
 }
 
+renderTarget();
 MOCK ? wireMock() : wireLive();

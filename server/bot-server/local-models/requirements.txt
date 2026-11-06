@@ -1,0 +1,14 @@
+# Python 3.11 or 3.12; install explicitly on the Mac, never from worker startup.
+# Engine versions correspond to the official APIs cited in README.md.
+mlx-whisper==0.4.3 ; sys_platform == "darwin" and platform_machine == "arm64"
+speechbrain==1.1.2
+opencv-python-headless==4.13.0.92
+numpy>=2.0,<3
+Pillow>=12.0,<13
+huggingface-hub>=0.34,<1
+torch>=2.7.1,<3
+torchaudio>=2.7.1,<3
+
+# This is a direct-dependency specification, not a resolved environment lock.
+# torch/torchaudio must resolve to a matching pair through torchaudio's metadata.
+# No dependency installation or resolution was performed for this delivery.

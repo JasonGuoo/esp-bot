@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "models": {
+    "asr": {
+      "directory": "asr/whisper-small-mlx",
+      "model_id": "mlx-whisper-small:45f3915923c7a79a5a5b5a7d909d39aeb0e5630e:pcm16k-v1",
+      "repository": "https://huggingface.co/mlx-community/whisper-small-mlx",
+      "revision": "45f3915923c7a79a5a5b5a7d909d39aeb0e5630e",
+      "engine_source": "https://github.com/ml-explore/mlx-examples/tree/796f5b53cab69a3d48a44233ce21aae889e94a08/whisper",
+      "license_note": "Apple MLX example MIT; original OpenAI Whisper code/weights MIT; this conversion's card does not add a separate license declaration.",
+      "files": [
+        {
+          "path": "config.json",
+          "url": "https://huggingface.co/mlx-community/whisper-small-mlx/resolve/45f3915923c7a79a5a5b5a7d909d39aeb0e5630e/config.json",
+          "max_bytes": 65536
+        },
+        {
+          "path": "weights.npz",
+          "url": "https://huggingface.co/mlx-community/whisper-small-mlx/resolve/45f3915923c7a79a5a5b5a7d909d39aeb0e5630e/weights.npz",
+          "sha256": "55b6674c9b339702d486e2b1573839a66f8ec8f821ed2886993ef717a86b09f5",
+          "max_bytes": 600000000
+        },
+        {
+          "path": "README.md",
+          "url": "https://huggingface.co/mlx-community/whisper-small-mlx/resolve/45f3915923c7a79a5a5b5a7d909d39aeb0e5630e/README.md",
+          "max_bytes": 262144
+        }
+      ]
+    },
+    "speaker": {
+      "directory": "speaker/ecapa-voxceleb",
+      "model_id": "speechbrain-ecapa:0f99f2d0ebe89ac095bcc5903c4dd8f72b367286:encode192-l2-v1",
+      "repository": "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb",
+      "revision": "0f99f2d0ebe89ac095bcc5903c4dd8f72b367286",
+      "engine_source": "https://github.com/speechbrain/speechbrain/tree/v1.1.2",
+      "license_note": "SpeechBrain library and this model card declare Apache-2.0. VoxCeleb-derived training is not evidence of child-voice accuracy.",
+      "files": [
+        {
+          "path": "hyperparams.yaml",
+          "url": "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb/resolve/0f99f2d0ebe89ac095bcc5903c4dd8f72b367286/hyperparams.yaml",
+          "max_bytes": 65536
+        },
+        {
+          "path": "embedding_model.ckpt",
+          "url": "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb/resolve/0f99f2d0ebe89ac095bcc5903c4dd8f72b367286/embedding_model.ckpt",
+          "max_bytes": 150000000
+        },
+        {
+          "path": "mean_var_norm_emb.ckpt",
+          "url": "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb/resolve/0f99f2d0ebe89ac095bcc5903c4dd8f72b367286/mean_var_norm_emb.ckpt",
+          "max_bytes": 1048576
+        },
+        {
+          "path": "classifier.ckpt",
+          "url": "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb/resolve/0f99f2d0ebe89ac095bcc5903c4dd8f72b367286/classifier.ckpt",
+          "max_bytes": 30000000
+        },
+        {
+          "path": "label_encoder.txt",
+          "url": "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb/resolve/0f99f2d0ebe89ac095bcc5903c4dd8f72b367286/label_encoder.txt",
+          "max_bytes": 1048576
+        },
+        {
+          "path": "README.md",
+          "url": "https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb/resolve/0f99f2d0ebe89ac095bcc5903c4dd8f72b367286/README.md",
+          "max_bytes": 262144
+        }
+      ]
+    },
+    "face": {
+      "directory": "face/opencv-zoo",
+      "model_id": "opencv-sface:0ba9fbfa01b5270c:yunet8f2383e4dd3cfbb4:bgr960-align5-l2-v1",
+      "repository": "https://github.com/opencv/opencv_zoo",
+      "revision": "48b10fa505aeb51fbd127fc60a5c660040e823b7",
+      "engine_source": "https://github.com/opencv/opencv_zoo/tree/48b10fa505aeb51fbd127fc60a5c660040e823b7/models",
+      "license_note": "YuNet directory: MIT. SFace directory: Apache-2.0. Licenses are downloaded with the models.",
+      "files": [
+        {
+          "path": "face_detection_yunet_2023mar.onnx",
+          "url": "https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+          "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+          "max_bytes": 232589
+        },
+        {
+          "path": "face_recognition_sface_2021dec.onnx",
+          "url": "https://media.githubusercontent.com/media/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+          "sha256": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+          "max_bytes": 38696353
+        },
+        {
+          "path": "LICENSE-YuNet",
+          "url": "https://raw.githubusercontent.com/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/face_detection_yunet/LICENSE",
+          "max_bytes": 65536
+        },
+        {
+          "path": "LICENSE-SFace",
+          "url": "https://raw.githubusercontent.com/opencv/opencv_zoo/48b10fa505aeb51fbd127fc60a5c660040e823b7/models/face_recognition_sface/LICENSE",
+          "max_bytes": 65536
+        }
+      ]
+    }
+  }
+}

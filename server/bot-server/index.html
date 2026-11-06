@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>ESP Bot Server</title>
+    <title>小呆 · Bot Server</title>
   </head>
   <body>
     <div id="app">
@@ -11,31 +11,31 @@
         <header class="side-head">
           <span class="logo" aria-hidden="true"><i></i><i></i></span>
           <div class="brand">
-            <strong>Bot Server</strong>
+            <strong>小呆 Bot Server</strong>
             <span class="server-line"><span id="led" class="led"></span><span id="server-line">starting…</span></span>
           </div>
         </header>
 
         <div class="side-scroll">
           <section class="side-section">
-            <h3>Devices <span class="count" id="devices-count" hidden></span></h3>
+            <h3>设备诊断 <span class="count" id="devices-count" hidden></span></h3>
             <div id="devices" class="device-list"></div>
           </section>
 
           <section class="side-section">
-            <h3>Pairing <span class="count warn" id="pairing-count" hidden></span></h3>
+            <h3>旧版软配对 <span class="count warn" id="pairing-count" hidden></span></h3>
             <div id="pairing" class="pair-list"></div>
           </section>
 
           <section class="side-section">
-            <h3>Provider</h3>
+            <h3>旧版 Provider</h3>
             <div id="provider-box" class="provider-box"></div>
           </section>
         </div>
 
         <footer class="side-foot">
           <span id="mock-badge" class="mock-badge" hidden>MOCK PREVIEW</span>
-          <span class="foot-note">LAN only · link not encrypted</span>
+          <span class="foot-note">旧版 LAN 仅诊断 · 未加密</span>
         </footer>
       </aside>
 
@@ -43,15 +43,18 @@
         <header class="toolbar">
           <div class="target" id="chat-target">No device selected</div>
           <div class="toolbar-actions">
-            <button id="chat-test" class="btn ghost" type="button" title="Send a fixed face.set without calling the LLM">Test face</button>
+            <button id="chat-test" class="btn ghost" type="button" title="Send a fixed face.set without calling the LLM" hidden>Test face</button>
             <div class="segmented" id="view-switch" role="tablist">
-              <button type="button" data-view="chat" class="on">Chat</button>
-              <button type="button" data-view="events">Events</button>
+              <button type="button" data-view="companion" class="on" role="tab" aria-selected="true" aria-controls="view-companion">小呆</button>
+              <button type="button" data-view="chat" role="tab" aria-selected="false" aria-controls="view-chat">旧版 Chat</button>
+              <button type="button" data-view="events" role="tab" aria-selected="false" aria-controls="view-events">Events</button>
             </div>
           </div>
         </header>
 
-        <section class="view view-chat" id="view-chat">
+        <section class="view view-companion" id="view-companion" role="tabpanel" aria-label="小呆 Mac 交互台"></section>
+
+        <section class="view view-chat" id="view-chat" hidden>
           <div class="chat-scroll" id="chat-log"></div>
           <p id="chat-error" class="chat-error" hidden></p>
           <form id="chat-form" class="composer">

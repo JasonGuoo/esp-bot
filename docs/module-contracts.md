@@ -17,7 +17,7 @@
 | Actual head hardware | **head_motion** | Current: stationary adapter. Future: actuation, limits and joint feedback | Inventing measured pose or selecting people |
 | Remote connection | **brain_link** | Session/link lifecycle, authenticated commands, media routing | Direct live pupil/servo control from the server |
 
-Transport note: existing **lan_link** is an implementation below brain_link, NOT a second app controller. Existing **brain_client** and Python Brain are legacy prototypes; Rust/Tauri server is the selected future architecture. Main now uses brain_link/lan_link only as an untrusted diagnostic boundary; the HTTP prototype is excluded. No authenticated media transport is implemented.
+Transport note: existing **lan_link** is an implementation below brain_link, NOT a second app controller. Existing **brain_client** and Python Brain are legacy prototypes. Rust/Tauri now composes the Mac Brain and a separate [WSS v3 server](../shared/mac-brain-v3.md). Firmware main still uses brain_link/lan_link only as an untrusted diagnostic boundary; its WSS client is not implemented, and the HTTP prototype is excluded. Current firmware sends no private media.
 
 **Source authority:** Face theme/appearance behavior remains in [face-design.md](face-design.md) and shared appearance packs. Person tracking remains in [visual-attention.md](visual-attention.md), voice name in [wake-word.md](wake-word.md).
 
@@ -103,7 +103,7 @@ Implementation choice: a thin FreeRTOS event + latest snapshot abstraction (or E
 
 ## 7. Local versus server contract
 
-Device must continue wake listening, passive behavior and any local gaze tracking when Mac/Linux is offline. Rust/Tauri bot-server will eventually provide ASR/LLM/TTS/tools through brain_link, but must not own a low-latency eye or motor loop. LAN discovery/transport is described in [lan-discovery.md](lan-discovery.md); discovery is not authentication or device pairing.
+Device must continue wake listening, passive behavior and any local gaze tracking when Mac is offline. Rust/Tauri bot-server now contains local ASR/TTS/identity, OpenCode/tools and memory in source; firmware integration through the authenticated gateway is still pending. The server must not own a low-latency eye or motor loop. LAN discovery is described in [lan-discovery.md](lan-discovery.md); discovery is not authentication or device pairing.
 
 ## 8. Delivery rule
 

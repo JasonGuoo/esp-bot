@@ -96,3 +96,30 @@ Hardware is awaiting delivery. No compilation, dependency resolution, tests, fla
 CI or device execution occurred for this delivery. The complete 小呆小呆 acoustic
 model is still absent. Official face detection is not family identity or human-gaze
 recognition; audio AEC/DOA and secure Mac media remain subsequent integrations.
+
+## 6. Mac adapters delivered in source (2026-11-06)
+
+The user's latest choice replaces the earlier exploratory local-LLM selection
+with **OpenCode v2**, ordered **Qwen Coding Plan → GLM Coding Plan → DeepSeek Flash**.
+ASR, TTS, enrolled face/speaker embeddings and the personal memory store remain
+local. See [mac-bot-server.md](mac-bot-server.md) for the current composition.
+
+| Upstream reused | Source integration | Exact provenance / boundary |
+| --- | --- | --- |
+| [OpenCode v2.2.5](https://github.com/anomalyco/opencode/releases/tag/v2.2.5) | Official CLI server and native v2 HTTP/SSE, sessions, permissions and MCP | [mac-opencode.md](mac-opencode.md); no replacement agent loop or invented balance API |
+| [Apple MLX Whisper example](https://github.com/ml-explore/mlx-examples/tree/main/whisper) / `mlx-whisper` 0.4.3 | Local Mandarin-capable ASR adapter | Official inference engine; multilingual converted Whisper weights are a separately pinned model artifact |
+| [SpeechBrain](https://github.com/speechbrain/speechbrain) 1.1.2 / official ECAPA model | Local speaker embeddings | Enrollment and conservative matching are product code; no voice cloning or authentication claim |
+| [OpenCV Zoo](https://github.com/opencv/opencv_zoo) YuNet/SFace / OpenCV 4.13.0.92 | Official detector, alignment and face embeddings | Fixed model revisions/checksums; model licenses recorded separately from the OpenCV package |
+| macOS `/usr/bin/say` | Explicitly installed Mandarin system voice, WAV conversion and child-process cleanup | Does not download or clone a voice; no streaming first-audio claim |
+| [Playwright MCP](https://github.com/microsoft/playwright-mcp/releases/tag/v0.0.84) | Optional official isolated browser server | Existing `browser` MCP config is inherited; a pinned example is supplied, not installed during delivery |
+| [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk/releases/tag/v2.3.0) + [DeepSeek Search/Fetch](https://api-docs.deepseek.com/guides/search/) | Small optional `deepseek-search` adapter using the official SDK and real provider endpoints | No synthetic search results or copied protocol implementation; paid calls need the user's own eligible credentials |
+
+Engine/model revisions, licenses, download receipts and explicit provisioning are
+recorded in [mac-local-models.md](mac-local-models.md) and
+[local-models/NOTICE.md](../server/bot-server/local-models/NOTICE.md). SQLite memory,
+permission boundaries, child-friendly scene constraints, cancellation and the
+versioned device gateway are application adapters around these upstream systems.
+
+No tests, builds, model/API calls, dependency installation or CI were run for this
+source delivery. Rust/Python dependency resolution and actual Mac/device behavior
+remain unverified. The firmware WSS v3 client is still separate pending work.

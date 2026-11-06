@@ -13,14 +13,21 @@
     "windows": [{
       "label": "main",
       "title": "ESP Bot Server",
-      "width": 1000,
-      "height": 680,
+      "width": 1180,
+      "height": 800,
       "minWidth": 760,
       "minHeight": 540,
       "titleBarStyle": "Overlay",
       "hiddenTitle": true
     }],
-    "security": { "csp": null }
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420; img-src 'self' data: blob: https:; media-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src https:; object-src 'none'; base-uri 'none'"
+    }
   },
-  "bundle": { "active": false, "icon": [] }
+  "bundle": {
+    "active": false,
+    "icon": [],
+    "resources": { "../local-models/": "local-models/", "../tools/": "tools/", "../examples/": "examples/" },
+    "macOS": { "minimumSystemVersion": "13.0", "entitlements": "Entitlements.plist" }
+  }
 }

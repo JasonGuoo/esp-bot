@@ -1,5 +1,10 @@
 # Brain server — macOS and Linux
 
+**Selected Mac server:** use [bot-server](bot-server/README.md) and the
+[Mac integration guide](../docs/mac-bot-server.md). It now contains OpenCode,
+local speech/identity, memory and the parent console. The Python server described
+below is a retained historical prototype and is not started by the current firmware.
+
 Python 3.10 or newer; standard library only. The Brain owns command queues, future LLM/tool integrations, and API credentials. The ESP32 remains the physical sensor/face/audio/motor frontend.
 
 ## Start

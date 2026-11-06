@@ -1,18 +1,24 @@
 # esp-bot
 
-**小呆 (Xiao Dai)** — a quiet, passive desktop companion built around ESP32-S31-Korvo-1. Local gaze, wake and behavior should not depend on Mac/Linux; the future Rust/Tauri Brain provides language reasoning, speech and tools. The only production voice wake phrase is **小呆小呆**, a single continuous four-syllable keyword. A standalone **小呆** must never wake the device.
+**小呆 (Xiao Dai)** — a quiet, passive desktop companion built around ESP32-S31-Korvo-1. Local gaze, wake and behavior stay independent of Mac availability; the Rust/Tauri Mac Brain coordinates OpenCode, local speech, identity and memory. The only production voice wake phrase is **小呆小呆**, a single continuous four-syllable keyword. A standalone **小呆** must never wake the device.
 
 > Hardware target is **ESP32-S31-Korvo-1 V1.1** (ESP32-S31), **not** ESP32-S3-Korvo-1. The S31 board has an 800×480 RGB display and GT1151 touch panel. Use ESP-IDF 6.1 / `esp32s31`, not `esp32s3`.
+
+## Mac bot-server source delivered — 2026-11-06
+
+**[Mac 端完整接入与准备指南](docs/mac-bot-server.md)** is the current server implementation record. The existing Tauri app now has a Chinese companion console, native **OpenCode 2.2.5** harness, ordered **Qwen Coding Plan → GLM Coding Plan → DeepSeek Flash** routes, inherited browser/search MCP, local Whisper ASR/system TTS, enrolled face/speaker recognition and SQLite memory.
+
+The Mac WSS v3 endpoint and credential management are written. **The firmware WSS client is still pending; the old LAN link remains diagnostic.** No tests, compilation, dependency installation, model inference, paid API calls or CI were run. Hardware has not arrived. Start with the Mac guide; it distinguishes source integration from remaining setup and device work.
 
 ## Local runtime source delivered — 2026-11-06
 
 **[本地 Runtime 实现与接入指南](docs/local-runtime.md)** is the current implementation record. `app_main` now composes the local behavior runtime, bounded bus, official ESP-SR audio adapter, official esp_video/ESP-DL camera adapter, one focus manager, stationary gaze, Face/touch/stop UI, and an optional LAN diagnostic boundary. The legacy HTTP poller is no longer started or built by main.
 
-**Hardware has not arrived. This delivery was not compiled, tested, flashed, or run; no CI was added.** The dedicated **小呆小呆** acoustic model remains unprovisioned. Face detection/landmarks do not identify family members or estimate human gaze. Mac speech/harness integration, secure media transport and BLE provisioning remain subsequent work.
+**Hardware has not arrived. This delivery was not compiled, tested, flashed, or run; no CI was added.** The dedicated **小呆小呆** acoustic model remains unprovisioned. On-device face detection/landmarks do not identify family members or estimate human gaze. Mac speech/harness/identity source is now integrated separately; secure firmware media and BLE provisioning remain subsequent work.
 
 ## New project direction: reuse-first + Mac-first (2026-10-30)
 
-**小呆 now prioritizes mature open-source modules rather than recreating audio, media, hardware or inference stacks.** Our **M4 Pro / 48 GB Mac with Rust/Tauri `server/bot-server`** is the primary local AI Brain. The device favors secure Wi-Fi mDNS, with **Bluetooth (BLE) Mac provisioning and control fallback** when Wi-Fi is unconfigured or offline. Mac-local STT/LLM/TTS is the default; cloud models/search are optional and permission-controlled. **All device-local wake/behavior stays independent of Mac availability.**
+**小呆 prioritizes mature open-source modules rather than recreating audio, media, hardware or inference stacks.** Our **M4 Pro / 48 GB Mac with Rust/Tauri `server/bot-server`** is the primary AI host. The latest user selection uses OpenCode and the three model routes above; speech, embeddings and memory stay local. Secure Wi-Fi plus **Bluetooth (BLE) provisioning/control fallback** remain the device transport target. **All device-local wake/behavior stays independent of Mac availability.**
 
 The **new physical target** is a good-looking enclosed **pan/tilt** head with integrated external loudspeakers using off-the-shelf mechanical parts. The *current* physical prototype remains unactuated until hardware has been chosen/installed. Korvo-1 already has **two integrated 3 W speaker amplifiers**; select compatible speakers and wiring rather than another audio amplifier.
 
@@ -48,6 +54,10 @@ The canonical system ownership specification is **[docs/architecture.md](docs/ar
 | [Hardware / sensor / power](docs/hardware-power.md) | Real S31 capability, camera exposure, display sleep limits |
 | [Implementation roadmap](docs/implementation-roadmap.md) | Existing versus planned code, integration order and disclosure |
 | [Local runtime implementation](docs/local-runtime.md) | Actual startup, official adapters, dependencies, partitions, model preparation and Mac boundary |
+| [Mac bot-server](docs/mac-bot-server.md) · [OpenCode](docs/mac-opencode.md) | Native v2 harness, model routing, tools, parent console and installation |
+| [Mac companion console](docs/mac-console.md) | Explicit recording/camera, reply cards, family management and one-time tool approval |
+| [Local models](docs/mac-local-models.md) · [Memory](docs/mac-memory.md) | Official ASR/TTS/identity adapters, explicit enrollment and scoped memory |
+| [Authenticated Mac gateway](docs/mac-gateway.md) · [WSS v3 contract](shared/mac-brain-v3.md) | Mac TLS/media endpoint; firmware client remains pending |
 | [Appearance design](docs/face-design.md) · [LAN discovery](docs/lan-discovery.md) | UI/Face and existing isolated link architecture |
 
 **No CI:** this project is code-first; do not create CI workflows or block implementation on unavailable test hardware. Report build/device verification honestly (see [AGENTS.md](AGENTS.md)).
@@ -65,7 +75,7 @@ The canonical system ownership specification is **[docs/architecture.md](docs/ar
 | `firmware/components/attention/` | Independent eye-contact geometry: shared gaze direction, head setpoints and confidence gating |
 | `firmware/components/vision_attention/` | Multi-face tracking core fed by bot_vision; pupil candidates remain separate from actual human-gaze evidence |
 | `firmware/components/brain_link/` · `lan_link/` | Optional Wi-Fi discovery/diagnostic WS; rejects untrusted remote control |
-| `server/` | Older Python Brain prototype and the Rust/Tauri `server/bot-server/` local brain console: persistent identity, pairing soft gate, server→device `face.set` command push and local LLM provider adapters |
+| `server/` | Legacy Python prototype and selected Rust/Tauri `bot-server`: OpenCode routes, local models, memory/identity, Chinese console and Mac WSS v3 |
 | `shared/` | Canonical theme tokens and documented JSON/HTTP contract |
 | `preview/` | Browser-based interactive face preview; no board required |
 | `tools/` | Generate firmware color header from the shared theme JSON |
@@ -96,7 +106,7 @@ python3 -m espbot
 # http://127.0.0.1:8766/health
 ```
 
-No third-party Python dependencies. Local-only by default; see [server/README.md](server/README.md). The current firmware entry point no longer polls this prototype. The selected Mac service is `server/bot-server`; authenticated speech/media integration is still pending.
+No third-party Python dependencies for this historical prototype. See [server/README.md](server/README.md). The current firmware entry point no longer polls it. Use [server/bot-server](server/bot-server/README.md) for the selected Mac implementation; firmware-side WSS media integration is still pending.
 
 ### Firmware (S31 board)
 

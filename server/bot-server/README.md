@@ -1,9 +1,28 @@
 # ESP Bot Server — Rust + Tauri 2 local brain console
 
-The Mac-side brain console: LAN discovery, device pairing, server→device
-command push, and local-first LLM chat adapters. It is the selected
-long-term server (docs/local-first-hybrid-brain.md); the Python prototype
-stays untouched until cutover.
+## Current Mac implementation — 2026-11-06
+
+**[小呆 Mac bot-server 完整指南](../../docs/mac-bot-server.md)** is the current setup
+and implementation record. The main companion tab provides a device-independent path:
+OpenCode v2.2.5 harness, Qwen Coding Plan → GLM Coding Plan → DeepSeek Flash,
+inherited browser/deepseek-search, local ASR/TTS, explicit face/speaker enrollment,
+SQLite memory, parent tool approvals, rich cards and stop/cancellation.
+
+Use [`local-models/README.md`](local-models/README.md) for model installation,
+[`tools/README.md`](tools/README.md) for MCP setup, and
+[`../../docs/mac-gateway.md`](../../docs/mac-gateway.md) for the new TLS device endpoint.
+`scripts/configure_mac.py` writes Mac paths; `brain.json` configures the new chain.
+The historical provider selection below remains in `config.json`.
+
+**Source-only delivery:** no tests, build, dependency resolution, model/API runs or
+CI. Existing Cargo.lock predates the new direct dependencies and needs normal
+resolution on the Mac. Firmware does not yet implement the WSS v3 client;
+diagnostic LAN v1 is not private media transport. BLE remains pending.
+
+## Historical diagnostic LAN console — 2026-10-31
+
+The following describes the retained diagnostic link and legacy text adapters.
+It is independent of the new companion tab and does not authenticate devices.
 
 Implemented today (2026-10-31):
 
@@ -27,9 +46,9 @@ Implemented today (2026-10-31):
   Python `/v1/chat` behavior; unconfigured providers answer with an honest
   `llm_not_configured` error, never a fake reply.
 
-Not implemented: audio/STT/TTS streaming, BLE provisioning/fallback,
-TLS/encryption, tool registry, real keypair pairing, firmware-side
-integration of app frames (only the transport exists in `lan_link`).
+Not implemented on this legacy link: authenticated audio/STT/TTS streaming,
+BLE provisioning/fallback, TLS or private media. The new Mac WSS service is
+documented separately; firmware-side integration remains pending.
 
 ## Run on macOS or Linux
 

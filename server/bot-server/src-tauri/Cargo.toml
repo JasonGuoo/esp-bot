@@ -16,12 +16,19 @@ axum = { version = "0.8", features = ["ws"] }
 mdns-sd = "0.21"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "net", "time", "sync"] }
+tokio = { version = "1", features = ["macros", "net", "time", "sync", "process", "io-util", "fs", "rt-multi-thread"] }
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
+base64 = "0.22.1"
+sha2 = "0.10.9"
+subtle = "2.6"
+libc = "0.2"
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

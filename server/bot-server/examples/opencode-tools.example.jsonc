@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // OpenCode 2.x schema. Merge ONLY missing definitions into your existing config.
+  // Replace the two /absolute/path values with paths on your Mac.
+  "mcp": {
+    "servers": {
+      "browser": {
+        "type": "local",
+        "command": [
+          "npx", "-y", "@playwright/mcp@0.0.84",
+          "--isolated", "--headless", "--no-webmcp",
+          "--image-responses", "omit"
+        ]
+      },
+      "deepseek-search": {
+        "type": "local",
+        "command": [
+          "/absolute/path/esp-bot/server/bot-server/.venv-tools/bin/python",
+          "-u", "/absolute/path/esp-bot/server/bot-server/tools/deepseek_search.py"
+        ]
+      }
+    }
+  }
+}

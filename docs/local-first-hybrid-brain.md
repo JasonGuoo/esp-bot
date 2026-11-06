@@ -2,6 +2,15 @@
 
 **Status: NEW SELECTED DESIGN, not implemented end-to-end. Supersedes older assumptions that Mac/Linux is only a generic optional HTTP Brain and that every new capability gets its own route.**
 
+**2026-11-06 update:** the user's latest explicit LLM choice is **OpenCode v2**,
+with **Qwen Coding Plan → GLM Coding Plan → DeepSeek Flash**, inheriting
+`browser` and `deepseek-search`. That replaces the earlier local LLM / S2S
+orchestration preference below. ASR, TTS, embeddings and personal memory stay
+local. [Mac implementation](mac-bot-server.md) now has source-integrated
+Rust/Tauri coordination, official local model adapters, SQLite identity/memory,
+the parent console and a Mac WSS v3 endpoint. Firmware WSS, BLE and actual
+Mac/hardware execution remain pending; no tests/builds were run.
+
 ## 1. Locked product requirements
 
 - Device remains **小呆**, ESP32-S31-Korvo-1 V1.1 development board (16 MB flash, 16 MB PSRAM, 800×480 touch LCD, camera, twin mics, integrated ES8389 and **two NS4150B 3 W speaker power amps**, outputs to **4 Ω / 3 W speakers via 2.00 mm pitch ports**; physical speaker units are separate). No replacement base board until proof of concept.
@@ -84,16 +93,35 @@ Text-only queries should not require audio models; on-device offline commands sh
 
 ## 7. What exists vs. work still required
 
-**Already in repo:** Rust/Tauri bot-server with persistent server identity, mDNS+WebSocket transport, pairing soft gate (console approve/deny, `devices.json`), server→device `face.set` command push over the v2 request/response envelope with ack correlation, and Provider adapters (OpenAI-compatible localhost HTTP + experimental HF Speech-to-Speech text WS) selected via `config.json`; ESP-IDF lan_link (now app-integrated through the untrusted brain_link boundary); Face, attention and vision_attention modules; legacy Python Brain. Unit-tested plus an in-process fake-bot end-to-end session test; **no hardware validation yet**. **Not implemented yet:** cryptographic pairing/keypair and an authenticated encrypted channel (the current pairing is a trusted-LAN soft gate); BLE provisioning/bridge; binary media/audio; Mac speech-to-speech integration beyond the text adapter; local MLX model management/warm pools; TTS/audio sessions; server-side search; movable head motor hardware/driver; full-word wake acoustic model; authenticated firmware-side semantic command execution. The 2026-11-06 firmware source integrates local runtime/audio/vision; see [local-runtime.md](local-runtime.md). Plaintext server requests are explicitly rejected, and no private audio is routed.
+**Latest server inventory:** use [mac-bot-server.md](mac-bot-server.md),
+[mac-opencode.md](mac-opencode.md), [mac-local-models.md](mac-local-models.md),
+[mac-memory.md](mac-memory.md) and [mac-gateway.md](mac-gateway.md).
+
+**Written in the current source:** Rust/Tauri Mac Brain, OpenCode v2 managed/attach
+harness, Qwen → GLM → DeepSeek routing, inherited browser/search MCP, local MLX
+Whisper, ECAPA speaker and YuNet/SFace face embeddings, macOS TTS, SQLite memory,
+explicit parent enrollment and a Chinese companion console. A separate TLS WSS
+v3 server provides bounded PCM framing, device credentials, runtime tokens and
+cancellation. The original mDNS/soft-pairing LAN transport and older provider
+adapters remain diagnostic/legacy paths.
+
+**Still required:** the firmware WSS v3 client and device trust provisioning,
+BLE provisioning/bridge, streaming speech/AEC integration, a complete four-syllable
+wake acoustic model, identity threshold calibration and physical motor hardware.
+The firmware already has local runtime/audio/vision source; see
+[local-runtime.md](local-runtime.md). It rejects unauthenticated plaintext commands
+and does not upload private audio. The new Mac implementation has not been built,
+tested, installed with models or exercised with a device. Historical prototype
+checks do not validate this delivery.
 
 ### Recommended next development gates
 
-1. Verify XiaoZhi S31 board port + official BSP/codec and write minimal adapter map; no wholesale fork.
-2. Mac Rust service supervisor/adapters for installed HF Speech-to-Speech and local LLM; plain local loopback process health.
-3. Pairing/identity and secured LAN channel before microphones/audio leave Bot.
-4. BLE Mac provisioning, then BLE app-control fallback; performance-gate compressed BLE speech.
-5. Audio session+media framing, interrupt/stop, command/event correlation; MediaScene JPEG player as later adapter.
-6. Identify a finished enclosure + reusable 2-DOF pan/tilt kit, add stereo speakers; validate power/servo protection before actuation. Prefer vendor CAD and hardware reference design over writing new mechanics.
+1. Prepare the Mac's explicit provider credentials, OpenCode v2, local model environment and model receipts; resolve dependencies when a real build is authorized.
+2. Connect the S31 runtime to the documented WSS v3 contract, including certificate trust, per-device credential, PCM framing and playback stop.
+3. Integrate the complete 小呆小呆 acoustic model and calibrate microphone/camera behavior on the actual board.
+4. Add BLE secure provisioning and app-control fallback; measure compressed BLE speech before promising it.
+5. Extend speech to streaming output and add image/animation scene players behind device capabilities.
+6. Fit the enclosure, speakers and eventual two-axis head hardware; validate power, limits and physical feedback before actuation.
 
 ## 8. Sources / decisions to preserve
 

@@ -3,6 +3,9 @@ mod identity;
 mod lan;
 mod pairing;
 mod provider;
+mod harness;
+mod memory;
+mod brain;
 
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
@@ -161,8 +164,32 @@ pub fn run() {
             );
             app.manage(Arc::clone(&hub));
             app.manage(Arc::clone(&pairing));
-            let registry = ProviderRegistry::new(config_dir, Arc::clone(&sink));
+            let registry = ProviderRegistry::new(config_dir.clone(), Arc::clone(&sink));
             app.manage(Arc::clone(&registry));
+
+            let event_app = app.handle().clone();
+            let brain_sink: brain::EventSink = Arc::new(move |event| {
+                // Do not persist prompts, transcripts, embeddings, tokens or media in logs.
+                eprintln!("[brain] {}", event.get("kind").and_then(serde_json::Value::as_str).unwrap_or("event"));
+                let _ = event_app.emit("brain:event", event);
+            });
+            let resource_worker = app.path().resource_dir().ok().map(|dir|dir.join("local-models/worker.py"))
+                .filter(|path|path.is_file())
+                .or_else(|| {
+                    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../local-models/worker.py");
+                    path.is_file().then_some(path)
+                });
+            let brain_host = brain::BrainHost::new(config_dir, resource_worker, brain_sink);
+            app.manage(Arc::clone(&brain_host));
+            if let Ok(runtime) = brain_host.get() {
+                if runtime.config.auto_start {
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = runtime.start().await {
+                            runtime.emit("service.start_failed", None, serde_json::json!({"error":error}));
+                        }
+                    });
+                }
+            }
 
             // Window/webview diagnostics: a blank window must never be
             // silent — log what each webview loaded (or failed to).
@@ -202,11 +229,28 @@ pub fn run() {
             pairing_list,
             pairing_approve,
             pairing_deny,
-            pairing_remove
+            pairing_remove,
+            brain::companion_request
         ])
         .on_page_load(|_webview, payload| {
             eprintln!("[page] {:?} {}", payload.event(), payload.url());
         })
-        .run(tauri::generate_context!())
-        .expect("ESP Bot Server console failed to start");
+        .build(tauri::generate_context!())
+        .expect("ESP Bot Server console failed to start")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                static CLOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !CLOSING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    api.prevent_exit();
+                    let host = app.try_state::<Arc<brain::BrainHost>>().map(|state|Arc::clone(&state));
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Some(host) = host {
+                            let _ = tokio::time::timeout(std::time::Duration::from_secs(12), host.shutdown()).await;
+                        }
+                        handle.exit(0);
+                    });
+                }
+            }
+        });
 }

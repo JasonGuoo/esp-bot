@@ -4,6 +4,14 @@
 
 **Implementation update 2026-11-06:** [local-runtime.md](local-runtime.md) records the source-integrated firmware. Hardware is awaiting delivery; this change was not compiled or tested. “Stationary V1” below describes the initial target configuration, not a verified installed robot. The custom wake model remains absent.
 
+**Latest Mac decision and source integration, 2026-11-06:** [mac-bot-server.md](mac-bot-server.md)
+records the new Rust/Tauri Brain. The user selected native **OpenCode v2.2.5** with
+**Qwen Coding Plan → GLM Coding Plan → DeepSeek Flash** and inherited browser/search MCP.
+This supersedes the older local-LLM/S2S default for LLM orchestration; ASR, TTS,
+voice/face embeddings and personal memory remain local. Mac WSS v3 is written,
+but the firmware client, BLE and physical validation remain pending. No server
+build, dependency resolution, model/API run, test or CI occurred in this delivery.
+
 ## 0. Updated strategic direction — Local-First Hybrid Brain (2026-10-30)
 
 The existing behavioral/sensor ownership rules below remain canonical. The deployment and hardware **target** has changed: *reuse successful open-source hardware/software modules* rather than reimplement them. [Full architecture](local-first-hybrid-brain.md); [projects and licenses](upstream-reuse-catalog.md).
@@ -21,7 +29,7 @@ The existing behavioral/sensor ownership rules below remain canonical. The deplo
 - Initial V1 target configuration: **ESP32-S31-Korvo-1 V1.1; stationary non-actuated head** with board camera, two microphones, touch LCD, speaker; user may move or rotate entire Bot. No installed IMU, motor, absolute compass or pose feedback.
 - **Vision-first:** when engaged, perceive multiple faces, retain one officially selected human, align **both displayed eyes** with human eye midpoint using the current camera-relative observation. No physical re-aiming of camera is possible in V1.
 - Next physical design target: off-the-shelf pan/tilt hardware with enclosed speakers; optional 6-axis IMU via adapters. One gaze controller and one target selector remain owners. This is planned, not installed. No promise of arbitrary-orientation stabilization by an unactuated camera.
-- **Primary Mac target server:** Rust + Tauri Bot Server on M4 Pro / 48 GB handles connection/UI and coordinates local ASR/LLM/TTS/tool sidecars. Mac-first is a design decision, not an implemented AI endpoint. Device must wake/animate and follow a visually present target without depending on server availability.
+- **Primary Mac server:** Rust + Tauri Bot Server on M4 Pro / 48 GB coordinates OpenCode, local ASR/TTS/identity, tools and memory. This is source-integrated but not run or built in the delivery. Device wake/animation/visual follow must remain independent of server availability.
 - **No CI:** deliver modular code without artificial validation infrastructure when hardware/environment unavailable; never claim unverified features are working.
 
 ## 2. Authority: local behavior master, bus and server
@@ -116,9 +124,9 @@ Audio module owns a shared microphone stream; wake keyword and optional DOA subs
 
 **On device:** ESP-IDF for S31; app_main now composes bot_platform, bot_bus, bot_runtime, official audio/wake and camera/detector adapters, focus/gaze/Face, stationary head and optional discovery/link. Source is integrated, not compiled or device-run; the complete wake model is not provisioned.
 
-**On Mac/Linux:** Rust/Tauri bot-server is the selected server, currently only a LAN discovery/WebSocket session console skeleton. The older Python server and firmware HTTP polling client exist as isolated prototype functionality. Neither is equivalent to a completed LLM/audio service on Rust/Tauri.
+**On Mac:** Rust/Tauri bot-server now composes the `brain`, native OpenCode `harness`, local model worker and SQLite `memory` modules, with a parent console and separate WSS v3 gateway. Official inference libraries are reused. Real Mac execution, installation and device integration remain unverified. Older Python and HTTP polling code stays isolated.
 
-**LAN:** mDNS discovery is not authenticated pairing. Existing WS hello/welcome is advisory, not cryptographically authenticated; no privileged remote control or private media should be sent until connection authentication and encryption are in place. See [lan-discovery.md](lan-discovery.md) and [shared/lan-discovery-v1.md](../shared/lan-discovery-v1.md). [shared/protocol.md](../shared/protocol.md) describes legacy Python HTTP polling, NOT the selected final wire protocol.
+**LAN:** mDNS discovery and the existing WS hello/welcome remain unauthenticated diagnostics. Mac WSS v3 uses rustls and separately provisioned device credentials; firmware has not yet implemented that client, so no private media is sent by current main. See [mac-gateway.md](mac-gateway.md), [shared/mac-brain-v3.md](../shared/mac-brain-v3.md), and the separate [LAN v1 contract](../shared/lan-discovery-v1.md). [shared/protocol.md](../shared/protocol.md) remains legacy Python HTTP polling.
 
 ## 8. Code and integration status (updated 2026-11-06)
 
@@ -132,10 +140,10 @@ Audio module owns a shared microphone stream; wake keyword and optional DOA subs
 
 **Still absent or pending:**
 - Dedicated **小呆小呆** acoustic model; board bring-up, camera geometry and acoustic calibration.
-- Calibrated human gaze/iris estimator, family identity, voice identity, DOA and real AEC/barge-in.
+- Calibrated human gaze/iris estimator, device DOA and real AEC/barge-in. Mac face/speaker enrollment and candidate matching are source-integrated, but thresholds are not calibrated and firmware media is not connected.
 - Physical backlight blackout: BSP 1.1.0 reports brightness control unsupported; current runtime uses a black overlay and keeps touch active.
-- Mechanical pan/tilt, IMU, secure BLE provisioning, authenticated/encrypted media transport.
-- End-to-end Mac ASR/LLM/TTS/harness and rich media scene player.
+- Mechanical pan/tilt, IMU, secure BLE provisioning and firmware-side authenticated/encrypted media transport.
+- Actual Mac model/harness execution, end-to-end S31 speech and a device rich media scene player. Mac reply cards already have a bounded console renderer in source.
 
 The old Python Brain/HTTP poller remains historical source and is excluded from main. See [local-runtime.md](local-runtime.md) for dependency pins, model preparation and actual failure behavior.
 

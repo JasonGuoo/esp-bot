@@ -15,7 +15,11 @@
 | 摄像头和人脸 | 官方 BSP + esp_video V4L2 + ESP-DL `HumanFaceDetect`；多脸框、五点关键点、临时跟踪 | 摄像头方向、曝光、内存/性能和注视几何待实机确认 |
 | 选人和眼睛跟随 | `attention_manager` 选唯一目标；`attention` 固定相机坐标模式；LVGL 双眼一致移动 | 不是家庭成员身份识别，也不是真正的人眼视线估计 |
 | 头部能力 | `head_motion` 固定头部适配器；无电机、无 IMU、无有效测量姿态 | 真实云台、限位、反馈和运动安全以后接入 |
-| Mac 连接边界 | `brain_link` 接已有 Wi-Fi/mDNS/WS；上报本地连接状态；拒绝未认证控制 | 加密认证、BLE 配网、音视频传输、Mac ASR/LLM/TTS 和 harness |
+| Mac 连接边界 | `brain_link` 接已有 Wi-Fi/mDNS/WS；上报本地连接状态；拒绝未认证控制 | 固件 WSS v3 客户端、证书/凭据接入、BLE 配网和设备媒体接线；Mac ASR/LLM/TTS/harness 已另行写入源码 |
+
+Mac 端后续交付见 [mac-bot-server.md](mac-bot-server.md)。该服务端与
+[WSS v3 契约](../shared/mac-brain-v3.md) 已有源码，但本设备入口尚未连接它，
+不能把服务端完成理解为固件已经上传录音或播放模型回复。
 
 旧 `main/brain_client.c` 保留为历史代码，但从 `main/CMakeLists.txt` 和启动链路移除。它不会与 runtime 同时争夺 Face，也不会继续轮询 Python HTTP Brain。
 

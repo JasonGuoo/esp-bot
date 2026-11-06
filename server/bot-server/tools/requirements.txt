@@ -1,0 +1,2 @@
+# Official MCP SDK v2; stdlib urllib implements the two documented DeepSeek calls.
+mcp==2.3.0

@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "auto_start": false,
+  "harness": {
+    "mode": "managed",
+    "executable": "opencode",
+    "base_url": "http://127.0.0.1:4097",
+    "inherit_config": null,
+    "required_mcp": ["browser", "deepseek-search"]
+  },
+  "models": {
+    "python": "/absolute/path/esp-bot/server/bot-server/local-models/.venv/bin/python",
+    "script": "/absolute/path/esp-bot/server/bot-server/local-models/worker.py",
+    "model_dir": "/Users/YOUR_USER/Library/Application Support/ai.reasonia.espbot.server/models",
+    "request_timeout_seconds": 120,
+    "voice": "Tingting"
+  },
+  "memory": {
+    "history_enabled": false,
+    "min_enrollment_samples": 3,
+    "face_threshold": 0.5,
+    "speaker_threshold": 0.7,
+    "match_margin": 0.08
+  },
+  "gateway": {
+    "enabled": false,
+    "bind": "0.0.0.0:7443",
+    "certificate_pem": null,
+    "private_key_pem": null,
+    "max_connections": 4
+  },
+  "conversation": {
+    "language": "zh-CN",
+    "default_speak": true,
+    "max_reply_characters": 1200,
+    "idle_session_seconds": 300,
+    "media_hosts": []
+  }
+}
