@@ -4,6 +4,12 @@
 
 > Hardware target is **ESP32-S31-Korvo-1 V1.1** (ESP32-S31), **not** ESP32-S3-Korvo-1. The S31 board has an 800×480 RGB display and GT1151 touch panel. Use ESP-IDF 6.1 / `esp32s31`, not `esp32s3`.
 
+## Local runtime source delivered — 2026-11-06
+
+**[本地 Runtime 实现与接入指南](docs/local-runtime.md)** is the current implementation record. `app_main` now composes the local behavior runtime, bounded bus, official ESP-SR audio adapter, official esp_video/ESP-DL camera adapter, one focus manager, stationary gaze, Face/touch/stop UI, and an optional LAN diagnostic boundary. The legacy HTTP poller is no longer started or built by main.
+
+**Hardware has not arrived. This delivery was not compiled, tested, flashed, or run; no CI was added.** The dedicated **小呆小呆** acoustic model remains unprovisioned. Face detection/landmarks do not identify family members or estimate human gaze. Mac speech/harness integration, secure media transport and BLE provisioning remain subsequent work.
+
 ## New project direction: reuse-first + Mac-first (2026-10-30)
 
 **小呆 now prioritizes mature open-source modules rather than recreating audio, media, hardware or inference stacks.** Our **M4 Pro / 48 GB Mac with Rust/Tauri `server/bot-server`** is the primary local AI Brain. The device favors secure Wi-Fi mDNS, with **Bluetooth (BLE) Mac provisioning and control fallback** when Wi-Fi is unconfigured or offline. Mac-local STT/LLM/TTS is the default; cloud models/search are optional and permission-controlled. **All device-local wake/behavior stays independent of Mac availability.**
@@ -17,17 +23,17 @@ The **new physical target** is a good-looking enclosed **pan/tilt** head with in
 
 - **[Current system authority / behavior architecture](docs/architecture.md)**
 
-**Status:** These are updated decisions and research. No claims of compiled BLE, working local Mac speech engine, motor assembly or production secure pairing.
+**Status:** The device runtime and official peripheral adapters now have source integration. No claims of compiled firmware, BLE, working local Mac speech, motor assembly or production secure pairing.
 
 ## Identity and wake-word policy
 
-The robot is named **小呆** (Xiao Dai). Its **only production wake phrase is 小呆小呆**, recognized as one complete four-syllable on-device keyword. A single 小呆 must not wake it. A screen-off night state still keeps the local wake listener active. See [wake-word specification](docs/wake-word.md) and [shared identity manifest](shared/bot-identity.json). **The dedicated keyword model and wake integration are not yet provisioned or hardware-validated**; merely setting the display name does not enable custom wake recognition.
+The robot is named **小呆** (Xiao Dai). Its **only production wake phrase is 小呆小呆**, recognized as one complete four-syllable on-device keyword. A single 小呆 must not wake it. Night mode leaves the local audio owner running. See [wake-word specification](docs/wake-word.md) and [shared identity manifest](shared/bot-identity.json). **WakeNet integration is written; the dedicated model is not provisioned and the pipeline is not hardware-validated.** Missing resources report `WAKE_MODEL_MISSING`; deliberate touch remains the manual entry point.
 
 ## System decisions and authoritative documents
 
-**Hardware currently installed:** fixed, non-actuated head/camera (the whole device can be moved by hand); **no IMU and no physical pan/tilt yet**. A new off-the-shelf enclosed pan/tilt build is now the physical target. When a target stays inside camera FOV, the screen eyes can follow its eye midpoint; software cannot mechanically turn the camera back after the person leaves the image. Future pan/tilt and optional IMU use the same target/gaze controller via replaceable adapters.
+**Initial target configuration:** fixed, non-actuated head/camera; **hardware is still awaiting delivery, with no installed IMU or pan/tilt**. The stationary adapter reports no measured head pose. Screen eyes use the selected person's current camera-relative eye midpoint; software cannot mechanically re-aim a fixed camera after the person leaves the image. Future pan/tilt and optional IMU use replaceable adapters.
 
-**Behavior V1:** idle → bored → drowsy → asleep, optional night LCD sleep; no spontaneous greetings and no waking merely because a face appears or someone looks at Bot. Wake is always local by **小呆小呆** (or deliberate touch/manual action). Camera may sleep at night; on-device keyword listening remains active. A dedicated four-syllable wake model has **not** yet been provisioned, and end-to-end hardware wake is NOT implemented.
+**Behavior V1:** idle → bored → drowsy → asleep, optional night policy; no spontaneous greetings or wake from faces/room chatter. Only the complete **小呆小呆** model event or deliberate touch starts engagement. Passive/night states pause camera capture/inference while keeping local audio alive. This BSP cannot control LCD brightness, so the implemented display fallback is a logical black overlay with active touch, not physical backlight-off.
 
 The canonical system ownership specification is **[docs/architecture.md](docs/architecture.md)**, with deployment/provider/Bluetooth policy in **[docs/local-first-hybrid-brain.md](docs/local-first-hybrid-brain.md)**. Related ownership-specific sources:
 
@@ -41,6 +47,7 @@ The canonical system ownership specification is **[docs/architecture.md](docs/ar
 | [Two-mic acoustic DOA](docs/audio-direction.md) | Sound bearing hints and front/back ambiguity; not a wake engine |
 | [Hardware / sensor / power](docs/hardware-power.md) | Real S31 capability, camera exposure, display sleep limits |
 | [Implementation roadmap](docs/implementation-roadmap.md) | Existing versus planned code, integration order and disclosure |
+| [Local runtime implementation](docs/local-runtime.md) | Actual startup, official adapters, dependencies, partitions, model preparation and Mac boundary |
 | [Appearance design](docs/face-design.md) · [LAN discovery](docs/lan-discovery.md) | UI/Face and existing isolated link architecture |
 
 **No CI:** this project is code-first; do not create CI workflows or block implementation on unavailable test hardware. Report build/device verification honestly (see [AGENTS.md](AGENTS.md)).
@@ -49,10 +56,15 @@ The canonical system ownership specification is **[docs/architecture.md](docs/ar
 
 | Path | Responsibility |
 | --- | --- |
-| `firmware/` | ESP-IDF device program; official S31 Korvo-1 BSP, reusable LVGL face component, Wi-Fi Brain client |
+| `firmware/` | Integrated ESP-IDF local runtime using the official S31 BSP; no legacy HTTP polling in main |
+| `firmware/components/bot_runtime/` · `bot_bus/` | Local behavior/session authority, cancellation and bounded task communication |
+| `firmware/components/bot_audio/` · `bot_vision/` | Official ESP-SR/codec and esp_video/ESP-DL adapters |
+| `firmware/components/bot_platform/` · `head_motion/` | Board resource support and honest stationary hardware capabilities |
+| `firmware/components/attention_manager/` | One selected focus with dwell, hysteresis and visual-loss handling |
 | `firmware/components/face/` | Reusable expression controller, pluggable eye renderers, subtitles and Settings -> Appearance UI |
 | `firmware/components/attention/` | Independent eye-contact geometry: shared gaze direction, head setpoints and confidence gating |
-| `firmware/components/vision_attention/` | On-board-ready multi-face tracking core with separate per-person eye positions, gaze events, fixation times and provisional pupil localization; not camera-integrated yet |
+| `firmware/components/vision_attention/` | Multi-face tracking core fed by bot_vision; pupil candidates remain separate from actual human-gaze evidence |
+| `firmware/components/brain_link/` · `lan_link/` | Optional Wi-Fi discovery/diagnostic WS; rejects untrusted remote control |
 | `server/` | Older Python Brain prototype and the Rust/Tauri `server/bot-server/` local brain console: persistent identity, pairing soft gate, server→device `face.set` command push and local LLM provider adapters |
 | `shared/` | Canonical theme tokens and documented JSON/HTTP contract |
 | `preview/` | Browser-based interactive face preview; no board required |
@@ -76,7 +88,7 @@ python3 -m http.server 8765 --bind 127.0.0.1
 
 Touch the simulated screen to show the corner gear (auto-hides after five seconds). Open **Settings → Appearance**, select one of the five installed pastel appearances (mint/sakura/lavender/butter/sky), then press **Apply** to return to the face. Selection does nothing until Apply, and the preview persists the choice in localStorage. All five shipped styles share an outline renderer; future appearance packs can choose entirely different eye geometries, assets and motion profiles. Use the debug panels below the screen to test expressions, gaze direction and subtitles.
 
-### Brain server (Python 3.10+)
+### Legacy Brain server (Python 3.10+, isolated prototype)
 
 ```sh
 cd server
@@ -84,21 +96,21 @@ python3 -m espbot
 # http://127.0.0.1:8766/health
 ```
 
-No third-party Python dependencies. Local-only by default. For ESP32 Wi-Fi access, set `ESPBOT_BIND=0.0.0.0` **and** `ESPBOT_TOKEN` to a random secret; see [server/README.md](server/README.md). Do not expose this plain HTTP prototype directly to the internet.
+No third-party Python dependencies. Local-only by default; see [server/README.md](server/README.md). The current firmware entry point no longer polls this prototype. The selected Mac service is `server/bot-server`; authenticated speech/media integration is still pending.
 
 ### Firmware (S31 board)
 
-Use Espressif **ESP-IDF 6.1+ with ESP32-S31 support**, then:
+These are **future setup commands**, not commands executed for the current source-only delivery. Use Espressif **ESP-IDF 6.1+ with ESP32-S31 support**, then:
 
 ```sh
 cd firmware
 idf.py set-target esp32s31
-idf.py menuconfig  # ESP Bot: optional Wi-Fi, Brain URL and shared token
+idf.py menuconfig  # ESP Bot + Xiaodai local audio/vision/runtime options
 idf.py build
 idf.py -p /dev/ttyACM0 flash monitor
 ```
 
-The face can run without a Brain connection. The ESP-IDF build and real-device testing still need to be performed on the actual board; these steps are **not** claimed as hardware-validated.
+Local policy, touch and perception adapters do not require a Brain connection. Read [model/partition preparation and current limitations](docs/local-runtime.md) first. This change has **not been built or run**.
 
 ## Face module API
 
@@ -114,13 +126,11 @@ One face API, multiple appearance packs. A pack selects a renderer, colors and m
 
 ## Roadmap and boundaries
 
-**In this baseline:** LVGL Face component with independent renderers and five installed macaron appearances; two-level Settings → Appearance → Apply navigation with NVS persistence; touch-revealed gear; blinking, shared pupil gaze and subtitle area; a host-testable Attention coordinator that calculates coupled head/gaze targets and refuses false mutual-eye-contact claims; Python Brain HTTP command queues, optional text-model adapter and allowlisted tool registry; optional ESP32 Wi-Fi polling.
+**Written and integrated:** local runtime/bus/focus manager; official audio capture, AFE/WakeNet/VAD and bounded PCM playback; official camera capture and ESP-DL detection; stationary gaze; Face expression/touch/stop/settings; logical night blackout; optional LAN ingress. Existing themes and appearance persistence remain.
 
-**Architecture update:** bot_runtime, bot_bus, attention_manager, head_motion stationary adapter and unified audio/wake modules are documented **but not implemented**. The Rust/Tauri bot-server now carries a persistent identity, a pairing soft gate, server→device `face.set` command push (v2 envelope with acks) and OpenAI-compatible/S2S text provider adapters — unit-tested and fake-bot tested, **not** hardware-validated. firmware `lan_link` remains standalone: the shipped device app still starts LVGL Face plus optional legacy Python Brain polling.
+**Explicitly pending:** dedicated 小呆小呆 model, hardware calibration/bring-up, real AEC and automatic voice barge-in, person/voice identity, calibrated human gaze, DOA, actuators, BLE provisioning, authenticated encrypted audio/media, Mac ASR/TTS/harness, rich image/animation/web scene player. The Rust server's development `face.set` requests now receive `AUTH_REQUIRED` from the default firmware boundary until a secure session adapter is added.
 
-**Vision core now available separately:** [multi-person visual attention specification](docs/visual-attention.md), [vision_attention C component](firmware/components/vision_attention/README.md). Multi-face tracking and candidate iris localization are implemented as independent cores; ESP-DL camera capture and genuine calibrated gaze recognition are still pending.
-
-**Later:** full ESP-IDF and real-board build/flash verification; camera face detection and a *separate* classifier for whether the person looks at the robot; 3D camera-to-display/head calibration; servo feedback and pan/tilt actuation; speech streaming, TTS, Wi-Fi discovery, pairing and encryption. The current Attention module is a geometric **planner**, not a working camera or motor driver.
+See [implementation inventory](docs/implementation-roadmap.md) and [local runtime guide](docs/local-runtime.md). No compilation or tests were performed for this firmware delivery.
 
 Read [face design](docs/face-design.md), [appearance pack contract](shared/appearance-packs.md), [human eye-contact architecture](docs/eye-contact.md), and [device/Brain protocol](shared/protocol.md) before integrating new components.
 

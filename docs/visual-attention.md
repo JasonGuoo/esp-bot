@@ -1,6 +1,6 @@
 # Visual Attention v0.1 — multi-person eyes, gaze and eye contact
 
-**Target:** ESP32-S31-Korvo-1 V1.1 (esp32s31), onboard camera; local processing independent of network, Brain, LVGL and motors. **Status:** standalone multi-face tracker and pupil candidate code are on main; LIVE camera/ESP-DL capture and true calibrated eye-gaze integration have NOT been implemented or device-tested. See [architecture.md](architecture.md) for the canonical system architecture.
+**Target:** ESP32-S31-Korvo-1 V1.1 (esp32s31), onboard camera; local processing independent of network, Brain, LVGL and motors. **Status (2026-11-06):** bot_vision now source-integrates official esp_video capture and ESP-DL face/eye landmarks with this tracker, the focus manager and rendered eyes. No build or device run was performed. True calibrated human-gaze and family identity remain unimplemented. See [local-runtime.md](local-runtime.md) for the timestamp estimate, orientation and pause limitations. See [architecture.md](architecture.md) for the canonical system architecture.
 
 ## Non-negotiable behavior
 
@@ -125,7 +125,7 @@ For N faces, cap work per frame but schedule **fairly across people**. Never per
 
 ## Implementation phases
 
-**A — core, independent of board (merged into main; NOT a live perception pipeline):** multi-face temporal tracker, value-copy output contract, per-person event/duration accounting, provisional grayscale pupil-candidate localizer and optional host-side example tests. These are software building blocks, not camera/eye-gaze hardware verification.
+**A — core, independent of board (now fed by the bot_vision adapter in main, not device-validated):** multi-face temporal tracker, value-copy output contract, per-person event/duration accounting, provisional grayscale pupil-candidate localizer and optional host-side example tests. These are software building blocks, not camera/eye-gaze hardware verification.
 
 **B — S31 acquisition + ESP-DL adapter:** official ESP-IDF 6.1, BSP, `esp_video`, MSR/MNP face detection and five landmarks, then high-res eye crops. Check all source API versions and memory budgets on real hardware.
 

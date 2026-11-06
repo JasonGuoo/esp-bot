@@ -23,7 +23,8 @@ void face_destroy(face_view_t *view);
 /** Theme IDs: mint, sakura, lavender, butter, sky. False on unknown ID. */
 bool face_set_theme(face_view_t *view, const char *theme_id);
 
-/** idle, listening, happy, curious, thinking, surprised, sleepy, shy, blink. */
+/** idle, listening, happy, curious, thinking, surprised, sleepy, shy, blink,
+ * bored, drowsy, sleeping, speaking. */
 bool face_set_expression(face_view_t *view, const char *expression);
 
 /** -100..100 gaze offset; values are clamped and eased by the component timer. */
@@ -34,6 +35,19 @@ void face_set_subtitle(face_view_t *view, const char *text);
 
 /** Reveal the top-right gear for five seconds; opens Settings -> Appearance. */
 void face_reveal_settings(face_view_t *view);
+
+typedef enum {
+    FACE_EVENT_TOUCH, FACE_EVENT_STOP,
+    FACE_EVENT_SETTINGS_OPENED, FACE_EVENT_SETTINGS_CLOSED
+} face_event_t;
+/** UI events are intent only; runtime owns behavior. Callback runs under the
+ * LVGL lock and must only enqueue work. No driver/network calls in callback. */
+typedef void (*face_event_cb_t)(face_event_t event, void *context);
+void face_on_event(face_view_t *view, face_event_cb_t callback, void *context);
+void face_set_stop_visible(face_view_t *view, bool visible);
+/** Pause only the rendering animation timer, e.g. behind logical blackout.
+ * Does not disable board touch or decide when to sleep. */
+void face_set_animation_active(face_view_t *view, bool active);
 
 /** Invoked only when a person taps Apply in Appearance.
  *  Persistence belongs to the application, NOT to the reusable Face component.

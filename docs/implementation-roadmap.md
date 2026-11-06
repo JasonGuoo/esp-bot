@@ -12,7 +12,7 @@ Before adding custom audio/motor/transport code: identify upstream equivalent, d
 
 1. Passive/quiet by default: occasional blink → bored → drowsy → sleeping; at night attempt fully dark LCD; **no unsolicited greeting**.
 2. Device-local full-phrase wake **小呆小呆** only. Bare 小呆 and incidental faces/sounds do NOT wake or initiate conversation.
-3. Currently installed V1 **fixed, non-actuated** head/camera that can be lifted, rotated or tilted by a human; **no IMU**, no compass or room coordinate map.
+3. Initial V1 target **fixed, non-actuated** head/camera that can be lifted, rotated or tilted by a human; **no IMU**, no compass or room coordinate map.
 4. V1 vision-first rendering: track a chosen person's **eye midpoint**, keep bot's rendered eyes jointly aimed while target remains visible. **Cannot physically turn camera** in V1.
 5. Vision tracks multiple faces independently; actual conversation target selection belongs to attention_manager. Actual human look-at-Bot inference is distinct from "eyes are located at x/y".
 6. Future head pan/tilt and optional IMU must plug into the same attention controller, rather than owning a second target selector.
@@ -21,47 +21,50 @@ Before adding custom audio/motor/transport code: identify upstream equivalent, d
 
 See [architecture.md](architecture.md) for canonical module ownership, [module-contracts.md](module-contracts.md) for events, [behavior-lifecycle.md](behavior-lifecycle.md), [wake-word.md](wake-word.md), [eye-contact.md](eye-contact.md) and [audio-direction.md](audio-direction.md).
 
-## 2. Implementation inventory (as of 2026-10-30)
+## 2. Implementation inventory (as of 2026-11-06)
 
-| Area | Existing repository code | Still missing |
+Hardware is awaiting delivery. This local-runtime source delivery was **not compiled, tested, flashed or run**. Detailed startup/model/dependency instructions: [local-runtime.md](local-runtime.md).
+
+| Area | Source now present and integrated | Still missing |
 |---|---|---|
-| Face/appearance | ESP-IDF/LVGL Face component, replaceable eye renderers, themes, touch appearance menu, browser preview | Runtime policy integration and actual wake/sleep behavior; device-level validation |
-| Geometry attention | Standalone C attention planner, shared pupil direction, theoretical pan/tilt output, freshness/dwell fields | Stationary V1 mode, selected-target adapter, true sensor coordinate calibration, real motor feedback later |
-| Multi-face vision | vision_attention C temporal multi-track snapshots, per-person fixation clocks, provisional dark-pupil candidate locator | S31 esp_video capture, actual ESP-DL model adapter, robust calibrated eye-gaze inference, camera ROI integration |
-| On-device wake | shared/bot-identity.json, wake-word design | **Dedicated 小呆小呆 model unprovisioned**, shared mic/AFE/WakeNet capture, runtime event integration |
-| DOA | Public Espressif S31 example documented | Board audio-direction module, reliable synchronized stream adapter, calibration and focus fusion |
-| Local coordinator/bus | Architecture and docs | bot_runtime, bot_bus, attention_manager, resource/power lifecycle |
-| Motion/IMU | Pure geometric planner + design | Real motor hardware absent; stationary adapter first; IMU optional future |
-| Connectivity | firmware/components/lan_link, Rust/Tauri server/bot-server with persistent identity, pairing soft gate, `face.set` command push (v2 envelope + acks) and OpenAI-compatible/S2S text provider adapters (2026-10-31) | Main integration, cryptographic pairing + encrypted channel, audio/video media routing, live STT/TTS |
-| Legacy server/transport | Python server and ESP HTTP polling client exist | Retirement/reconciliation after Rust/Tauri Brain reaches feature parity |
+| Face/appearance | LVGL renderers/themes, touch wake, stop/settings intent, passive expressions, main runtime rendering | Device tuning and UI hardware validation |
+| Geometry attention | Selected focus → current camera-relative stationary gaze; no fake measured pose or mechanical recenter | Real camera/screen geometry and future motor feedback |
+| Multi-face vision | Official BSP + esp_video 2.4.1 V4L2 + ESP-DL human_face_detect adapter feeding existing tracker | Physical orientation/latency checks, calibrated human gaze/iris and family identity |
+| On-device wake/audio | Single codec owner, official ESP-SR AFE/WakeNet/VAD, PCM queue/playback/cancel, runtime token gates | **Dedicated 小呆小呆 model unprovisioned**; true AEC, voice identity, hardware validation |
+| DOA | Official Espressif example catalogued | Dual-mic synchronized direction adapter and calibration |
+| Local coordinator/bus | bot_runtime, bot_bus, attention_manager, epoch fences, overflow/stop handling and resource requests | Future additional semantic/media actions |
+| Display/night | Logical black overlay preserving touch, camera STREAMOFF/inference pause, audio kept running | BSP backlight control unsupported; actual full blackout/rail power-off not provided |
+| Motion/IMU | Stationary head_motion capability adapter, unsupported motion requests, invalid pose feedback | Motors, IMU and real actuator driver |
+| Connectivity | Main brain_link uses existing Wi-Fi/mDNS/WS; AUTH_REQUIRED receipts; runtime has typed semantic arbitration | Cryptographic pairing/encrypted transport, BLE provisioning, private media, Mac speech/harness integration |
+| Legacy transport | Python server and HTTP client source retained | HTTP client is already excluded from firmware main; legacy server remains independent |
 
-No live wake-on-name, camera gaze, DOA localization, sleeping physical blackout or true mechanical tracking is claimed implemented in hardware.
+Existing Rust/Tauri server text providers, command console and soft pairing remain unchanged by this firmware delivery. No live hardware wake, camera gaze, DOA, physical blackout or mechanical tracking is claimed verified.
 
 ## 3. Delivery sequence, with clear gates
 
-### P0 — central ownership and contracts
+### P0 — central ownership and contracts (source delivered)
 - Write **bot_bus** (events, commands, latest snapshots, bounded queue rules).
 - Write **bot_runtime** (one behavior authority, passive lifecycle, wake event, session/turn generations, preferences and capability/health flags).
 - Write **attention_manager** (one official current focus; candidate/confirmed/temporarily-lost/reacquisition).
 - Write **head_motion** stationary adapter reporting no motors rather than fabricated joint feedback.
-- app_main becomes thin composition root. Keep existing Face and legacy transport functioning until cutover.
+- app_main is the composition root. Existing Face remains; legacy HTTP polling is excluded from main to preserve single authority.
 - Confirm interface discipline: never allow server or renderer to steal live gaze.
 
-### P1 — hard requirement: local name-based wake
+### P1 — local name-based wake (adapter delivered, acoustic model pending)
 - Introduce unified **audio** input owner, two-channel capture and local on-device WakeNet adapter.
 - Provision and package real recognition resources for the **entire phrase 小呆小呆**; bare 小呆 stays negative.
 - Emit one WAKE_DETECTED event with capture time; no pre-wake voice upload; wake remains alive with LCD/camera stopped and network offline.
 - Implement waking Face animation and interactive session start; no promise of physical head lift.
 - If model is missing: report WAKE_MODEL_MISSING, never a fake wake success. Development stock models are bring-up aids ONLY, not production aliases.
 
-### P2 — true camera-driven rendered-eye gaze (fixed base)
+### P2 — camera-driven rendered-eye gaze (adapter/selection/gaze source delivered)
 - Use official S31 BSP + esp_video frame acquisition with single capture owner and timestamp/rotation normalization.
 - Add ESP-DL MSR/MNP multi-face/5-landmark adapter, use high-resolution eye ROIs for separate pupil/gaze stage; preserve UNKNOWN when evidence insufficient.
 - Connect perception → focus manager → calibrated camera-relative eye target → stationary attention gaze planner → Face LVGL.
 - Handle 0,1,2+ faces, target switch hysteresis and short visual loss. Distinguish human eye location, human looking-at-Bot and Bot's ability to aim eyes.
 - When robot is rotated manually: remeasure and adjust rendered eyes **if target still in FOV**, otherwise mark localization lost without pretending the camera rotated back.
 
-### P3 — conversation and lifecycle integration
+### P3 — conversation and lifecycle integration (local policy delivered; secure Mac media pending)
 - Connect audio session (after wake) to Rust/Tauri Brain gateway with explicit session/turn IDs and command arbitration.
 - Implement listening/thinking/speaking expressions without overriding gaze, stop/interrupt handling, caption lifetime.
 - Implement configurable IDLE/BORED/DROWSY/SLEEPING/NIGHT_DARK and camera/LCD sleep request, wake/resume.

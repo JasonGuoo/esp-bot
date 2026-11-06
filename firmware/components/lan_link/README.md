@@ -1,8 +1,7 @@
 # lan_link — reusable ESP32-S31 LAN discovery and WebSocket client
 
-Standalone ESP-IDF component. It is deliberately **not added to app_main.c,
-brain_client.c, or the face/settings UI** yet. It neither starts Wi-Fi nor
-touches LVGL. The main application must own Wi-Fi credentials and create a STA
+Reusable ESP-IDF component, now composed by app_main through **brain_link**.
+It neither starts Wi-Fi nor touches LVGL. The old brain_client is not started. The main application must own Wi-Fi credentials and create a STA
 network interface. This component waits for a usable IPv4 address and handles
 mDNS plus a persistent WebSocket session without a fixed server IP or port.
 
@@ -17,14 +16,18 @@ Header: include/bot_lan.h. The API is asynchronous except for snapshot reads.
 - bot_lan_disconnect(): disconnect and pause auto-connect
 - bot_lan_resume_auto(): re-enable automatic searches
 - bot_lan_state(): current status
-- bot_lan_send_event(json): future application bridge
+- bot_lan_send_event(json): bounded event envelope
+- bot_lan_send_response(json): bounded response with id/ok
+
+Both send paths bind queued frames to the current connection generation; old
+queued output is dropped across reconnect. Enqueue failure is returned explicitly.
 
 Automatic mode connects only when **exactly one** compatible server is found.
 When multiple exist, it emits SELECTION_REQUIRED and waits for the settings UI
 to let the user choose. Wi-Fi loss triggers recovery; after a failed handshake,
 the worker retries discovery on its configured interval.
 
-### Example integration (reference only, not part of the current app)
+### Example integration (the current app's adapter is in brain_link)
 
     static void lan_event(const bot_lan_event_t *ev, void *ctx) {
         (void)ctx;
@@ -53,7 +56,8 @@ component's idf_component.yml.
 
 - Callback runs in a networking context; never call LVGL directly.
 - No Wi-Fi setup, credentials, audio, face or motor changes.
-- No pairing or cryptographic verification yet. **Trusted LAN only.**
+- No pairing or cryptographic verification yet. Current brain_link rejects remote
+  requests with AUTH_REQUIRED; this channel is only diagnostic and carries no private media.
 - Discovery records are not identity proofs. The server ID and protocol are
   compatibility checks, not authenticity guarantees.
 - Automatic discovery requires working LAN multicast (UDP 5353); guest Wi-Fi
@@ -61,4 +65,4 @@ component's idf_component.yml.
 - Initial link uses IPv4. No Internet or cross-subnet rendezvous.
 - Do not call mdns_free from this module because other components may share
   the resolver. Set mdns_preinitialized=true if the app initialized it.
-- Compilation and real-board tests are left for the next integration stage.
+- This integration was not compiled, tested, or run on hardware. No CI was added.

@@ -1,21 +1,67 @@
 menu "ESP Bot"
     config ESPBOT_WIFI_SSID
-        string "Wi-Fi SSID (leave blank for face-only demo)"
+        string "Wi-Fi SSID (blank keeps the complete local runtime offline)"
         default ""
 
     config ESPBOT_WIFI_PASSWORD
         string "Wi-Fi password (stored locally in sdkconfig)"
         default ""
 
-    config ESPBOT_BRAIN_URL
-        string "Brain HTTP base URL (e.g. http://192.168.1.5:8766)"
-        default ""
-
-    config ESPBOT_AUTH_TOKEN
-        string "Brain shared bearer token (LAN development only)"
-        default ""
-
     config ESPBOT_DEVICE_ID
         string "Device ID (ASCII URL-safe)"
         default "korvo-01"
+
+    config ESPBOT_NIGHT_SCHEDULE
+        bool "Apply local night schedule when wall clock is valid"
+        default n
+        help
+            No network time source is started by this runtime. A future trusted
+            time service or manual setup must initialize the wall clock first.
+            Without a valid clock, ordinary passive timers continue to work.
+
+    config ESPBOT_TIMEZONE
+        string "POSIX timezone for night schedule"
+        default "CST-8"
+        depends on ESPBOT_NIGHT_SCHEDULE
+
+    config ESPBOT_NIGHT_START_MINUTE
+        int "Night begins, minutes after local midnight"
+        range 0 1439
+        default 1350
+        depends on ESPBOT_NIGHT_SCHEDULE
+
+    config ESPBOT_NIGHT_END_MINUTE
+        int "Night ends, minutes after local midnight"
+        range 0 1439
+        default 420
+        depends on ESPBOT_NIGHT_SCHEDULE
+
+    config ESPBOT_GAZE_CALIBRATED
+        bool "Camera-to-display orientation/geometry physically calibrated"
+        default n
+        help
+            Keep disabled until real hardware calibration. Approximate visual
+            following remains allowed, but mutual gaze is never claimed without
+            calibration AND an independent human-gaze estimator.
+
+    config ESPBOT_GAZE_MIRROR_X
+        bool "Mirror camera eye midpoint for display gaze"
+        default n
+
+    config ESPBOT_GAZE_MIRROR_Y
+        bool "Mirror vertical eye midpoint for display gaze"
+        default n
+
+    config ESPBOT_CAMERA_FOV_X_DEG
+        int "Approximate horizontal camera field of view, degrees"
+        range 10 160
+        default 60
+        help
+            Initial mapping parameter, not a measured OV3660 lens specification.
+            Replace with calibrated effective FOV for the installed camera.
+
+    config ESPBOT_CAMERA_FOV_Y_DEG
+        int "Approximate vertical camera field of view, degrees"
+        range 10 140
+        default 45
 endmenu

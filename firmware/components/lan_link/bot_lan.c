@@ -31,6 +31,7 @@ typedef enum {
 
 typedef struct {
     cmd_kind_t kind;
+    uint32_t generation;
     bot_lan_server_t server;
     char json[BOT_LAN_MAX_EVENT_JSON + 1];
 } command_t;
@@ -54,6 +55,7 @@ static struct {
     bool hello_sent;
     bool welcomed;
     bool ws_failed;
+    uint32_t generation;
     TickType_t connection_started;
     TickType_t last_scan;
 } s;
@@ -125,7 +127,9 @@ static void websocket_event(void *handler_args, esp_event_base_t base,
         xSemaphoreTake(s.mutex, portMAX_DELAY);
         s.ws_failed = true;
         s.ws_connected = false;
+        s.welcomed = false;
         xSemaphoreGive(s.mutex);
+        notify(BOT_LAN_EVENT_DISCONNECTED, ESP_OK, NULL);
         return;
     }
     if (event_id != WEBSOCKET_EVENT_DATA || !event_data) return;
@@ -139,7 +143,7 @@ static void websocket_event(void *handler_args, esp_event_base_t base,
     char input[BOT_LAN_MAX_EVENT_JSON + 1];
     memcpy(input, data->data_ptr, (size_t)data->data_len);
     input[data->data_len] = '\0';
-    cJSON *root = cJSON_Parse(input);
+    cJSON *root = cJSON_ParseWithLengthOpts(input, (size_t)data->data_len + 1, NULL, true);
     if (!root || !cJSON_IsObject(root)) {
         cJSON_Delete(root);
         return;
@@ -148,7 +152,7 @@ static void websocket_event(void *handler_args, esp_event_base_t base,
     if (cJSON_IsString(type) && strcmp(type->valuestring, "welcome") == 0) {
         const cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "protocol");
         const cJSON *server_id = cJSON_GetObjectItemCaseSensitive(root, "server_id");
-        bool valid = cJSON_IsNumber(version) && version->valueint == BOT_LAN_PROTOCOL_VERSION &&
+        bool valid = cJSON_IsNumber(version) && version->valuedouble == BOT_LAN_PROTOCOL_VERSION &&
                      cJSON_IsString(server_id);
         xSemaphoreTake(s.mutex, portMAX_DELAY);
         valid = valid && strcmp(s.selected.server_id, server_id->valuestring) == 0;
@@ -197,6 +201,7 @@ static esp_err_t start_connection(const bot_lan_server_t *server) {
     destroy_socket();
     xSemaphoreTake(s.mutex, portMAX_DELAY);
     s.selected = *server;
+    if (++s.generation == 0) ++s.generation;
     s.ws_failed = false;
     s.ws_connected = false;
     s.hello_sent = false;
@@ -323,7 +328,7 @@ static void worker(void *arg) {
                 }
             } else if (cmd.kind == CMD_SEND_EVENT && s.ws) {
                 xSemaphoreTake(s.mutex, portMAX_DELAY);
-                bool ready = s.welcomed;
+                bool ready = s.welcomed && s.ws_connected && cmd.generation == s.generation;
                 xSemaphoreGive(s.mutex);
                 if (ready) (void)esp_websocket_client_send_text(
                     s.ws, cmd.json, (int)strlen(cmd.json), pdMS_TO_TICKS(1500));
@@ -458,20 +463,34 @@ bot_lan_state_t bot_lan_state(void) {
     return state;
 }
 
-esp_err_t bot_lan_send_event(const char *json) {
+static esp_err_t send_envelope(const char *json, const char *expected_type) {
     if (!json) return ESP_ERR_INVALID_ARG;
     size_t len = strnlen(json, BOT_LAN_MAX_EVENT_JSON + 1);
     if (!len || len > BOT_LAN_MAX_EVENT_JSON) return ESP_ERR_INVALID_SIZE;
-    cJSON *root = cJSON_Parse(json);
+    cJSON *root = cJSON_ParseWithLengthOpts(json, len + 1, NULL, true);
     if (!cJSON_IsObject(root)) {
         cJSON_Delete(root);
         return ESP_ERR_INVALID_ARG;
     }
     const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
-    bool valid = cJSON_IsString(type) && strcmp(type->valuestring, "event") == 0;
+    bool valid = cJSON_IsString(type) && strcmp(type->valuestring, expected_type) == 0;
+    if (valid && strcmp(expected_type, "response") == 0) {
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "id");
+        const cJSON *ok = cJSON_GetObjectItemCaseSensitive(root, "ok");
+        valid = cJSON_IsString(id) && id->valuestring[0] && cJSON_IsBool(ok);
+    }
     cJSON_Delete(root);
-    if (!valid || bot_lan_state() != BOT_LAN_CONNECTED) return ESP_ERR_INVALID_STATE;
+    if (!valid) return ESP_ERR_INVALID_ARG;
+    if (!s.mutex) return ESP_ERR_INVALID_STATE;
     command_t cmd = { .kind = CMD_SEND_EVENT };
+    xSemaphoreTake(s.mutex, portMAX_DELAY);
+    bool ready = s.welcomed && s.ws_connected;
+    cmd.generation = s.generation;
+    xSemaphoreGive(s.mutex);
+    if (!ready) return ESP_ERR_INVALID_STATE;
     memcpy(cmd.json, json, len + 1);
     return submit(&cmd);
 }
+
+esp_err_t bot_lan_send_event(const char *json) { return send_envelope(json, "event"); }
+esp_err_t bot_lan_send_response(const char *json) { return send_envelope(json, "response"); }

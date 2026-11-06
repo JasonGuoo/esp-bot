@@ -104,4 +104,4 @@ Wake detection and DOA may share the same microphone owner but do not both need 
 
 ## 8. Current implementation status
 
-This document defines the intended product policy, **not** a claim of running implementation. The repository currently implements Face rendering/idle expressions and independent attention geometry, but does NOT yet have the local behavior runtime, always-on wake engine, wake model, LCD-night integration, or live camera tracking wired together. No CI is required; add code modularly and label untested hardware behavior.
+Updated 2026-11-06: bot_runtime, bot_bus, official audio/camera adapters, selected focus, stationary gaze and Face are now wired in app_main. Passive timeouts, touch/stop/settings, night policy and logical blackout are source-implemented. **No compilation, tests or hardware execution were performed.** The dedicated 小呆小呆 model is still missing. BSP 1.1.0 does not support backlight brightness control; night uses a black overlay with active touch, and camera pause means STREAMOFF/no inference rather than rail power-off. See [local-runtime.md](local-runtime.md) for exact implementation and limitations.

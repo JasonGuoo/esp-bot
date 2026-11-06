@@ -1,0 +1,21 @@
+menu "Bot vision"
+
+    config BOT_VISION_TASK_STACK_BYTES
+        int "Vision worker stack size in bytes"
+        range 6144 32768
+        default 8192
+        help
+            Stack for the single camera/model/tracker owner task. This is an
+            unmeasured initial allocation; the official model and camera also
+            allocate heap/PSRAM. Measure the high-water mark on real hardware.
+
+    config BOT_VISION_TASK_PRIORITY
+        int "Vision worker task priority"
+        range 1 8
+        default 3
+        help
+            Keep camera inference below the audio capture and runtime control
+            tasks. No CPU affinity is forced; the official ESP-DL backend owns
+            its inference scheduling.
+
+endmenu

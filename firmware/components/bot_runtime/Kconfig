@@ -1,0 +1,57 @@
+menu "Xiaodai local runtime"
+
+    config BOT_RUNTIME_BORED_AFTER_MS
+        int "Idle milliseconds before bored"
+        range 1000 86400000
+        default 60000
+        help
+            Counted from explicit interaction/session end, not camera activity.
+            Must be smaller than DROWSY_AFTER_MS. Invalid combinations are
+            rejected by bot_runtime_create; the runtime does not reorder them.
+
+    config BOT_RUNTIME_DROWSY_AFTER_MS
+        int "Idle milliseconds before drowsy"
+        range 1001 86400001
+        default 180000
+        help
+            Must be greater than BORED_AFTER_MS and less than SLEEP_AFTER_MS.
+
+    config BOT_RUNTIME_SLEEP_AFTER_MS
+        int "Idle milliseconds before sleeping"
+        range 1002 86400002
+        default 300000
+        help
+            Must be greater than DROWSY_AFTER_MS. Local wake-word capture stays
+            running; this is not ESP deep sleep.
+
+    config BOT_RUNTIME_WAKING_MS
+        int "Waking expression duration (milliseconds)"
+        range 0 10000
+        default 500
+
+    config BOT_RUNTIME_PROGRESS_TIMEOUT_MS
+        int "Maximum conversation progress gap (milliseconds)"
+        range 10001 3600000
+        default 60000
+        help
+            Hard upper bound between meaningful conversation transitions.
+            Includes continuous speech and continuous playback: neither raw
+            PCM nor caption updates refreshes this bound. On expiry the local
+            runtime stops output and closes the session. Set deliberately for
+            long narration; this is not a silence detector. Must exceed
+            WAKING_MS. The C API field is session_timeout_ms.
+
+    config BOT_RUNTIME_WAKE_DEBOUNCE_MS
+        int "Explicit wake debounce (milliseconds)"
+        range 0 30000
+        default 1500
+
+    config BOT_RUNTIME_SLEEP_DISPLAY
+        bool "Request display sleep during sleeping"
+        default y
+        help
+            The platform still reports whether its panel/backlight path can
+            actually sleep. Night-dark always requests display sleep. Touch
+            and local wake-word capture must remain available.
+
+endmenu

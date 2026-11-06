@@ -9,7 +9,7 @@ replace the current executable firmware or Python server yet:
 | Module | Location | Scope |
 | --- | --- | --- |
 | Rust/Tauri console | server/bot-server/ | mDNS advertise with persistent identity; WebSocket accept; pairing soft gate; server→device `face.set` command push with acks; local LLM provider adapters (text only) |
-| ESP-IDF lan_link | firmware/components/lan_link/ | mDNS query; auto-connect (single server only); manual scan/connect; retry; JSON events; forwards post-welcome server frames to the app (consumer not yet integrated) |
+| ESP-IDF lan_link | firmware/components/lan_link/ | mDNS query; auto-connect (single server only); manual scan/connect; retry; JSON events; forwards post-welcome frames to brain_link; untrusted requests receive AUTH_REQUIRED; no private media |
 
 The wire contract is shared/lan-discovery-v1.md. There is no cloud broker,
 Internet discovery, BLE, LLM, ASR, TTS, face or motor integration in this work.
@@ -44,4 +44,4 @@ Internet discovery, BLE, LLM, ASR, TTS, face or motor integration in this work.
 
 ## 2026-10-30 next-transport decision (not implemented)
 
-[Local-First Hybrid Brain](local-first-hybrid-brain.md) supersedes the LAN-only **scope** of this v1 implementation for future work. Existing Rust/Tauri mDNS + WS and firmware lan_link remain valid, standalone **Wi-Fi** components. Future additions, in separate modules, will add **secure Mac BLE provisioning + Wi-Fi onboarding and a low-bandwidth BLE control fallback**, using Espressif maintained provisioning rather than another homemade setup stack. Local-first/MLX speech on the Mac remains the default; Bluetooth audio is a measured optional extension and is not a solved feature. See [reuse catalog](upstream-reuse-catalog.md).
+[Local-First Hybrid Brain](local-first-hybrid-brain.md) supersedes the LAN-only **scope** of this v1 implementation for future work. Existing Rust/Tauri mDNS + WS and firmware lan_link remain valid **Wi-Fi** components; the firmware now composes them through brain_link as a diagnostic boundary. Future additions, in separate modules, will add **secure Mac BLE provisioning + Wi-Fi onboarding and a low-bandwidth BLE control fallback**, using Espressif maintained provisioning rather than another homemade setup stack. Local-first/MLX speech on the Mac remains the default; Bluetooth audio is a measured optional extension and is not a solved feature. See [reuse catalog](upstream-reuse-catalog.md).

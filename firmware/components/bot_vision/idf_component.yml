@@ -1,0 +1,10 @@
+version: "0.1.0"
+description: "ESP32-S31 Korvo OV3660 DVP and official ESP-DL face-detection adapter"
+license: "MIT"
+targets:
+  - esp32s31
+dependencies:
+  idf: ">=6.1"
+  espressif/esp_video: "=2.4.1"
+  espressif/human_face_detect: "=0.5.2"
+  espressif/esp-dl: "=3.3.14"

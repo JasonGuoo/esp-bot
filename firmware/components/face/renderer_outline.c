@@ -101,7 +101,10 @@ static void render(void *instance, const face_theme_t *theme,
         case FACE_EX_HAPPY:
         case FACE_EX_SHY: left = MODE_ARCH; right = MODE_ARCH; break;
         case FACE_EX_SLEEPY:
+        case FACE_EX_SLEEPING:
         case FACE_EX_BLINK: left = MODE_SLIT; right = MODE_SLIT; break;
+        case FACE_EX_BORED: lh = eh * 65 / 100; rh = lh; break;
+        case FACE_EX_DROWSY: lh = eh * 40 / 100; rh = lh; break;
         case FACE_EX_CURIOUS: rw = ew * 82 / 100; rh = eh * 76 / 100; ry = cy + eh / 13; break;
         case FACE_EX_THINKING: right = MODE_SLIT; break;
         case FACE_EX_SURPRISED:
@@ -111,7 +114,8 @@ static void render(void *instance, const face_theme_t *theme,
         default: break;
     }
     if (state->blinking &&
-        (state->expression == FACE_EX_IDLE || state->expression == FACE_EX_LISTENING)) {
+        (state->expression == FACE_EX_IDLE || state->expression == FACE_EX_LISTENING ||
+         state->expression == FACE_EX_BORED || state->expression == FACE_EX_SPEAKING)) {
         left = right = MODE_SLIT;
     }
     const int dx = state->gaze_x * ew / 630;

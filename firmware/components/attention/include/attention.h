@@ -43,6 +43,7 @@ typedef struct {
 typedef struct {
     attention_config_t config;
     bool has_target, has_stepped, candidate_contact;
+    bool camera_relative, geometry_calibrated;
     uint32_t last_observation_ms, last_step_ms, contact_since_ms, last_track_id;
     bool user_looking;
     float looking_confidence;
@@ -58,7 +59,14 @@ bool attention_controller_init(attention_controller_t *controller,
 bool attention_controller_observe(attention_controller_t *controller,
                                   const attention_observation_t *observation,
                                   const attention_pose_t *measured_head);
-/* Call at 20-50 Hz; no motor I/O is performed by this function. */
+/** Fixed camera/head path: uses current camera coordinates without inventing
+ * a measured head pose. Calibration is distinct from human-gaze evidence. */
+bool attention_controller_observe_stationary(attention_controller_t *controller,
+                                             const attention_observation_t *observation,
+                                             bool geometry_calibrated);
+void attention_controller_clear_target(attention_controller_t *controller);
+/* Call at 20-50 Hz; no motor I/O. For stationary observations pass NULL head
+ * and false motors. Unavailable head target angles are NAN in that mode. */
 attention_output_t attention_controller_step(attention_controller_t *controller,
                                              const attention_pose_t *measured_head,
                                              uint32_t now_ms,

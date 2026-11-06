@@ -2,7 +2,7 @@
 
 Independent C11 component with no LVGL, camera driver, servo driver, Wi-Fi or Brain dependency. The code generates a single target direction and a coordinated head/eyes plan. **This is NOT a working visual sensor or motor driver; fixed-base V1 and future moving-head modes are separated in [docs/eye-contact.md](../../../docs/eye-contact.md).**
 
-**Current scope:** geometry, confidence/dwell gates, stale-target fallback, joint limits and servo-setpoint rate limits. The current code is a geometric planner, NOT an integrated camera/eye-gaze pipeline. **V1 hardware has no actuators or IMU:** camera-relative gaze only updates the screen eyes while a selected human stays in view; actual head turns, joint pose and eyes recentering after alignment are FUTURE capability. The existing attention controller API is not yet wired to vision_attention or a stationary-mode application adapter.
+**Current source integration (2026-11-06):** main now connects bot_vision → vision_attention → attention_manager → this planner → Face. `attention_controller_observe_stationary()` operates in current camera coordinates and accepts no fabricated measured pose; `step(..., NULL, now_ms, false)` returns NAN motor angles and no motor request. Current target hardware has no actuator or IMU. No build or device run was performed. Calibration and genuine human-gaze evidence remain absent, so mutual eye contact is not claimed.
 
 1. Camera observation: 2D angular bearing of detected person from the moving camera optical axis, face-detection confidence, plus *independent* person-looking-at-robot estimate (head pose + ocular gaze).
 2. Convert to the robot base frame using measured yaw/pitch and the calibrated camera-to-display optical offset. A static pixel x/y is insufficient when the head moves.
@@ -13,7 +13,20 @@ Independent C11 component with no LVGL, camera driver, servo driver, Wi-Fi or Br
 
 Coordinates: positive yaw = robot-right, positive pitch = up. Eye x positive right, eye y negative up. Default head servo limits in the code are illustrative ONLY; must be replaced by actual physical range + collision tests.
 
-## Example integration (not yet connected to camera or motors)
+## Stationary integration used by main
+
+```c
+attention_controller_observe_stationary(&controller, &observation, false);
+attention_output_t out = attention_controller_step(&controller, NULL, now_ms, false);
+// Under the BSP/LVGL lock:
+face_set_gaze(face, out.eye_x, out.eye_y);
+// Clear unavailable localization immediately; relationship retention is separate.
+attention_controller_clear_target(&controller);
+```
+
+The calibration argument is false until actual geometry is confirmed. The application uses configurable approximate FOV for initial pixel-to-angle mapping. Human-looking-at-Bot evidence remains a separate input; five face landmarks cannot enable it.
+
+## Future actuated example (requires actual measured pose)
 
 ```c
 attention_config_t config = attention_default_config();
@@ -34,9 +47,9 @@ Important: `measured_head` must come from actual servo feedback or a calibrated 
 ## Integration responsibility
 
 - **vision_attention** observes multiple people, including two eye landmarks, provisional pupil features and per-person looking-back evidence.
-- **attention_manager** (not yet implemented) owns the one official human conversation target, not this controller or the visual primary_track_id heuristic.
+- **attention_manager** owns the one official human conversation target, not this controller or the visual primary_track_id heuristic.
 - **bot_runtime** authorizes active versus passive tracking. Seeing a person or being looked at does NOT wake 小呆; only complete local phrase 小呆小呆 (or deliberate user action) allows conversational engagement.
 - This Attention module computes a common two-eye gaze output; **face** renders it and must not override it with an idle animation while tracking.
-- Future **head_motion** will consume optional motor setpoints and provide actual pose. Do NOT treat commanded angles as actual feedback; in V1 no mechanical correction is available.
+- The current **head_motion** adapter reports stationary/no feedback. A future actuator adapter will consume optional motor setpoints and provide actual pose. Do NOT treat commanded angles as actual feedback; in V1 no mechanical correction is available.
 
 Overall architecture: [docs/architecture.md](../../../docs/architecture.md); contracts: [docs/module-contracts.md](../../../docs/module-contracts.md).

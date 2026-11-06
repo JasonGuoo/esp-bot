@@ -77,3 +77,22 @@ See [off-the-shelf-hardware.md](off-the-shelf-hardware.md) for vendor specs, ass
 - [cgro00/desk-robot](https://github.com/cgro00/desk-robot): real moving robot with screen, speaker and PC-side Brain; alternate board (XIAO S3), not a drop-in enclosure.
 - [han0519/esp32-xiaofeng](https://github.com/han0519/esp32-xiaofeng): S31 Bluetooth **A2DP Sink**/AVRCP/HFP example and ESP-GMF media UI, potentially useful for Mac-to-Bot speaker playback over BT. **Its declared audio codec and PSRAM differ from official ES8389/16MB Korvo V1.1; inspect real board init before attempting reuse.** BT speaker receive does not solve Bot microphone or secure control fallback.
 - [stack-chan/stack-chan](https://github.com/stack-chan/stack-chan): existing open case, mechanics and motion design; 2.0-inch StackChan chassis is not sized for 4.3-inch Korvo.
+
+## 5. Device runtime adapters delivered in source (2026-11-06)
+
+The local runtime now uses the official S31 BSP 1.1.0, esp_codec_dev 1.5 series,
+ESP-SR 2.6.1, esp_video 2.4.1, human_face_detect 0.5.2 and esp-dl 3.3.14.
+The exact source paths, inspected commits and adaptation boundaries are recorded
+in [local-runtime.md](local-runtime.md), [bot_audio README](../firmware/components/bot_audio/README.md)
+and [bot_vision README](../firmware/components/bot_vision/README.md).
+
+Drivers and inference come from those components. Project code supplies bounded
+ownership, local behavior, permission/token gates, cancellation, snapshot conversion,
+quality handling and the existing Face presentation. No whole XiaoZhi fork or alternate
+board pin map was imported. GMF remains an option for a later richer media pipeline;
+it is not claimed to be part of this source integration.
+
+Hardware is awaiting delivery. No compilation, dependency resolution, tests, flash,
+CI or device execution occurred for this delivery. The complete 小呆小呆 acoustic
+model is still absent. Official face detection is not family identity or human-gaze
+recognition; audio AEC/DOA and secure Mac media remain subsequent integrations.

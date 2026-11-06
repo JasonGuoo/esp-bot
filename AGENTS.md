@@ -1,5 +1,10 @@
 # esp-bot development instructions
 
+## Latest delivery context (2026-11-06)
+
+- Hardware is still awaiting delivery. Earlier "currently installed V1" wording describes the intended stationary configuration, not a tested physical assembly.
+- The local runtime and official peripheral adapters are now source-integrated. Read [docs/local-runtime.md](docs/local-runtime.md) for actual startup, model/dependency requirements and limitations. This delivery was not compiled, tested or flashed; do not reinterpret source integration as hardware verification.
+
 ## Delivery and testing policy
 
 - **Do not create or configure CI pipelines** for this project. Do not add GitHub Actions verification jobs or treat CI as a merge prerequisite.

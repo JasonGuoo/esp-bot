@@ -19,8 +19,14 @@ face_reveal_settings(face);
 
 Default is just eyes (and optional subtitle). Screen tap → gear visible **five seconds** → full-screen Settings → **外观** → choose candidate → **应用** → return to face, repaint entire UI. Back or close does not commit. App registers `face_on_theme_applied()` and saves to NVS; the face component never accesses NVS itself. Firmware `app_main.c` loads last saved appearance on startup.
 
+## Runtime UI hooks
+
+`face_on_event()` emits deliberate surface touch, stop, Settings opened and Settings closed. Callbacks run on the LVGL task/under its lock and must only enqueue intent. Main uses a capacity-independent stop latch; the UI does not make behavior decisions. `face_set_stop_visible()` controls the explicit stop button during a local session. `face_set_animation_active(false)` pauses the animation timer behind logical blackout without touching board-level touch hardware.
+
+Added local expressions: `bored`, `drowsy`, `sleeping`, `speaking`. Reapplying an unchanged expression is idempotent, so the 20 ms runtime reconciliation does not continually restart blinking. Speaking's session state is driven by actual audio events; it does not claim phoneme lip sync.
+
 ## Eye contact integration
 
-The face must never receive separate left/right pupil targets. A separate Attention module owns the common target direction and plans combined head yaw/pitch and eye offsets using actual measured/estimated head angles. Rendering styles must respect this shared direction. See `firmware/components/attention/` and `docs/eye-contact.md`.
+The face must never receive separate left/right pupil targets. A separate Attention module owns the common target direction. The current fixed-head path uses camera-relative observations without a pose measurement; future actuated paths require actual measured/estimated head angles. Rendering styles must respect this shared direction. See `firmware/components/attention/` and `docs/eye-contact.md`.
 
-**Verification status:** Python/JS/native-C tests run in CI; physical S31 firmware build, touch behavior, LCD brightness, performance, exact CJK glyph set, camera and motors still need testing on real hardware. The component calls require LVGL task context or the BSP display lock.
+**Delivery status:** this runtime integration was not compiled, tested or run on hardware, and no CI was added. Hardware is awaiting delivery. Exact CJK glyph coverage, touch and display performance remain unmeasured. Component calls require LVGL task context or the BSP display lock.

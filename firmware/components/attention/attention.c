@@ -60,10 +60,9 @@ bool attention_controller_init(attention_controller_t *ctl,
     return true;
 }
 
-bool attention_controller_observe(attention_controller_t *ctl,
-                                  const attention_observation_t *obs,
-                                  const attention_pose_t *head) {
-    if (!ctl || !obs || !valid_pose(head)) return false;
+static bool observe(attention_controller_t *ctl, const attention_observation_t *obs,
+                    const attention_pose_t *head, bool stationary, bool calibrated) {
+    if (!ctl || !obs || (!stationary && !valid_pose(head))) return false;
     const attention_config_t *cfg=&ctl->config;
     if (!isfinite(obs->person_yaw_from_camera_deg) ||
         !isfinite(obs->person_pitch_from_camera_deg) ||
@@ -76,19 +75,41 @@ bool attention_controller_observe(attention_controller_t *ctl,
     if (ctl->has_target &&
         (int32_t)(obs->timestamp_ms - ctl->last_observation_ms) < 0)
         return false;
-    if (!ctl->has_target || ctl->last_track_id != obs->track_id)
+    if (!ctl->has_target || ctl->last_track_id != obs->track_id ||
+        ctl->camera_relative != stationary || ctl->geometry_calibrated != calibrated)
         ctl->candidate_contact = false;
+    if (ctl->camera_relative != stationary) ctl->has_stepped = false;
+    ctl->camera_relative = stationary;
+    ctl->geometry_calibrated = calibrated;
     ctl->has_target = true;
     ctl->last_track_id = obs->track_id;
     ctl->last_observation_ms = obs->timestamp_ms;
-    /* Camera is on rotating head: reconstruct direction in fixed base frame. */
-    ctl->target_base_yaw_deg = head->yaw_deg + cfg->camera_yaw_offset_deg +
+    /* Stationary mode uses the camera coordinate origin, not fabricated pose.
+     * Actuated mode reconstructs direction in the measured base frame. */
+    ctl->target_base_yaw_deg = (stationary ? 0 : head->yaw_deg) + cfg->camera_yaw_offset_deg +
                                 obs->person_yaw_from_camera_deg;
-    ctl->target_base_pitch_deg = head->pitch_deg + cfg->camera_pitch_offset_deg +
+    ctl->target_base_pitch_deg = (stationary ? 0 : head->pitch_deg) + cfg->camera_pitch_offset_deg +
                                   obs->person_pitch_from_camera_deg;
     ctl->user_looking = obs->user_looking_at_robot;
     ctl->looking_confidence = obs->looking_confidence;
     return true;
+}
+
+bool attention_controller_observe(attention_controller_t *ctl,
+                                  const attention_observation_t *obs,
+                                  const attention_pose_t *head) {
+    return observe(ctl, obs, head, false, true);
+}
+bool attention_controller_observe_stationary(attention_controller_t *ctl,
+                                             const attention_observation_t *obs,
+                                             bool calibrated) {
+    return observe(ctl, obs, NULL, true, calibrated);
+}
+void attention_controller_clear_target(attention_controller_t *ctl) {
+    if (!ctl) return;
+    ctl->has_target = false;
+    ctl->candidate_contact = false;
+    ctl->user_looking = false;
 }
 
 attention_output_t attention_controller_step(attention_controller_t *ctl,
@@ -96,7 +117,9 @@ attention_output_t attention_controller_step(attention_controller_t *ctl,
                                              uint32_t now_ms,
                                              bool has_head_motors) {
     attention_output_t out = {0};
-    if (!ctl || !valid_pose(head)) return out;
+    if (!ctl || (ctl->camera_relative ? has_head_motors : !valid_pose(head))) return out;
+    const float head_yaw = ctl->camera_relative ? 0 : head->yaw_deg;
+    const float head_pitch = ctl->camera_relative ? 0 : head->pitch_deg;
     const attention_config_t *cfg = &ctl->config;
     bool valid = ctl->has_target &&
         (uint32_t)(now_ms - ctl->last_observation_ms) <= cfg->observation_hold_ms;
@@ -105,8 +128,8 @@ attention_output_t attention_controller_step(attention_controller_t *ctl,
         ctl->candidate_contact = false;
     }
     out.person_tracked = valid;
-    float ry = valid ? ctl->target_base_yaw_deg - head->yaw_deg : 0;
-    float rp = valid ? ctl->target_base_pitch_deg - head->pitch_deg : 0;
+    float ry = valid ? ctl->target_base_yaw_deg - head_yaw : 0;
+    float rp = valid ? ctl->target_base_pitch_deg - head_pitch : 0;
     out.residual_yaw_deg = ry;
     out.residual_pitch_deg = rp;
     out.eye_x = valid ? visual_offset(ry, cfg->eye_max_yaw_deg, false) : 0;
@@ -127,8 +150,8 @@ attention_output_t attention_controller_step(attention_controller_t *ctl,
     target_pitch = clampf(target_pitch, cfg->pitch_min_deg, cfg->pitch_max_deg);
     if (!ctl->has_stepped) {
         ctl->has_stepped = true;
-        ctl->head_cmd_yaw_deg = head->yaw_deg;
-        ctl->head_cmd_pitch_deg = head->pitch_deg;
+        ctl->head_cmd_yaw_deg = head_yaw;
+        ctl->head_cmd_pitch_deg = head_pitch;
         ctl->last_step_ms = now_ms;
     }
     uint32_t elapsed = (uint32_t)(now_ms - ctl->last_step_ms);
@@ -140,11 +163,11 @@ attention_output_t attention_controller_step(attention_controller_t *ctl,
         ctl->head_cmd_pitch_deg = move_to(ctl->head_cmd_pitch_deg, target_pitch, delta);
         out.head_motion_requested = true;
     } else {
-        ctl->head_cmd_yaw_deg = head->yaw_deg;
-        ctl->head_cmd_pitch_deg = head->pitch_deg;
+        ctl->head_cmd_yaw_deg = head_yaw;
+        ctl->head_cmd_pitch_deg = head_pitch;
     }
-    out.head_target_yaw_deg = ctl->head_cmd_yaw_deg;
-    out.head_target_pitch_deg = ctl->head_cmd_pitch_deg;
+    out.head_target_yaw_deg = ctl->camera_relative ? NAN : ctl->head_cmd_yaw_deg;
+    out.head_target_pitch_deg = ctl->camera_relative ? NAN : ctl->head_cmd_pitch_deg;
 
     /* Presence in view is not mutual gaze. Require independent gaze estimate,
        actual reachable direction, current observation, and stable dwell. */
@@ -154,7 +177,7 @@ attention_output_t attention_controller_step(attention_controller_t *ctl,
         ctl->looking_confidence >= cfg->looking_min_confidence;
     bool aligned = absf(ry) <= cfg->eye_max_yaw_deg &&
                    absf(rp) <= cfg->eye_max_pitch_deg;
-    bool contact_candidate = out.person_looking_at_robot && aligned;
+    bool contact_candidate = ctl->geometry_calibrated && out.person_looking_at_robot && aligned;
     if (!contact_candidate) ctl->candidate_contact = false;
     else if (!ctl->candidate_contact) {
         ctl->candidate_contact = true;

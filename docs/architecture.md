@@ -2,6 +2,8 @@
 
 **This is the canonical overall architecture.** Older descriptions of the first Python Brain/Face demo are historical implementation snapshots, not competing design authorities. For event schemas use [module-contracts.md](module-contracts.md); for passive UX use [behavior-lifecycle.md](behavior-lifecycle.md); for concrete sensor/actuator boundaries use [eye-contact.md](eye-contact.md) and [hardware-power.md](hardware-power.md).
 
+**Implementation update 2026-11-06:** [local-runtime.md](local-runtime.md) records the source-integrated firmware. Hardware is awaiting delivery; this change was not compiled or tested. “Stationary V1” below describes the initial target configuration, not a verified installed robot. The custom wake model remains absent.
+
 ## 0. Updated strategic direction — Local-First Hybrid Brain (2026-10-30)
 
 The existing behavioral/sensor ownership rules below remain canonical. The deployment and hardware **target** has changed: *reuse successful open-source hardware/software modules* rather than reimplement them. [Full architecture](local-first-hybrid-brain.md); [projects and licenses](upstream-reuse-catalog.md).
@@ -16,7 +18,7 @@ The existing behavioral/sensor ownership rules below remain canonical. The deplo
 
 - Name: **小呆**; ONLY full spoken keyword **小呆小呆** wakes from passive behavior. Single 小呆, mere face presence, eye contact and arbitrary human chatter do not initiate interaction. [wake-word.md](wake-word.md); [identity manifest](../shared/bot-identity.json).
 - Personality: quiet passive companion. IDLE → BORED → DROWSY → SLEEPING, NIGHT_DARK when appropriate. Never give unsolicited greetings. Local wake audio must remain available with display/camera off.
-- Currently installed V1 physical configuration: **ESP32-S31-Korvo-1 V1.1; stationary non-actuated head** with board camera, two microphones, touch LCD, speaker; user may move or rotate entire Bot. No installed IMU, motor, absolute compass or pose feedback.
+- Initial V1 target configuration: **ESP32-S31-Korvo-1 V1.1; stationary non-actuated head** with board camera, two microphones, touch LCD, speaker; user may move or rotate entire Bot. No installed IMU, motor, absolute compass or pose feedback.
 - **Vision-first:** when engaged, perceive multiple faces, retain one officially selected human, align **both displayed eyes** with human eye midpoint using the current camera-relative observation. No physical re-aiming of camera is possible in V1.
 - Next physical design target: off-the-shelf pan/tilt hardware with enclosed speakers; optional 6-axis IMU via adapters. One gaze controller and one target selector remain owners. This is planned, not installed. No promise of arbitrary-orientation stabilization by an unactuated camera.
 - **Primary Mac target server:** Rust + Tauri Bot Server on M4 Pro / 48 GB handles connection/UI and coordinates local ASR/LLM/TTS/tool sidecars. Mac-first is a design decision, not an implemented AI endpoint. Device must wake/animate and follow a visually present target without depending on server availability.
@@ -112,26 +114,29 @@ Audio module owns a shared microphone stream; wake keyword and optional DOA subs
 
 ## 7. Deployment and security boundaries
 
-**On device:** ESP-IDF for S31, display/face, audio wake pipeline (to implement), local policy, vision and gaze coordination (integration pending), device discovery/link.
+**On device:** ESP-IDF for S31; app_main now composes bot_platform, bot_bus, bot_runtime, official audio/wake and camera/detector adapters, focus/gaze/Face, stationary head and optional discovery/link. Source is integrated, not compiled or device-run; the complete wake model is not provisioned.
 
 **On Mac/Linux:** Rust/Tauri bot-server is the selected server, currently only a LAN discovery/WebSocket session console skeleton. The older Python server and firmware HTTP polling client exist as isolated prototype functionality. Neither is equivalent to a completed LLM/audio service on Rust/Tauri.
 
 **LAN:** mDNS discovery is not authenticated pairing. Existing WS hello/welcome is advisory, not cryptographically authenticated; no privileged remote control or private media should be sent until connection authentication and encryption are in place. See [lan-discovery.md](lan-discovery.md) and [shared/lan-discovery-v1.md](../shared/lan-discovery-v1.md). [shared/protocol.md](../shared/protocol.md) describes legacy Python HTTP polling, NOT the selected final wire protocol.
 
-## 8. Code and integration status
+## 8. Code and integration status (updated 2026-11-06)
 
-Already present in repo (not necessarily exercised on physical S31):
-- Reusable Face rendering, appearance/theme selection, preview.
-- Standalone C attention/head-gaze *planner*.
-- Standalone C vision_attention multi-person temporal tracker and dark-eye *candidate* locator.
-- Standalone firmware lan_link, Rust/Tauri discovery console skeleton.
-- Older Python Brain and HTTP polling prototype.
+**Source-written and integrated in app_main; not built or device-run:**
+- bot_runtime/bot_bus with passive lifecycle, explicit wake/touch, session epochs, stop/settings priorities and bounded queues.
+- bot_platform official BSP display/touch/I2C/NVS; Face expressions, stop button and local UI events.
+- bot_audio single codec input/output, official AFE/WakeNet/VAD and bounded PCM playback/cancel.
+- bot_vision official esp_video V4L2 capture + ESP-DL detector/landmarks feeding vision_attention.
+- attention_manager selected focus, camera-relative stationary attention and honest head_motion capability adapter.
+- Optional brain_link wrapping lan_link, with untrusted requests rejected and no private media.
 
-**Not yet wired/implemented on the board**:
-- Real esp_video camera and ESP-DL visual inference adapter; validated iris/eye-contact estimator.
-- Local continuous wake engine + **小呆小呆** model, audio capture/DOA and audio session routing.
-- bot_runtime, bot_bus, attention_manager orchestration and platform-managed night camera/LCD sleep.
-- Mechanical pan/tilt hardware, head_motion driver, IMU.
-- End-to-end Rust/Tauri ASR/LLM/TTS/tool execution and authenticated media link.
+**Still absent or pending:**
+- Dedicated **小呆小呆** acoustic model; board bring-up, camera geometry and acoustic calibration.
+- Calibrated human gaze/iris estimator, family identity, voice identity, DOA and real AEC/barge-in.
+- Physical backlight blackout: BSP 1.1.0 reports brightness control unsupported; current runtime uses a black overlay and keeps touch active.
+- Mechanical pan/tilt, IMU, secure BLE provisioning, authenticated/encrypted media transport.
+- End-to-end Mac ASR/LLM/TTS/harness and rich media scene player.
+
+The old Python Brain/HTTP poller remains historical source and is excluded from main. See [local-runtime.md](local-runtime.md) for dependency pins, model preparation and actual failure behavior.
 
 Use [implementation-roadmap.md](implementation-roadmap.md) to sequence work. **Code-first, no CI.** Do not confuse a design specification with flashed or hardware-validated behavior.

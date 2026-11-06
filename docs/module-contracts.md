@@ -1,6 +1,6 @@
 # Module contracts and local event bus — esp-bot V1
 
-**Status:** design contract, NOT implemented as a running event bus or main integration. **Authority:** [architecture.md](architecture.md) for ownership, [behavior-lifecycle.md](behavior-lifecycle.md) for policy, [eye-contact.md](eye-contact.md) for gaze geometry. The names below denote logical modules, not a promise of one RTOS task per component.
+**Status (2026-11-06):** the typed bus/runtime/focus contracts are now source-implemented and wired in app_main, without compilation or device execution. The conceptual event examples below describe the wider architecture; actual implemented fields are in component headers and [local-runtime.md](local-runtime.md). **Authority:** [architecture.md](architecture.md) for ownership, [behavior-lifecycle.md](behavior-lifecycle.md) for policy, [eye-contact.md](eye-contact.md) for gaze geometry. The names below denote logical modules, not a promise of one RTOS task per component.
 
 ## 1. Single owners
 
@@ -17,7 +17,7 @@
 | Actual head hardware | **head_motion** | Current: stationary adapter. Future: actuation, limits and joint feedback | Inventing measured pose or selecting people |
 | Remote connection | **brain_link** | Session/link lifecycle, authenticated commands, media routing | Direct live pupil/servo control from the server |
 
-Transport note: existing **lan_link** is an implementation below brain_link, NOT a second app controller. Existing **brain_client** and Python Brain are legacy prototypes; Rust/Tauri server is the selected future architecture. They are not all integrated.
+Transport note: existing **lan_link** is an implementation below brain_link, NOT a second app controller. Existing **brain_client** and Python Brain are legacy prototypes; Rust/Tauri server is the selected future architecture. Main now uses brain_link/lan_link only as an untrusted diagnostic boundary; the HTTP prototype is excluded. No authenticated media transport is implemented.
 
 **Source authority:** Face theme/appearance behavior remains in [face-design.md](face-design.md) and shared appearance packs. Person tracking remains in [visual-attention.md](visual-attention.md), voice name in [wake-word.md](wake-word.md).
 

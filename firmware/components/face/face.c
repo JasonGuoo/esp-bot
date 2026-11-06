@@ -13,7 +13,8 @@
 
 static const char *const EXPRESSION_IDS[] = {
     "idle", "listening", "happy", "curious", "thinking",
-    "surprised", "sleepy", "shy", "blink"
+    "surprised", "sleepy", "shy", "blink",
+    "bored", "drowsy", "sleeping", "speaking"
 };
 
 struct face_view {
@@ -22,6 +23,7 @@ struct face_view {
     face_renderer_t *eyes;
     lv_obj_t *caption_bar, *caption;
     lv_obj_t *gear_button, *gear_icon;
+    lv_obj_t *stop_button, *stop_icon;
     face_settings_t *settings;
     const face_theme_t *theme;
     face_render_state_t state;
@@ -31,7 +33,22 @@ struct face_view {
     int requested_gaze_x, requested_gaze_y;
     face_theme_applied_cb_t on_applied;
     void *on_applied_context;
+    face_event_cb_t on_event;
+    void *event_context;
+    bool settings_was_open;
+    bool animation_active;
 };
+
+static void emit(face_view_t *f, face_event_t event) {
+    if (f && f->on_event) f->on_event(event, f->event_context);
+}
+
+static void sync_settings_event(face_view_t *f) {
+    bool opened = face_settings_is_open(f->settings);
+    if (opened == f->settings_was_open) return;
+    f->settings_was_open = opened;
+    emit(f, opened ? FACE_EVENT_SETTINGS_OPENED : FACE_EVENT_SETTINGS_CLOSED);
+}
 
 static void visible(lv_obj_t *o, bool show) {
     if (!o) return;
@@ -58,6 +75,8 @@ static void paint_chrome(face_view_t *f) {
     lv_obj_set_style_text_color(f->caption, lv_color_hex(t->subtitle_text), 0);
     lv_obj_set_style_bg_color(f->gear_button, lv_color_hex(t->subtitle_bg), 0);
     lv_obj_set_style_text_color(f->gear_icon, lv_color_hex(t->chrome_text), 0);
+    lv_obj_set_style_bg_color(f->stop_button, lv_color_hex(t->subtitle_bg), 0);
+    lv_obj_set_style_text_color(f->stop_icon, lv_color_hex(t->chrome_text), 0);
     if (f->settings) face_settings_set_active_theme(f->settings, t->id);
 }
 
@@ -78,6 +97,7 @@ static void draw_face(face_view_t *f) {
     lv_obj_set_pos(f->caption, w * 9 / 100, cap_y + 7);
     lv_obj_set_size(f->caption, w * 82 / 100, text_h - 12);
     lv_obj_align(f->gear_button, LV_ALIGN_TOP_RIGHT, -24, 22);
+    lv_obj_align(f->stop_button, LV_ALIGN_TOP_LEFT, 24, 22);
     if (f->settings && (w != f->last_layout_w || h != f->last_layout_h)) {
         face_settings_layout(f->settings, w, h);
         f->last_layout_w = w;
@@ -99,20 +119,31 @@ static void open_settings(lv_event_t *event) {
     if (!f || !f->settings) return;
     visible(f->gear_button, false);
     face_settings_open(f->settings, f->theme->id);
+    sync_settings_event(f);
 }
 
 static void tap_face(lv_event_t *event) {
     face_view_t *f = lv_event_get_user_data(event);
-    if (f && !face_settings_is_open(f->settings)) face_reveal_settings(f);
+    if (f && !face_settings_is_open(f->settings)) {
+        face_reveal_settings(f);
+        emit(f, FACE_EVENT_TOUCH);
+    }
+}
+
+static void stop_pressed(lv_event_t *event) {
+    emit(lv_event_get_user_data(event), FACE_EVENT_STOP);
 }
 
 static void animation_tick(lv_timer_t *timer) {
     face_view_t *f = lv_timer_get_user_data(timer);
     const uint32_t now = lv_tick_get();
     bool redraw = false;
+    sync_settings_event(f);
 
     const bool auto_blink = f->state.expression == FACE_EX_IDLE ||
-                            f->state.expression == FACE_EX_LISTENING;
+                            f->state.expression == FACE_EX_LISTENING ||
+                            f->state.expression == FACE_EX_BORED ||
+                            f->state.expression == FACE_EX_SPEAKING;
     if (auto_blink && !f->state.blinking &&
         (uint32_t)(now - f->blink_start) >= f->theme->blink_interval_ms) {
         f->state.blinking = true;
@@ -162,7 +193,7 @@ face_view_t *face_create(lv_obj_t *parent) {
     lv_obj_set_style_radius(f->root, 0, 0);
     lv_obj_remove_flag(f->root, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(f->root, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(f->root, tap_face, LV_EVENT_PRESSED, f);
+    lv_obj_add_event_cb(f->root, tap_face, LV_EVENT_CLICKED, f);
 
     /* Owns whatever children its installed renderer creates. */
     f->eyes_host = lv_obj_create(f->root);
@@ -205,6 +236,17 @@ face_view_t *face_create(lv_obj_t *parent) {
     lv_obj_center(f->gear_icon);
     visible(f->gear_button, false);
 
+    f->stop_button = lv_button_create(f->root);
+    lv_obj_set_size(f->stop_button, 54, 46);
+    lv_obj_set_style_radius(f->stop_button, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(f->stop_button, 0, 0);
+    lv_obj_set_style_shadow_width(f->stop_button, 0, 0);
+    lv_obj_add_event_cb(f->stop_button, stop_pressed, LV_EVENT_PRESSED, f);
+    f->stop_icon = lv_label_create(f->stop_button);
+    lv_label_set_text(f->stop_icon, LV_SYMBOL_STOP);
+    lv_obj_center(f->stop_icon);
+    visible(f->stop_button, false);
+
     f->settings = face_settings_create(f->root, applied_from_settings, f);
     if (!f->settings) {
         face_renderer_destroy(f->eyes);
@@ -216,6 +258,7 @@ face_view_t *face_create(lv_obj_t *parent) {
     paint_chrome(f);
     draw_face(f);
     f->timer = lv_timer_create(animation_tick, 33, f);
+    f->animation_active = true;
     return f;
 }
 
@@ -252,6 +295,7 @@ bool face_set_expression(face_view_t *f, const char *name) {
     if (!f || !name) return false;
     for (size_t i = 0; i < sizeof(EXPRESSION_IDS) / sizeof(EXPRESSION_IDS[0]); i++) {
         if (strcmp(EXPRESSION_IDS[i], name) == 0) {
+            if (f->state.expression == (face_expression_t)i) return true;
             f->state.expression = (face_expression_t)i;
             f->state.blinking = false;
             f->blink_start = lv_tick_get();
@@ -298,6 +342,24 @@ void face_on_theme_applied(face_view_t *f,
     if (!f) return;
     f->on_applied = callback;
     f->on_applied_context = context;
+}
+
+void face_on_event(face_view_t *f, face_event_cb_t callback, void *context) {
+    if (!f) return;
+    f->on_event = callback;
+    f->event_context = context;
+}
+void face_set_stop_visible(face_view_t *f, bool show) {
+    if (f) visible(f->stop_button, show);
+}
+void face_set_animation_active(face_view_t *f, bool active) {
+    if (!f || !f->timer || f->animation_active == active) return;
+    f->animation_active = active;
+    if (active) {
+        f->blink_start = lv_tick_get();
+        lv_timer_resume(f->timer);
+        lv_timer_reset(f->timer);
+    } else lv_timer_pause(f->timer);
 }
 
 const char *face_theme_id(const face_view_t *f) {

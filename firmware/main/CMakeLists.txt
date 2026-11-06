@@ -1,6 +1,6 @@
 idf_component_register(
-    SRCS "app_main.c" "brain_client.c"
+    SRCS "app_main.c"
     INCLUDE_DIRS "."
-    REQUIRES face esp_wifi esp_event esp_netif
-             esp_http_client nvs_flash
+    REQUIRES bot_platform bot_bus bot_runtime bot_audio bot_vision
+             attention attention_manager head_motion face brain_link
 )

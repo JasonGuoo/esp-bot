@@ -24,6 +24,10 @@ typedef enum {
     FACE_EX_SLEEPY,
     FACE_EX_SHY,
     FACE_EX_BLINK,
+    FACE_EX_BORED,
+    FACE_EX_DROWSY,
+    FACE_EX_SLEEPING,
+    FACE_EX_SPEAKING,
 } face_expression_t;
 
 typedef struct {

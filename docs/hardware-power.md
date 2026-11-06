@@ -1,6 +1,6 @@
 # Hardware profiles, camera exposure, power and capability gating
 
-**Board today:** ESP32-S31-Korvo-1 V1.1, target esp32s31 / ESP-IDF 6.1+, LCD 800x480 touch, built-in camera and two microphones. **No installed head motors, no on-board IMU.** Physical robot/base might be picked up, tilted, moved or rotated by a person at any moment.
+**Target board:** ESP32-S31-Korvo-1 V1.1, target esp32s31 / ESP-IDF 6.1+, LCD 800x480 touch, built-in camera and two microphones. **Hardware is awaiting delivery as of 2026-11-06. No installed head motors or IMU.** Physical robot/base may later be picked up, tilted, moved or rotated by a person. Source integration and exact capability limits are in [local-runtime.md](local-runtime.md); no build/device run was performed.
 
 Product requirement: passive companion with **local always-listening full phrase 小呆小呆**, application sleep/black screen at night, vision-first gaze follow and optional future pan/tilt and IMU.
 
@@ -29,9 +29,9 @@ Do not assume exposed, free, dedicated GPIO connectors solely because a BSP GPIO
 
 | Capability | V1 | Notes |
 |---|---|---|
-| display, touch, Face LVGL | Present | Screen sleep/physical blackout not yet validated |
-| camera / face/eye sensing | Camera present; pipeline not yet wired | Existing tracker is offline/standalone code, not a live camera implementation |
-| two-microphone audio | Physical hardware present | Local wake/DOA pipeline not yet integrated |
+| display, touch, Face LVGL | Target board feature; official BSP source integrated | Logical black overlay; BSP brightness control unsupported; no physical blackout claim |
+| camera / face/eye sensing | Target board feature; official capture/detector adapter wired | Source only, no device run; no calibrated human-gaze or identity |
+| two-microphone audio | Target board feature; single codec/AFE/WakeNet/VAD adapter wired | Dedicated wake model absent; DOA and true AEC not integrated |
 | wake model for 小呆小呆 | **NOT provisioned** | Name in JSON ≠ acoustic model |
 | pan/tilt motors and joint feedback | ABSENT | No camera re-aiming, no physical head raise |
 | IMU/gyroscope/accelerometer | ABSENT | Cannot infer absolute roll/heading from an uninstalled IMU |

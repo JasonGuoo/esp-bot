@@ -53,7 +53,10 @@ static void render(void *instance, const face_theme_t *theme,
         switch (state->expression) {
             case FACE_EX_HAPPY: h = height * 7 / 100; y += eh / 4; break;
             case FACE_EX_SLEEPY:
+            case FACE_EX_SLEEPING:
             case FACE_EX_BLINK: h = height * 5 / 100; y += eh / 4; break;
+            case FACE_EX_BORED: h = eh * 65 / 100; y += eh * 17 / 100; break;
+            case FACE_EX_DROWSY: h = eh * 40 / 100; y += eh * 30 / 100; break;
             case FACE_EX_CURIOUS: if (i == 1) h = eh * 60 / 100; break;
             case FACE_EX_THINKING: if (i == 1) h = height * 6 / 100; break;
             case FACE_EX_SURPRISED: w += width * 2 / 100; h += height * 4 / 100; break;

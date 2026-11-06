@@ -1,0 +1,57 @@
+menu "Xiaodai local audio"
+
+config BOT_AUDIO_WAKE_MODEL_NAME
+    string "Exact custom WakeNet model entry name"
+    default ""
+    help
+        Provision an Espressif-compatible ESP32-S31 WakeNet model for the entire
+        phrase 小呆小呆. Runtime requires both an exact entry-name match and exact
+        full wake-word metadata. Empty/missing/wrong models report
+        WAKE_MODEL_MISSING; no stock keyword or VAD fallback is substituted.
+
+config BOT_AUDIO_MODEL_PARTITION
+    string "Model data partition label"
+    default "model"
+    help
+        Must match a data partition in the project's partition table. Use the
+        official ESP-SR MODEL_IN_FLASH path and external model packer.
+
+config BOT_AUDIO_OUTPUT_VOLUME
+    int "Default codec output volume (percent)"
+    range 0 60
+    default 30
+    help
+        Conservative electrical gain cap. This is not a measured acoustic
+        exposure limit; speaker enclosure and listening distance need hardware
+        validation before child use.
+
+config BOT_AUDIO_MIC_GAIN_DB
+    int "Primary microphone codec gain (dB)"
+    range 0 42
+    default 24
+
+config BOT_AUDIO_WAKE_DEBOUNCE_MS
+    int "Minimum gap between accepted full-phrase wake events (ms)"
+    range 500 10000
+    default 2000
+
+config BOT_AUDIO_PLAYBACK_TAIL_MS
+    int "Self-wake suppression tail after playback (ms)"
+    range 200 3000
+    default 800
+    help
+        Until reference synchronization is measured, wake events and VAD are
+        suppressed while the speaker plays and during this tail. Intentional
+        touch/local stop can always cancel playback. Not a substitute for AEC.
+
+config BOT_AUDIO_PLAYBACK_QUEUE_FRAMES
+    int "Bounded playback queue capacity (20 ms frames)"
+    range 4 32
+    default 12
+
+config BOT_AUDIO_WORKER_PRIORITY
+    int "Audio worker priority"
+    range 4 15
+    default 8
+
+endmenu

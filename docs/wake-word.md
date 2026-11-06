@@ -31,7 +31,7 @@ Preferred production direction: dedicated on-device WakeNet-compatible **小呆�
 
 Development can temporarily use an **explicitly documented** stock wake-word model to bring up the hardware pipeline, but the application must not present it as the final name or accept it as a production alias. If the custom model is not installed, surface `WAKE_MODEL_MISSING` and report **not ready**, rather than pretending that text matching makes a custom wake phrase work.
 
-The included `shared/bot-identity.json` currently declares `recognition_model: "unprovisioned"`. This means the identity decision is saved, **but wake-on-name is not yet implemented or device-tested**.
+The included `shared/bot-identity.json` currently declares `recognition_model: "unprovisioned"`. The official ESP-SR/WakeNet adapter is now implemented in bot_audio and wired through bot_runtime, but the dedicated model remains absent. No compilation or device test was performed; actual wake-on-name cannot be claimed ready. See [local-runtime.md](local-runtime.md) and [audio preparation](../firmware/components/bot_audio/README.md).
 
 ### Wake behavior
 

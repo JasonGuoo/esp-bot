@@ -100,6 +100,10 @@ bot_lan_state_t bot_lan_state(void);
  */
 esp_err_t bot_lan_send_event(const char *json);
 
+/** Bounded response envelope; id/string and ok/bool required. Queued output is
+ * bound to the current connection and will not replay after reconnect. */
+esp_err_t bot_lan_send_response(const char *json);
+
 #ifdef __cplusplus
 }
 #endif
