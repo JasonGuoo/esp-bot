@@ -49,9 +49,10 @@ class ServerTest(unittest.TestCase):
     def test_theme_palette_complete(self):
         code, data = self.request("/v1/themes")
         self.assertEqual(code, 200)
-        self.assertEqual(len(data["themes"]), 5)
+        self.assertEqual(len(data["themes"]), 6)
         self.assertEqual(set(d["id"] for d in data["themes"]),
-                         {"mint", "sakura", "lavender", "butter", "sky"})
+                         {"eve", "mint", "sakura", "lavender", "butter", "sky"})
+        self.assertEqual(data["default_theme"], "eve")
         self.assertTrue(all(d["eye"] == d["pupil"] for d in data["themes"]))
 
     def test_enqueue_pop(self):

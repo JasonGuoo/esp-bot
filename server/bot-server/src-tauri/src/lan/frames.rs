@@ -11,13 +11,8 @@ use serde_json::{json, Value};
 pub const ENVELOPE_VERSION: u64 = 2;
 pub const METHOD_FACE_SET: &str = "face.set";
 
-/// Theme ids mirror shared/themes.json; that file stays the source of truth.
-pub const THEME_IDS: [&str; 5] = ["mint", "sakura", "lavender", "butter", "sky"];
-
-/// Expression ids mirror the Face component and the legacy Python Brain.
-pub const EXPRESSION_IDS: [&str; 9] = [
-    "idle", "listening", "happy", "curious", "thinking", "surprised", "sleepy", "shy", "blink",
-];
+// The same catalog drives native rendering, preview, and semantic validation.
+pub use crate::face_catalog_generated::{THEME_IDS, EXPRESSION_IDS};
 
 const PAYLOAD_KEYS: [&str; 5] = ["theme", "expression", "subtitle", "gaze_x", "gaze_y"];
 pub const SUBTITLE_MAX_CHARS: usize = 180;
@@ -136,6 +131,9 @@ mod tests {
     fn accepts_valid_full_payload() {
         assert!(validate_face_set(&full_payload()).is_ok());
         assert!(validate_face_set(&json!({})).is_ok());
+        for expression in EXPRESSION_IDS {
+            assert!(validate_face_set(&json!({"theme":"eve","expression":expression})).is_ok());
+        }
     }
 
     #[test]

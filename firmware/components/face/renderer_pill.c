@@ -46,11 +46,12 @@ static void render(void *instance, const face_theme_t *theme,
     lv_obj_set_style_bg_color(r->root, lv_color_hex(theme->background), 0);
     const int ew = width * 14 / 100, eh = height * 24 / 100;
     const int cy = height * 43 / 100;
+    const face_expression_t ex = face_renderer_legacy_expression(state->expression);
     for (int i = 0; i < 2; i++) {
         int w = ew, h = eh;
         int x = width * (i ? 68 : 32) / 100 - w / 2;
         int y = cy - h / 2;
-        switch (state->expression) {
+        switch (ex) {
             case FACE_EX_HAPPY: h = height * 7 / 100; y += eh / 4; break;
             case FACE_EX_SLEEPY:
             case FACE_EX_SLEEPING:
@@ -69,11 +70,11 @@ static void render(void *instance, const face_theme_t *theme,
         place(r->eye[i], x, y, w, h);
         lv_obj_set_style_bg_color(r->eye[i], lv_color_hex(theme->eye), 0);
     }
-    bool mouth = state->expression == FACE_EX_SURPRISED || state->expression == FACE_EX_SHY;
+    bool mouth = ex == FACE_EX_SURPRISED || ex == FACE_EX_SHY;
     set_visible(r->mouth, mouth);
     if (mouth) {
-        int d = state->expression == FACE_EX_SURPRISED ? height * 3 / 100 : width * 3 / 100;
-        int h = state->expression == FACE_EX_SURPRISED ? d : height / 100;
+        int d = ex == FACE_EX_SURPRISED ? height * 3 / 100 : width * 3 / 100;
+        int h = ex == FACE_EX_SURPRISED ? d : height / 100;
         place(r->mouth, width / 2 - d / 2, cy + eh / 2 + height / 20, d, h);
         lv_obj_set_style_bg_color(r->mouth, lv_color_hex(theme->eye), 0);
     }

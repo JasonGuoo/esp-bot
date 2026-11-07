@@ -5,7 +5,10 @@ idf_component_register(
         "face_renderer.c"
         "renderer_outline.c"
         "renderer_pill.c"
+        "renderer_eve.c"
+        "fonts/xiaodai_font_sc_16.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."
     REQUIRES lvgl__lvgl
+    EMBED_FILES "fonts/xiaodai_glyph_bitmap.bin"
 )

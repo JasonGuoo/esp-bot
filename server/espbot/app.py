@@ -16,13 +16,11 @@ from .config import Config
 from .llm import LLMError, OpenAICompatibleLLM
 from .tools import ToolError, ToolRegistry
 
-EXPRESSIONS = (
-    "idle", "listening", "happy", "curious", "thinking",
-    "surprised", "sleepy", "shy", "blink",
-)
 DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,48}$")
 ROOT = Path(__file__).resolve().parents[2]
 THEMES_FILE = ROOT / "shared" / "themes.json"
+EXPRESSIONS = tuple(e["id"] for e in json.loads(
+    (ROOT / "shared/eve-expressions.json").read_text(encoding="utf-8"))["expressions"])
 MAX_BODY = 8192
 MAX_QUEUE = 128
 

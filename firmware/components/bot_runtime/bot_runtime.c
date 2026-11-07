@@ -514,7 +514,9 @@ static bool valid_text(const char *text, size_t capacity)
 static bool known_expression(const char *name)
 {
     static const char *const names[] = { "idle", "listening", "happy", "curious", "thinking",
-        "surprised", "sleepy", "shy", "blink", "bored", "drowsy", "sleeping", "speaking" };
+        "surprised", "sleepy", "shy", "blink", "bored", "drowsy", "sleeping", "speaking",
+        "gentle", "confused", "discovery", "laughing", "excited", "wink", "smug", "skeptical",
+        "determined", "annoyed", "worried" };
     if (!memchr(name, '\0', BOT_EXPRESSION_MAX_BYTES + 1)) return false;
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcmp(names[i], name) == 0) return true;

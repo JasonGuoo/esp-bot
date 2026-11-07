@@ -13,7 +13,7 @@
       <div>
         <p class="eyebrow">ESP BOT · DESIGN LAB / 0.2</p>
         <h1>它的眼神，会回应你。</h1>
-        <p class="lead">完整外观包 · 极简表情 · 触摸设置 · 为未来人与机器人对视预留接口</p>
+        <p class="lead">EVE · 20 种表情 · 经典线条主题 · 触摸预览与切换</p>
       </div>
       <div class="screen-detail">ESP32-S31-Korvo-1<br>800 × 480</div>
     </header>
@@ -40,7 +40,7 @@
             <button id="appearance-open" class="settings-row" type="button">
               <div class="settings-row-copy">
                 <strong>外观</strong>
-                <span>配色与眼睛风格</span>
+                <span id="active-theme-name">表情主题与配色</span>
               </div>
               <span class="settings-row-right">
                 <span id="active-color-dot" class="color-dot"></span>
@@ -57,6 +57,17 @@
               </div>
               <span class="appearance-hint">选择后点击应用</span>
             </div>
+            <section class="theme-preview-panel" aria-label="候选主题表情预览">
+              <div id="theme-preview-title" class="theme-preview-title"></div>
+              <div id="theme-preview" class="theme-preview">
+                <svg viewBox="0 0 800 480" aria-hidden="true"><g id="theme-preview-graphics"></g></svg>
+              </div>
+              <div class="preview-controls">
+                <button id="preview-prev" class="icon-control" type="button" aria-label="上一个预览表情">‹</button>
+                <span id="theme-preview-expression" aria-live="polite"></span>
+                <button id="preview-next" class="icon-control" type="button" aria-label="下一个预览表情">›</button>
+              </div>
+            </section>
             <div id="appearance-grid" class="appearance-grid" role="group" aria-label="选择机器人外观"></div>
             <div class="appearance-actions">
               <button id="appearance-cancel" class="secondary-action" type="button">返回</button>
@@ -93,7 +104,7 @@
       </section>
       <section class="control-card">
         <div class="control-header"><span>04</span><h2>外观包机制</h2></div>
-        <p class="note roomy">每套外观指定自己的 <code>renderer</code>、颜色参数与动画配置。未来可以将线条眼替换成胶囊眼、像素眼甚至素材动画，而无需改变 Settings 流程或 Brain API。</p>
+        <p class="note roomy">默认 EVE 使用黑底青蓝发光眼睛，包含参考图的 20 种表情。原来的五种配色保存在「经典线条」系列中。打开屏幕设置即可预览、切换。</p>
         <p class="note">用户选择只有点击「应用」后才生效，并保存到此浏览器。</p>
       </section>
     </div>

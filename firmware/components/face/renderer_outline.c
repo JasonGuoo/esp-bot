@@ -96,8 +96,9 @@ static void render(void *instance, const face_theme_t *theme,
     int stroke = clamp(mini(ew, eh) / 7, 3, 23);
     int cx1 = width * 32 / 100, cx2 = width * 68 / 100, cy = height * 44 / 100;
     int rw = ew, rh = eh, ry = cy, lw = ew, lh = eh;
+    const face_expression_t ex = face_renderer_legacy_expression(state->expression);
     eye_mode_t left = MODE_OPEN, right = MODE_OPEN;
-    switch (state->expression) {
+    switch (ex) {
         case FACE_EX_HAPPY:
         case FACE_EX_SHY: left = MODE_ARCH; right = MODE_ARCH; break;
         case FACE_EX_SLEEPY:
@@ -122,8 +123,8 @@ static void render(void *instance, const face_theme_t *theme,
     const int dy = state->gaze_y * eh / 630;
     eye(r, 0, cx1, cy, lw, lh, left, dx, dy, stroke);
     eye(r, 1, cx2, ry, rw, rh, right, dx, dy, stroke);
-    bool surprised = state->expression == FACE_EX_SURPRISED;
-    bool shy = state->expression == FACE_EX_SHY;
+    bool surprised = ex == FACE_EX_SURPRISED;
+    bool shy = ex == FACE_EX_SHY;
     show(r->mouth, surprised || shy);
     int mw = surprised ? stroke : stroke * 2;
     int mh = surprised ? stroke : mini(7, stroke);

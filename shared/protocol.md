@@ -52,7 +52,9 @@ Authorization: Bearer <token>
 {"command":{"id":1,"type":"face.set","payload":{"theme":"sakura","expression":"happy","subtitle":"你好！"}}}
 ```
 
-Expressions: `idle`, `listening`, `happy`, `curious`, `thinking`, `surprised`, `sleepy`, `shy`, `blink`.
+Expressions: the 24 IDs in [eve-expressions.json](eve-expressions.json), including the
+20 EVE reference poses and `blink` / `bored` / `drowsy` / `speaking` compatibility poses.
+The original nine IDs remain valid.
 
 Only supplied payload fields are updated. `face.set` may specify any subset of `theme`, `expression`, `subtitle`, `gaze_x`, `gaze_y`. Gaze integer range: -100..100; subtitle string <= 180 Unicode code points. Empty string clears subtitle. Each appearance pack chooses a renderer, palette and animation profile; both eyes share the **same target gaze vector**, regardless of renderer. A remote `face.set` can change appearance temporarily, but the on-device Settings → Appearance → Apply flow persists a selection in NVS.
 

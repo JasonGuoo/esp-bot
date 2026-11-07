@@ -83,7 +83,11 @@ The canonical system ownership specification is **[docs/architecture.md](docs/ar
 
 ## Theme gallery
 
-![Five cohesive macaron themes — Mint, Sakura, Lavender, Butter, Sky](docs/theme-gallery.svg)
+![Default EVE theme — 20 expression poses](docs/eve-theme-gallery.svg)
+
+Original **Classic Outline / 经典线条** palettes remain available:
+
+![Five Classic Outline palettes — Mint, Sakura, Lavender, Butter, Sky](docs/theme-gallery.svg)
 
 ## Quick start
 
@@ -96,7 +100,13 @@ python3 -m http.server 8765 --bind 127.0.0.1
 # open http://127.0.0.1:8765/preview/
 ```
 
-Touch the simulated screen to show the corner gear (auto-hides after five seconds). Open **Settings → Appearance**, select one of the five installed pastel appearances (mint/sakura/lavender/butter/sky), then press **Apply** to return to the face. Selection does nothing until Apply, and the preview persists the choice in localStorage. All five shipped styles share an outline renderer; future appearance packs can choose entirely different eye geometries, assets and motion profiles. Use the debug panels below the screen to test expressions, gaze direction and subtitles.
+Touch the simulated screen to show the corner gear (auto-hides after five seconds).
+Open **Settings → Appearance** to preview the default **EVE** theme and its 20 expressions,
+or choose a preserved **Classic Outline / 经典线条** palette (mint/sakura/lavender/butter/sky).
+Previous/next browses preview poses; **Apply** returns to the face and saves the theme.
+Back discards the candidate. Saved choices still take precedence over the new default.
+The debug panels exercise expressions, shared gaze and subtitles. See [EVE themes](docs/eve-themes.md)
+for the implementation and precise board-verification status.
 
 ### Legacy Brain server (Python 3.10+, isolated prototype)
 

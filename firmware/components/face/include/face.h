@@ -20,11 +20,14 @@ face_view_t *face_create(lv_obj_t *parent);
 /** Delete its LVGL timer, screen children, and heap allocations. */
 void face_destroy(face_view_t *view);
 
-/** Theme IDs: mint, sakura, lavender, butter, sky. False on unknown ID. */
+/** Theme IDs: eve (default), mint, sakura, lavender, butter, sky.
+ * The five original IDs remain the Classic Outline family. False on unknown ID. */
 bool face_set_theme(face_view_t *view, const char *theme_id);
 
 /** idle, listening, happy, curious, thinking, surprised, sleepy, shy, blink,
- * bored, drowsy, sleeping, speaking. */
+ * bored, drowsy, sleeping, speaking, gentle, confused, discovery, laughing,
+ * excited, wink, smug, skeptical, determined, annoyed, worried.
+ * EVE has 20 reference poses; older themes use the nearest original pose. */
 bool face_set_expression(face_view_t *view, const char *expression);
 
 /** -100..100 gaze offset; values are clamped and eased by the component timer. */

@@ -4,11 +4,13 @@
 
 extern const face_renderer_driver_t face_outline_renderer_driver;
 extern const face_renderer_driver_t face_pill_renderer_driver;
+extern const face_renderer_driver_t face_eve_renderer_driver;
 
 /* Compile-time registry is intentional: no dynamic code loading on a microcontroller. */
 static const face_renderer_driver_t *const DRIVERS[] = {
     &face_outline_renderer_driver,
     &face_pill_renderer_driver,
+    &face_eve_renderer_driver,
 };
 
 struct face_renderer {
@@ -57,4 +59,21 @@ void face_renderer_destroy(face_renderer_t *f) {
 
 const char *face_renderer_id(const face_renderer_t *f) {
     return f ? f->driver->id : NULL;
+}
+
+face_expression_t face_renderer_legacy_expression(face_expression_t ex) {
+    switch (ex) {
+        case FACE_EX_GENTLE:
+        case FACE_EX_DETERMINED: return FACE_EX_LISTENING;
+        case FACE_EX_CONFUSED: return FACE_EX_CURIOUS;
+        case FACE_EX_DISCOVERY: return FACE_EX_SURPRISED;
+        case FACE_EX_LAUGHING:
+        case FACE_EX_EXCITED: return FACE_EX_HAPPY;
+        case FACE_EX_WINK:
+        case FACE_EX_SKEPTICAL: return FACE_EX_THINKING;
+        case FACE_EX_SMUG:
+        case FACE_EX_WORRIED: return FACE_EX_SHY;
+        case FACE_EX_ANNOYED: return FACE_EX_BORED;
+        default: return ex;
+    }
 }

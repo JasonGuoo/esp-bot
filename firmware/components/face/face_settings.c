@@ -8,6 +8,7 @@
  */
 #include "face_settings.h"
 #include "face_renderer.h"
+#include "fonts/xiaodai_font.h"
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +21,9 @@ struct face_settings {
     lv_obj_t *appearance_row, *appearance_label, *appearance_description;
     lv_obj_t *active_swatch, *chevron;
     lv_obj_t *appearance_title, *back_button, *back_label, *help_label;
+    lv_obj_t *theme_list, *preview_host, *preview_title, *preview_label;
+    lv_obj_t *preview_prev, *preview_next, *preview_prev_label, *preview_next_label;
+    face_renderer_t *preview_renderer;
     lv_obj_t *theme_cards[FACE_THEME_COUNT];
     lv_obj_t *theme_previews[FACE_THEME_COUNT];
     face_renderer_t *theme_renderers[FACE_THEME_COUNT];
@@ -28,7 +32,7 @@ struct face_settings {
     face_settings_apply_cb_t on_apply;
     void *context;
     settings_page_t page;
-    size_t active_index, pending_index;
+    size_t active_index, pending_index, preview_index;
 };
 
 static void show(lv_obj_t *o, bool visible) {
@@ -44,7 +48,7 @@ static size_t find_index(const char *id) {
         for (size_t i = 0; i < FACE_THEME_COUNT; i++)
             if (strcmp(k_face_themes[i].id, id) == 0) return i;
     }
-    return 0;
+    return FACE_DEFAULT_THEME_INDEX;
 }
 static lv_obj_t *panel(lv_obj_t *parent, bool clickable) {
     lv_obj_t *o = lv_obj_create(parent);
@@ -68,13 +72,36 @@ static lv_obj_t *button(lv_obj_t *parent) {
 }
 static lv_obj_t *label(lv_obj_t *parent, const char *zh, const char *en) {
     lv_obj_t *o = lv_label_create(parent);
-#if LV_FONT_SOURCE_HAN_SANS_SC_16_CJK
+    (void)en;
     lv_label_set_text(o, zh);
-    lv_obj_set_style_text_font(o, &lv_font_source_han_sans_sc_16_cjk, 0);
-#else
-    lv_label_set_text(o, en);
-#endif
+    lv_obj_set_style_text_font(o, &xiaodai_font_sc_16, 0);
     return o;
+}
+
+static void refresh_preview(face_settings_t *s) {
+    const face_theme_t *theme = &k_face_themes[s->pending_index];
+    if (!s->preview_renderer ||
+        strcmp(face_renderer_id(s->preview_renderer), theme->renderer_id) != 0) {
+        face_renderer_t *next = face_renderer_create(theme->renderer_id, s->preview_host);
+        if (!next) {
+            lv_label_set_text(s->help_label, "预览不可用，请重新选择");
+            lv_obj_add_state(s->apply_button, LV_STATE_DISABLED);
+            return;
+        }
+        face_renderer_destroy(s->preview_renderer);
+        s->preview_renderer = next;
+    }
+    lv_obj_remove_state(s->apply_button, LV_STATE_DISABLED);
+    lv_label_set_text(s->help_label, "预览表情，点击应用后保存主题");
+    lv_label_set_text(s->preview_title, theme->name_zh);
+    const face_expression_t ex = k_face_preview_expressions[s->preview_index];
+    lv_label_set_text_fmt(s->preview_label, "%02u / %u  %s",
+                          (unsigned)s->preview_index + 1, FACE_PREVIEW_EXPRESSION_COUNT,
+                          k_face_expression_names_zh[ex]);
+    const face_render_state_t state = {.expression=ex, .gaze_x=0, .gaze_y=0, .blinking=false};
+    lv_obj_update_layout(s->preview_host);
+    face_renderer_render(s->preview_renderer, theme, &state,
+                          lv_obj_get_width(s->preview_host), lv_obj_get_height(s->preview_host));
 }
 
 static void paint(face_settings_t *s) {
@@ -92,11 +119,15 @@ static void paint(face_settings_t *s) {
     lv_obj_set_style_bg_color(s->cancel_button, tile, 0);
     lv_obj_set_style_bg_color(s->active_swatch, highlight, 0);
     lv_obj_set_style_bg_color(s->apply_button, highlight, 0);
+    lv_label_set_text(s->appearance_description, active->name_zh);
+    lv_obj_set_style_bg_color(s->preview_prev, tile, 0);
+    lv_obj_set_style_bg_color(s->preview_next, tile, 0);
 
     lv_obj_t *texts[] = {
         s->settings_title, s->appearance_label, s->appearance_description,
         s->chevron, s->dismiss_label, s->appearance_title, s->help_label,
-        s->back_label, s->cancel_label,
+        s->back_label, s->cancel_label, s->preview_title, s->preview_label,
+        s->preview_prev_label, s->preview_next_label,
     };
     for (size_t i = 0; i < sizeof(texts) / sizeof(texts[0]); i++)
         lv_obj_set_style_text_color(texts[i], fg, 0);
@@ -116,6 +147,7 @@ static void paint(face_settings_t *s) {
                                   lv_color_hex(theme->eye), 0);
         show(s->selection_marks[i], selected);
     }
+    if (s->page == PAGE_APPEARANCE) refresh_preview(s);
 }
 
 static void settings_home(face_settings_t *s) {
@@ -130,6 +162,7 @@ void face_settings_close(face_settings_t *s) {
     if (!s) return;
     s->page = PAGE_CLOSED;
     s->pending_index = s->active_index;
+    s->preview_index = 0;
     show(s->root, false);
 }
 
@@ -141,6 +174,7 @@ static void appearance_clicked(lv_event_t *e) {
     face_settings_t *s = lv_event_get_user_data(e);
     s->page = PAGE_APPEARANCE;
     s->pending_index = s->active_index;
+    s->preview_index = 0;
     show(s->settings_page, false);
     show(s->appearance_page, true);
     paint(s);
@@ -168,10 +202,21 @@ static void apply_clicked(lv_event_t *e) {
     face_settings_t *s = lv_event_get_user_data(e);
     if (s->page != PAGE_APPEARANCE) return;
     const size_t selected = s->pending_index;
+    if (s->on_apply && !s->on_apply(k_face_themes[selected].id, s->context)) {
+        lv_label_set_text(s->help_label, "应用失败，请重新选择");
+        return;
+    }
     s->active_index = selected;
     /* Return directly to the animated face, not back through settings. */
     face_settings_close(s);
-    if (s->on_apply) s->on_apply(k_face_themes[selected].id, s->context);
+}
+
+static void preview_clicked(lv_event_t *e) {
+    face_settings_t *s = lv_event_get_user_data(e);
+    if (lv_event_get_target_obj(e) == s->preview_prev)
+        s->preview_index = (s->preview_index + FACE_PREVIEW_EXPRESSION_COUNT - 1) % FACE_PREVIEW_EXPRESSION_COUNT;
+    else s->preview_index = (s->preview_index + 1) % FACE_PREVIEW_EXPRESSION_COUNT;
+    refresh_preview(s);
 }
 
 face_settings_t *face_settings_create(lv_obj_t *parent,
@@ -183,6 +228,7 @@ face_settings_t *face_settings_create(lv_obj_t *parent,
     s->on_apply = on_apply;
     s->context = context;
     s->page = PAGE_CLOSED;
+    s->active_index = s->pending_index = FACE_DEFAULT_THEME_INDEX;
     s->root = panel(parent, true);
     lv_obj_set_style_bg_opa(s->root, LV_OPA_COVER, 0);
 
@@ -196,7 +242,7 @@ face_settings_t *face_settings_create(lv_obj_t *parent,
     s->appearance_row = button(s->settings_page);
     lv_obj_add_event_cb(s->appearance_row, appearance_clicked, LV_EVENT_CLICKED, s);
     s->appearance_label = label(s->appearance_row, "外观", "Appearance");
-    s->appearance_description = label(s->appearance_row, "配色与眼睛风格", "Themes and eye styles");
+    s->appearance_description = label(s->appearance_row, "表情主题与配色", "Expression themes and colors");
     s->active_swatch = panel(s->appearance_row, false);
     lv_obj_set_style_radius(s->active_swatch, LV_RADIUS_CIRCLE, 0);
     s->chevron = label(s->appearance_row, ">", ">");
@@ -208,8 +254,25 @@ face_settings_t *face_settings_create(lv_obj_t *parent,
     lv_obj_add_event_cb(s->back_button, back_clicked, LV_EVENT_CLICKED, s);
     s->help_label = label(s->appearance_page, "选择一个外观，点击应用后生效",
                           "Choose an appearance; tap Apply to confirm");
+    s->preview_title = label(s->appearance_page, "", "");
+    s->preview_host = panel(s->appearance_page, false);
+    lv_obj_set_style_radius(s->preview_host, 12, 0);
+    s->preview_label = label(s->appearance_page, "", "");
+    lv_obj_set_style_text_align(s->preview_label, LV_TEXT_ALIGN_CENTER, 0);
+    s->preview_prev = button(s->appearance_page);
+    s->preview_next = button(s->appearance_page);
+    s->preview_prev_label = label(s->preview_prev, "<", "<");
+    s->preview_next_label = label(s->preview_next, ">", ">");
+    lv_obj_center(s->preview_prev_label);
+    lv_obj_center(s->preview_next_label);
+    lv_obj_add_event_cb(s->preview_prev, preview_clicked, LV_EVENT_CLICKED, s);
+    lv_obj_add_event_cb(s->preview_next, preview_clicked, LV_EVENT_CLICKED, s);
+    s->theme_list = panel(s->appearance_page, false);
+    lv_obj_set_style_bg_opa(s->theme_list, LV_OPA_TRANSP, 0);
+    lv_obj_add_flag(s->theme_list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(s->theme_list, LV_DIR_VER);
     for (size_t i = 0; i < FACE_THEME_COUNT; i++) {
-        s->theme_cards[i] = button(s->appearance_page);
+        s->theme_cards[i] = button(s->theme_list);
         lv_obj_add_event_cb(s->theme_cards[i], theme_clicked, LV_EVENT_CLICKED, s);
         s->theme_previews[i] = panel(s->theme_cards[i], false);
         lv_obj_set_style_radius(s->theme_previews[i], 12, 0);
@@ -241,6 +304,7 @@ face_settings_t *face_settings_create(lv_obj_t *parent,
 
 void face_settings_destroy(face_settings_t *s) {
     if (!s) return;
+    face_renderer_destroy(s->preview_renderer);
     for (size_t i = 0; i < FACE_THEME_COUNT; i++) {
         if (s->theme_renderers[i]) face_renderer_destroy(s->theme_renderers[i]);
     }
@@ -282,25 +346,32 @@ void face_settings_layout(face_settings_t *s, int w, int h) {
     put(s->back_button, 37, 28, 52, 47);
     put(s->appearance_title, 110, 43, 320, 30);
     put(s->help_label, 38, 93, w - 76, 26);
-    const int margin = w * 4 / 100;
-    const int gap = w * 15 / 1000;
-    const int card_w = (w - 2 * margin - (int)(FACE_THEME_COUNT - 1) * gap) /
-                       (int)FACE_THEME_COUNT;
-    const int card_h = h * 41 / 100;
-    const int card_top = h * 28 / 100;
+    const int margin = w * 4 / 100, gap = w / 100;
+    const int preview_w = w * 48 / 100;
+    put(s->preview_title, margin, h * 25 / 100, preview_w, 24);
+    put(s->preview_host, margin, h * 31 / 100, preview_w, h * 40 / 100);
+    put(s->preview_prev, margin, h * 73 / 100, 48, 44);
+    put(s->preview_next, margin + preview_w - 48, h * 73 / 100, 48, 44);
+    put(s->preview_label, margin + 52, h * 73 / 100 + 12, preview_w - 104, 24);
+    const int list_x = margin + preview_w + w * 3 / 100;
+    const int list_w = w - list_x - margin;
+    put(s->theme_list, list_x, h * 27 / 100, list_w, h * 54 / 100);
+    const int card_w = (list_w - 2 * gap) / 3;
+    const int card_h = h * 25 / 100;
     for (size_t i = 0; i < FACE_THEME_COUNT; i++) {
-        int x = margin + (int)i * (card_w + gap);
-        put(s->theme_cards[i], x, card_top, card_w, card_h);
-        const int pw = card_w - 16, ph = card_h * 55 / 100;
-        put(s->theme_previews[i], 8, 10, pw, ph);
+        put(s->theme_cards[i], (int)(i % 3) * (card_w + gap),
+             (int)(i / 3) * (card_h + gap), card_w, card_h);
+        const int pw = card_w - 12, ph = card_h / 2;
+        put(s->theme_previews[i], 6, 6, pw, ph);
         const face_render_state_t idle = {.expression=FACE_EX_IDLE,
                                            .gaze_x=0, .gaze_y=0, .blinking=false};
         face_renderer_render(s->theme_renderers[i], &k_face_themes[i],
                              &idle, pw, ph);
-        put(s->theme_labels[i], 8, card_h * 71 / 100, card_w - 16, 26);
+        put(s->theme_labels[i], 5, ph + 12, card_w - 10, card_h - ph - 14);
         lv_obj_set_style_text_align(s->theme_labels[i], LV_TEXT_ALIGN_CENTER, 0);
         put(s->selection_marks[i], card_w - 21, 8, 10, 10);
     }
     put(s->cancel_button, w / 2 - 190, h - 83, 136, 55);
     put(s->apply_button, w / 2 - 27, h - 83, 205, 55);
+    if (s->page == PAGE_APPEARANCE) refresh_preview(s);
 }

@@ -1,12 +1,30 @@
 {
   "schema_version": 1,
   "description": "Appearance packs: renderer implementation, animation profile and coherent colours. A theme is not just a palette; new renderers may define different eyes/assets.",
-  "default_theme": "mint",
+  "default_theme": "eve",
   "themes": [
     {
+      "id": "eve",
+      "name": "EVE",
+      "name_zh": "EVE",
+      "renderer": "eve",
+      "background": "#000000",
+      "eye": "#35D7FF",
+      "pupil": "#35D7FF",
+      "subtitle_bg": "#10222D",
+      "subtitle_text": "#DAF7FF",
+      "chrome": "#35D7FF",
+      "chrome_text": "#DDF9FF",
+      "motion": {
+        "blink_interval_ms": 4200,
+        "blink_duration_ms": 140,
+        "gaze_smoothing": 5
+      }
+    },
+    {
       "id": "mint",
-      "name": "Mint",
-      "name_zh": "薄荷绿",
+      "name": "Classic Mint",
+      "name_zh": "经典线条 · 薄荷绿",
       "background": "#142423",
       "eye": "#A8E8D6",
       "pupil": "#A8E8D6",
@@ -23,8 +41,8 @@
     },
     {
       "id": "sakura",
-      "name": "Sakura",
-      "name_zh": "樱花粉",
+      "name": "Classic Sakura",
+      "name_zh": "经典线条 · 樱花粉",
       "background": "#281D28",
       "eye": "#F5B7CE",
       "pupil": "#F5B7CE",
@@ -41,8 +59,8 @@
     },
     {
       "id": "lavender",
-      "name": "Lavender",
-      "name_zh": "香芋紫",
+      "name": "Classic Lavender",
+      "name_zh": "经典线条 · 香芋紫",
       "background": "#211D32",
       "eye": "#D4C2FB",
       "pupil": "#D4C2FB",
@@ -59,8 +77,8 @@
     },
     {
       "id": "butter",
-      "name": "Butter",
-      "name_zh": "奶油黄",
+      "name": "Classic Butter",
+      "name_zh": "经典线条 · 奶油黄",
       "background": "#282419",
       "eye": "#FFE2A1",
       "pupil": "#FFE2A1",
@@ -77,8 +95,8 @@
     },
     {
       "id": "sky",
-      "name": "Sky",
-      "name_zh": "天空蓝",
+      "name": "Classic Sky",
+      "name_zh": "经典线条 · 天空蓝",
       "background": "#172536",
       "eye": "#B3DCFC",
       "pupil": "#B3DCFC",

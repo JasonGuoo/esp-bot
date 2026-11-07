@@ -13,11 +13,22 @@ face_reveal_settings(face);
 
 ## Appearance drivers
 
-`face_renderer.h/.c` defines the abstract driver (`create`/`render`/`destroy`) and registry, independent of `face.c`. Built-ins: `renderer_outline.c` (macaron stroke eyes) and `renderer_pill.c` (solid capsule eyes). Both accept identical expression and gaze state. To install a new eye family, add another renderer and manifest entry; do not modify the controller or Brain protocol. Pack ID, renderer, palette and blink/gaze parameters live in `shared/themes.json`, compiled into `include/face_themes_generated.h`.
+`face_renderer.h/.c` defines the abstract driver (`create`/`render`/`destroy`) and registry,
+independent of `face.c`. Built-ins: `renderer_eve.c` (default cyan silhouettes with scan lines),
+`renderer_outline.c` (preserved Classic Outline family) and `renderer_pill.c` (capsule example).
+They accept the same expression and gaze state. Packs live in `shared/themes.json`;
+EVE's 20 reference poses and four compatibility poses live in `shared/eve-expressions.json`.
+Run `python3 tools/generate_face_themes.py` after editing either manifest.
+See [EVE implementation and verification](../../../docs/eve-themes.md).
 
 ## UI and persistence
 
-Default is just eyes (and optional subtitle). Screen tap → gear visible **five seconds** → full-screen Settings → **外观** → choose candidate → **应用** → return to face, repaint entire UI. Back or close does not commit. App registers `face_on_theme_applied()` and saves to NVS; the face component never accesses NVS itself. Firmware `app_main.c` loads last saved appearance on startup.
+Default is EVE's eyes (and optional subtitle). Screen tap → gear visible **five seconds** →
+Settings → **外观** → select a candidate and preview its 20 poses with `<` / `>` → **应用** →
+return to face. Back or close does not commit. App registers `face_on_theme_applied()` and
+saves to NVS; the face component never accesses NVS itself. Firmware `app_main.c` restores
+any valid saved ID; new/invalid preferences use the manifest default. Existing users retain
+their explicit Classic Outline selection until they choose EVE.
 
 ## Runtime UI hooks
 

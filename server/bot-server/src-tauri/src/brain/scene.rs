@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use crate::face_catalog_generated::EXPRESSION_IDS;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Scene {
@@ -24,7 +25,7 @@ pub fn schema() -> Value {
         "type":"object", "additionalProperties":false,
         "properties":{
             "speech":{"type":"string","description":"面向孩子说的话，短句，默认中文；不包含工具调用记录。"},
-            "expression":{"type":"string","enum":["idle","happy","curious","thinking","surprised","sleepy","shy"]},
+            "expression":{"type":"string","enum":EXPRESSION_IDS},
             "cards":{"type":"array","maxItems":4,"items":{
                 "type":"object","additionalProperties":false,
                 "properties":{
@@ -42,7 +43,7 @@ pub fn normalize(text: &str, structured: Option<&Value>, limit: usize, media_hos
     let value = parsed.as_ref();
     let speech = value.and_then(|v|v.get("speech")).and_then(Value::as_str).unwrap_or(text);
     let expression = value.and_then(|v|v.get("expression")).and_then(Value::as_str).unwrap_or("happy");
-    let expression = match expression { "idle"|"happy"|"curious"|"thinking"|"surprised"|"sleepy"|"shy" => expression, _ => "happy" };
+    let expression = if EXPRESSION_IDS.contains(&expression) { expression } else { "happy" };
     let mut cards = Vec::new();
     if let Some(items) = value.and_then(|v|v.get("cards")).and_then(Value::as_array) {
         for item in items.iter().take(4) {
@@ -84,4 +85,22 @@ pub fn system_prompt(language: &str, context: &str) -> String {
 <local_context>
 {context}
 </local_context>"#)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_expressions_survive_normalization_but_unknown_values_do_not() {
+        let schema = schema();
+        for expression in EXPRESSION_IDS {
+            let input = json!({"speech":"你好","expression":expression,"cards":[]});
+            assert_eq!(normalize("", Some(&input), 100, &[]).expression, *expression);
+            assert!(schema["properties"]["expression"]["enum"].as_array().unwrap()
+                .contains(&json!(expression)));
+        }
+        let invalid = json!({"expression":"unknown"});
+        assert_eq!(normalize("", Some(&invalid), 100, &[]).expression, "happy");
+    }
 }

@@ -6,16 +6,11 @@
 #include "face.h"
 #include "face_renderer.h"
 #include "face_settings.h"
+#include "fonts/xiaodai_font.h"
 
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-
-static const char *const EXPRESSION_IDS[] = {
-    "idle", "listening", "happy", "curious", "thinking",
-    "surprised", "sleepy", "shy", "blink",
-    "bored", "drowsy", "sleeping", "speaking"
-};
 
 struct face_view {
     lv_obj_t *root;
@@ -105,13 +100,12 @@ static void draw_face(face_view_t *f) {
     }
 }
 
-static void applied_from_settings(const char *id, void *context) {
+static bool applied_from_settings(const char *id, void *context) {
     face_view_t *f = context;
-    if (!f) return;
-    if (face_set_theme(f, id) && f->on_applied) {
-        f->on_applied(id, f->on_applied_context);
-    }
+    if (!f || !face_set_theme(f, id)) return false;
+    if (f->on_applied) f->on_applied(id, f->on_applied_context);
     visible(f->gear_button, false);
+    return true;
 }
 
 static void open_settings(lv_event_t *event) {
@@ -182,7 +176,7 @@ face_view_t *face_create(lv_obj_t *parent) {
     if (!parent) return NULL;
     face_view_t *f = calloc(1, sizeof(*f));
     if (!f) return NULL;
-    f->theme = &k_face_themes[0];
+    f->theme = &k_face_themes[FACE_DEFAULT_THEME_INDEX];
     f->state.expression = FACE_EX_IDLE;
     f->blink_start = lv_tick_get();
 
@@ -219,9 +213,7 @@ face_view_t *face_create(lv_obj_t *parent) {
     lv_label_set_long_mode(f->caption, LV_LABEL_LONG_MODE_DOTS);
     lv_label_set_text(f->caption, "");
     lv_obj_set_style_text_align(f->caption, LV_TEXT_ALIGN_CENTER, 0);
-#if LV_FONT_SOURCE_HAN_SANS_SC_16_CJK
-    lv_obj_set_style_text_font(f->caption, &lv_font_source_han_sans_sc_16_cjk, 0);
-#endif
+    lv_obj_set_style_text_font(f->caption, &xiaodai_font_sc_16, 0);
     visible(f->caption_bar, false);
     visible(f->caption, false);
 
@@ -293,8 +285,8 @@ bool face_set_theme(face_view_t *f, const char *id) {
 
 bool face_set_expression(face_view_t *f, const char *name) {
     if (!f || !name) return false;
-    for (size_t i = 0; i < sizeof(EXPRESSION_IDS) / sizeof(EXPRESSION_IDS[0]); i++) {
-        if (strcmp(EXPRESSION_IDS[i], name) == 0) {
+    for (size_t i = 0; i < FACE_EX_COUNT; i++) {
+        if (strcmp(k_face_expression_ids[i], name) == 0) {
             if (f->state.expression == (face_expression_t)i) return true;
             f->state.expression = (face_expression_t)i;
             f->state.blinking = false;
@@ -366,6 +358,6 @@ const char *face_theme_id(const face_view_t *f) {
     return f ? f->theme->id : NULL;
 }
 const char *face_expression_id(const face_view_t *f) {
-    return f ? EXPRESSION_IDS[f->state.expression] : NULL;
+    return f ? k_face_expression_ids[f->state.expression] : NULL;
 }
 lv_obj_t *face_root(face_view_t *f) { return f ? f->root : NULL; }

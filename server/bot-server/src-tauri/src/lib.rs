@@ -6,6 +6,7 @@ mod provider;
 mod harness;
 mod memory;
 mod brain;
+mod face_catalog_generated;
 
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};

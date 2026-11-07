@@ -319,7 +319,7 @@ WAV 转为 WSS 二进制；可播放音频的描述在**顶层 `audio`**。
 | 字段 | 当前契约 |
 | --- | --- |
 | `speech` | 默认最多 1,200 字符，配置允许 100–4,000；TTS 最多使用前 1,000 字符，截断有警告 |
-| `expression` | `idle` / `happy` / `curious` / `thinking` / `surprised` / `sleepy` / `shy` |
+| `expression` | The 24 IDs in [eve-expressions.json](eve-expressions.json); 20 EVE reference poses plus four lifecycle/animation compatibility poses |
 | `cards` | 最多 4 张；`kind` 为 `text` / `steps` / `image` / `web` |
 | 卡片内容 | `title` 最多 80 字符，`body` 最多 2,000 字符，`url` 为字符串或 null |
 | 远程媒体 | 仅允许家长 `media_hosts` 精确名单中的 HTTPS 主机；默认名单为空，未获准 URL 降级成文本 |

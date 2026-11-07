@@ -13,22 +13,7 @@
 #include <stdbool.h>
 #include "lvgl.h"
 #include "face_themes_generated.h"
-
-typedef enum {
-    FACE_EX_IDLE,
-    FACE_EX_LISTENING,
-    FACE_EX_HAPPY,
-    FACE_EX_CURIOUS,
-    FACE_EX_THINKING,
-    FACE_EX_SURPRISED,
-    FACE_EX_SLEEPY,
-    FACE_EX_SHY,
-    FACE_EX_BLINK,
-    FACE_EX_BORED,
-    FACE_EX_DROWSY,
-    FACE_EX_SLEEPING,
-    FACE_EX_SPEAKING,
-} face_expression_t;
+#include "face_expressions_generated.h"
 
 typedef struct {
     face_expression_t expression;
@@ -54,3 +39,5 @@ void face_renderer_render(face_renderer_t *instance, const face_theme_t *theme,
 void face_renderer_destroy(face_renderer_t *instance);
 const char *face_renderer_id(const face_renderer_t *instance);
 bool face_renderer_supported(const char *renderer_id);
+/* Older packs use the nearest established pose for the extended vocabulary. */
+face_expression_t face_renderer_legacy_expression(face_expression_t expression);

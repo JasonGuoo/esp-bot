@@ -1,14 +1,10 @@
-import {renderFace,hasFaceRenderer} from "./face-renderers.js";
+import {renderFace,hasFaceRenderer,FACE_EXPRESSIONS,PREVIEW_EXPRESSIONS} from "./face-renderers.js";
 import {AppearanceSettings} from "./settings-model.js";
 
 const $=id=>document.getElementById(id);
-const EXPRESSIONS=[
-  ["idle","待机"],["listening","倾听"],["happy","开心"],
-  ["curious","好奇"],["thinking","思考"],["surprised","惊讶"],
-  ["sleepy","困倦"],["shy","害羞"],["blink","眨眼"]
-];
 const KEY="espbot.appearance.v1";
 let themes=[],model=null,expression="idle",gaze={x:0,y:0};
+let previewIndex=0;
 const byId=id=>themes.find(t=>t.id===id);
 function safeRead(){try{return localStorage.getItem(KEY)}catch{return null}}
 function safeSave(id){try{localStorage.setItem(KEY,id)}catch{/* privacy mode */}}
@@ -32,6 +28,14 @@ function updateScreen(){
   $("settings-home").hidden=model.page!=="settings";
   $("appearance-page").hidden=model.page!=="appearance";
   $("active-color-dot").style.background=t.eye;
+  $("active-theme-name").textContent=t.name_zh;
+  if(model.page==="appearance"){
+    const pending=byId(model.selectedId), pose=PREVIEW_EXPRESSIONS[previewIndex];
+    $("theme-preview").style.background=pending.background;
+    $("theme-preview-graphics").innerHTML=renderFace(pending,pose.id,{x:0,y:0});
+    $("theme-preview-title").textContent=pending.name_zh;
+    $("theme-preview-expression").textContent=`${String(previewIndex+1).padStart(2,"0")} / ${PREVIEW_EXPRESSIONS.length}  ${pose.name_zh}`;
+  }
   document.querySelectorAll("[data-appearance]").forEach(card=>{
     card.setAttribute("aria-pressed",String(card.dataset.appearance===model.selectedId));
   });
@@ -72,7 +76,7 @@ function buildThemeOptions(){
 }
 function buildExpressionOptions(){
   const list=$("expressions");list.replaceChildren();
-  for(const [id,label] of EXPRESSIONS){
+  for(const {id,name_zh:label} of FACE_EXPRESSIONS){
     const b=document.createElement("button");
     b.type="button";b.dataset.expression=id;b.textContent=label;
     b.addEventListener("click",()=>{expression=id;updateScreen()});
@@ -95,8 +99,14 @@ function connectEvents(){
     model.close();updateScreen();
   });
   $("appearance-open").addEventListener("click",()=>{
-    model.openAppearance();updateScreen();
+    previewIndex=0;model.openAppearance();updateScreen();
   });
+  for(const [id,delta] of [["preview-prev",-1],["preview-next",1]]){
+    $(id).addEventListener("click",()=>{
+      previewIndex=(previewIndex+delta+PREVIEW_EXPRESSIONS.length)%PREVIEW_EXPRESSIONS.length;
+      updateScreen();
+    });
+  }
   $("appearance-back").addEventListener("click",()=>{
     model.back();updateScreen();
   });

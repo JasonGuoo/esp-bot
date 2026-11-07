@@ -4,7 +4,9 @@ Theme is a **pluggable appearance** rather than only a set of colors. Version 1 
 
 - Stable `id` used by the saved setting and Brain message, e.g. `mint`.
 - User-visible names `name` / `name_zh`.
-- `renderer`: a registered eye drawing strategy. Current supported drivers are `outline` (rounded stroke eyes) and `pill` (solid capsule eyes). All five shipped pastel themes select `outline`; the alternative driver is ready for a future theme.
+- `renderer`: a registered eye drawing strategy. `eve` draws cyan filled eyes with scan lines;
+  `outline` retains the five Classic Outline palettes; `pill` is a compiled capsule example.
+  `default_theme` is `eve`; valid saved choices take precedence.
 - Colors: `background`, `eye`, `pupil`, `subtitle_bg`, `subtitle_text`, `chrome`, `chrome_text`.
 - `motion`: `blink_interval_ms`, `blink_duration_ms`, `gaze_smoothing`. A future pack may add more expressive presets or asset sequences without editing the Brain protocol.
 
@@ -15,6 +17,7 @@ face.c                         Expression state + interpolation + subtitle + set
 face_settings.c                Settings -> Appearance -> pending selection -> Apply
 face_renderer.h/.c             Strategy interface + compiled driver registry
 renderer_outline.c             Original macaron line eyes, no real eyeball detail
+renderer_eve.c                 EVE silhouettes, cyan scan lines, no mouth or pupils
 renderer_pill.c                Different geometry, same expression/gaze contract
 face_themes_generated.h        Build-time manifest compiled from shared/themes.json
 ```
@@ -23,7 +26,11 @@ A new renderer implements `face_renderer_driver_t` (`create`, `render`, `destroy
 
 ## Settings contract
 
-Touch face → temporary gear (5 seconds) → Settings → Appearance → choose a *candidate* appearance → Apply → face. The candidate does not change the live face until Apply. Back/close discards the candidate. The firmware application persists the applied ID using an injected `face_on_theme_applied()` callback to NVS; the reusable Face component owns no persistence. The browser preview mirrors this behavior using localStorage.
+Touch face → temporary gear (5 seconds) → Settings → Appearance → choose a *candidate*
+→ preview its expressions with previous/next → Apply → face. The candidate does not change
+the live face until Apply. Back/close discards it. The application saves the applied ID
+using `face_on_theme_applied()` and NVS; the reusable Face component owns no persistence.
+Browser preview mirrors this with localStorage. See [EVE and the 20-pose catalog](../docs/eve-themes.md).
 
 A programmatic `face_set_theme()` is allowed but does not persist, for example a remote command can temporarily override visuals. The next Settings Apply persists the user's explicit choice. If a future app needs a separate temporary overlay on top of a persistent user preference, implement that policy in the app (not renderer).
 

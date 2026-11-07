@@ -2,9 +2,19 @@
 
 ## Decision
 
+**2026-11-07:** [EVE theme](eve-themes.md) is now the default, following the user's
+[20-pose reference](eveface_design.png). It uses cyan filled silhouettes, scan lines
+and a black background without pupils or a mouth. The previous design below remains
+the **Classic Outline / 经典线条** family with all five original palette IDs preserved.
+Settings now provides a candidate preview and 20-expression navigation before Apply.
+
 Albert.io-inspired *simplicity only*, not imitation of artwork. Two large eyes dominate the 800×480 landscape display; no body, eyelashes, highlights, realistic iris, gradients, nose or permanent mouth. Strokes have round ends. A mouth is permitted only for `surprised` (one dot) or `shy` (one very short curve). No mouth in `happy`.
 
-**Theme means an entire appearance pack**: renderer ID (the eye drawing algorithm), coherent colors, and animation parameters. The current five built-in macaron themes intentionally all select the outline renderer. A future pack can install a different renderer, such as the included pill-eye example, without changing the Face API or the Brain protocol. Background, both eyes, pupil dots, subtitle treatment, and settings chrome change together. **Never give different colors to the left and right eye.** Five independent themes live in `shared/themes.json`: mint, sakura, lavender, butter, sky. `tools/generate_face_themes.py` generates the LVGL header from this single source.
+**Theme means an entire appearance pack**: renderer ID, coherent colors and motion parameters.
+Six installed themes live in `shared/themes.json`: EVE (`eve`, default) and the five
+Classic Outline palettes (`mint`, `sakura`, `lavender`, `butter`, `sky`). Background,
+both eyes, subtitles and settings chrome change together. Both eyes share one color.
+`tools/generate_face_themes.py` generates native, browser and Mac catalogs from shared manifests.
 
 ## Behavior
 

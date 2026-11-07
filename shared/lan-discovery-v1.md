@@ -73,7 +73,7 @@ Rules:
   compared to device uptime.
 - Payload key allowlist: `theme`, `expression`, `subtitle`, `gaze_x`,
   `gaze_y`; all optional, only supplied fields apply. Server-side
-  validation: theme ∈ shared/themes.json ids, expression ∈ the nine Face
+  validation: theme ∈ shared/themes.json ids, expression ∈ shared/eve-expressions.json
   expressions, subtitle ≤ 180 chars, gaze integer −100..100.
 - Server-to-device `gaze_x`/`gaze_y` exist for **manual renderer testing
   only**; the server never generates per-frame gaze and runtime may refuse.

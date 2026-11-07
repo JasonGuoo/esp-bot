@@ -4,7 +4,7 @@
 #include "lvgl.h"
 
 typedef struct face_settings face_settings_t;
-typedef void (*face_settings_apply_cb_t)(const char *theme_id, void *context);
+typedef bool (*face_settings_apply_cb_t)(const char *theme_id, void *context);
 
 face_settings_t *face_settings_create(lv_obj_t *parent,
                                       face_settings_apply_cb_t on_apply,
