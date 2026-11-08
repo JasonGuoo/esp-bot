@@ -1,11 +1,19 @@
 # esp-bot development instructions
 
+## User's research and reuse priority
+
+- Before implementing or debugging a feature, first inspect applicable official
+  examples and reuse working implementations where possible. Next consult the
+  official development documentation; then review other open-source projects.
+  Prefer adapting supported existing components to building replacements.
+
 ## Latest delivery context (2026-11-06)
 
+- **First real board bring-up is now in progress at the user's explicit request.** Read [docs/board-bringup-2026-11-06.md](docs/board-bringup-2026-11-06.md) before further firmware work. The connected ESP32-S31 has 16 MB Flash / PSRAM and an actual **SC101IOT** camera, unlike the earlier OV3660 assumption. A full original Flash backup, native module tests, local IDF build and initial flash have been performed; acceptance and remaining failures are recorded there. Do not infer that all peripherals or private Mac speech have passed.
 - **Mac server is now source-integrated.** Read [docs/mac-bot-server.md](docs/mac-bot-server.md) and [docs/mac-opencode.md](docs/mac-opencode.md) before changing the server. The user's selected LLM harness is **OpenCode v2 (source target 2.2.5)**, with **Qwen Coding Plan → GLM Coding Plan → DeepSeek Flash** routes. This explicit selection supersedes older local-LLM/HF-S2S defaults for LLM orchestration; ASR, TTS, face/speaker embeddings and personal memory remain local. Reuse installed `browser` / `deepseek-search` MCP definitions.
 - The new Mac `brain`/`harness`/`memory` modules, Python local model worker and Chinese companion console are written. The Mac WSS v3 endpoint is separate from diagnostic LAN v1. **Firmware has no WSS v3 client yet**, so no end-to-end private device media is claimed. BLE provisioning remains pending.
-- This server delivery is source-only: no tests, compilation, model/API runs, dependency resolution or CI. New Cargo dependencies have not been resolved into the existing lockfile on this host. Do not claim the implementation is verified or silently run tests in a follow-up.
-- Hardware is still awaiting delivery. Earlier "currently installed V1" wording describes the intended stationary configuration, not a tested physical assembly.
+- **Later Mac build requested on 2026-11-06:** TypeScript/Vite, Rust release, Cargo.lock resolution and the standalone Mac App now build locally. The real console opened and OpenCode v2.2.5 start/stop with saved Keychain credentials was exercised. The current UI removes the prototype Chat/Provider/Events; API keys are configured in Settings and stored in macOS Keychain. The current console has eight task-based sections; see [docs/mac-console-design.md](docs/mac-console-design.md). LAN v1 discovery/diagnostics are enabled by default because the current firmware still needs them; the device page distinguishes this from secure WSS media. See [docs/mac-console.md](docs/mac-console.md). This console update did not exercise cloud model calls or local model inference; board validation is tracked separately. Do not silently run model calls/inference or CI in a follow-up.
+- Hardware was awaiting delivery in the source-only handoff. The later first-board session is recorded above; no motors or IMU have been added or verified.
 - The local runtime and official peripheral adapters are now source-integrated. Read [docs/local-runtime.md](docs/local-runtime.md) for actual startup, model/dependency requirements and limitations. This delivery was not compiled, tested or flashed; do not reinterpret source integration as hardware verification.
 
 ## Delivery and testing policy

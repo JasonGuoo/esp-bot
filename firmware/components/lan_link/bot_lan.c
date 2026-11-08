@@ -273,13 +273,24 @@ static esp_err_t perform_scan(bool auto_select) {
         return err;
     }
     notify(BOT_LAN_EVENT_SCAN_COMPLETE, ESP_OK, NULL);
-    if (auto_select && count == 1) {
-        err = start_connection(&found[0]);
+    const bot_lan_server_t *candidate = NULL;
+    if (s.cfg.preferred_server_id[0]) {
+        for (size_t i = 0; i < count; ++i) {
+            if (strcmp(found[i].server_id, s.cfg.preferred_server_id) == 0) {
+                candidate = &found[i];
+                break;
+            }
+        }
+    } else if (count == 1) {
+        candidate = &found[0];
+    }
+    if (auto_select && candidate) {
+        err = start_connection(candidate);
         if (err != ESP_OK) {
             change_state(BOT_LAN_ERROR);
             notify(BOT_LAN_EVENT_ERROR, err, NULL);
         }
-    } else if (count > 1 && auto_select) {
+    } else if (count > 1 && auto_select && !s.cfg.preferred_server_id[0]) {
         change_state(BOT_LAN_SELECTION_REQUIRED);
     } else if (!s.ws) {
         change_state(BOT_LAN_DISCONNECTED);
@@ -382,6 +393,8 @@ esp_err_t bot_lan_start(const bot_lan_config_t *config,
     if (!config || !valid_device_id(config->device_id, sizeof(config->device_id)) ||
         !config->device_name[0] ||
         strnlen(config->device_name, sizeof(config->device_name)) >= sizeof(config->device_name) ||
+        strnlen(config->preferred_server_id, sizeof(config->preferred_server_id)) >=
+            sizeof(config->preferred_server_id) ||
         s.queue) return ESP_ERR_INVALID_ARG;
     s.mutex = xSemaphoreCreateMutex();
     s.queue = xQueueCreate(QUEUE_LENGTH, sizeof(command_t));

@@ -44,4 +44,4 @@ esp_err_t result = bot_bus_create(&config, &bus);
 参考：[ESP-IDF FreeRTOS](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/system/freertos_idf.html)、[FreeRTOS Queue API](https://www.freertos.org/Documentation/02-Kernel/04-API-references/06-Queues/00-QueueManagement)。
 
 
-摄像头可用/不可用状态均走关键队列，因为生产者可能只在变化时上报，不能把唯一恢复通知当成可覆盖的采样帧。显示成功状态留在普通队列，满时显式返回失败并计数；真正的本地显示请求执行不依赖这份回执。`bot_bus_clear_vision()` 在被动期清除 latest snapshot 和排序时间；若互斥量暂时繁忙，返回 false，由 owner 下个 step 重试。播放事件的 `data.playback.id` 必须复制音频适配器的真实操作 id。
+摄像头可用/不可用状态均走关键队列，因为生产者可能只在变化时上报，不能把唯一恢复通知当成可覆盖的采样帧。显示成功状态留在普通队列，满时显式返回失败并计数；真正的本地显示请求执行不依赖这份回执。`bot_bus_clear_vision()` 在相机不再请求时清除 latest snapshot 和排序时间；若互斥量暂时繁忙，返回 false，由 owner 下个 step 重试。播放事件的 `data.playback.id` 必须复制音频适配器的真实操作 id。

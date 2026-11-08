@@ -33,6 +33,7 @@
 #include "freertos/task.h"
 #include "human_face_detect.hpp"
 #include "dl_image_define.hpp"
+#include "packed_pixels.h"
 
 #if !CONFIG_IDF_TARGET_ESP32S31
 #error "bot_vision targets the ESP32-S31 Korvo DVP path; port a different board explicitly"
@@ -54,6 +55,8 @@ struct bot_vision {
     char device_path[DEVICE_PATH_CAP]{};
     std::atomic<bool> enabled{false};
     std::atomic<bool> stopping{false};
+    std::atomic<uint8_t> sensor_orientation{0};
+    uint8_t applied_orientation = UINT8_MAX; /* worker only */
     SemaphoreHandle_t status_lock = nullptr;
     SemaphoreHandle_t done = nullptr;
     TaskHandle_t task = nullptr;
@@ -160,6 +163,9 @@ static void unavailable(bot_vision_t *v, bot_vision_state_t state,
     v->working.quality = quality;
     v->working.error = error;
     v->working.observation_valid = false;
+    v->working.faces_detected = 0;
+    v->working.model_faces = 0;
+    v->working.rejected_faces = 0;
     // This is an availability observation, NOT an old frame with a fresh stamp.
     publish_observations(v, nullptr, 0, now_ms(), false);
 }
@@ -234,20 +240,23 @@ static esp_err_t close_stream(bot_vision_t *v)
     return ESP_OK;
 }
 
-static esp_err_t set_unmirrored_sensor(bot_vision_t *v)
+static esp_err_t set_sensor_orientation(bot_vision_t *v, uint8_t orientation)
 {
     // BSP_CAMERA_VFLIP=0 / BSP_CAMERA_HFLIP=0 on S31-Korvo-1.
-    // The board's 180-degree installation is corrected in our packed copy.
+    // Reuse esp_video's official V4L2 sensor controls before STREAMON.
     struct v4l2_ext_control control{};
     struct v4l2_ext_controls controls{};
     controls.ctrl_class = V4L2_CID_USER_CLASS;
     controls.count = 1;
     controls.controls = &control;
-    control.value = 0;
+    control.value = (orientation & 2) ? 1 : 0;
     control.id = V4L2_CID_VFLIP;
     if (ioctl(v->fd, VIDIOC_S_EXT_CTRLS, &controls) != 0) return io_error("sensor VFLIP");
     control.id = V4L2_CID_HFLIP;
+    control.value = (orientation & 1) ? 1 : 0;
     if (ioctl(v->fd, VIDIOC_S_EXT_CTRLS, &controls) != 0) return io_error("sensor HFLIP");
+    v->applied_orientation = orientation;
+    ESP_LOGI(TAG, "Camera sensor orientation applied=%u", static_cast<unsigned>(orientation));
     return ESP_OK;
 }
 
@@ -274,7 +283,7 @@ static esp_err_t open_stream(bot_vision_t *v)
             return io_error("reapply OV3660 sensor format");
         }
     }
-    esp_err_t result = set_unmirrored_sensor(v);
+    esp_err_t result = set_sensor_orientation(v, v->sensor_orientation.load());
     if (result != ESP_OK) return result;
     if (ioctl(v->fd, VIDIOC_G_FMT, &format) != 0) return io_error("final G_FMT");
     const auto &pixel = format.fmt.pix;
@@ -296,8 +305,15 @@ static esp_err_t open_stream(bot_vision_t *v)
         v->pixel_bytes = 3;
         v->image_type = dl::image::DL_IMAGE_PIX_TYPE_RGB888;
         break;
+    case V4L2_PIX_FMT_UYVY:
+    case V4L2_PIX_FMT_YUYV:
+        if (v->width % 2) return ESP_ERR_INVALID_SIZE;
+        v->pixel_bytes = 2;
+        v->image_type = v->fourcc == V4L2_PIX_FMT_UYVY ?
+            dl::image::DL_IMAGE_PIX_TYPE_UYVY : dl::image::DL_IMAGE_PIX_TYPE_YUYV;
+        break;
     default:
-        ESP_LOGE(TAG, "Unsupported capture pixel format; select the official OV3660 RGB565 preset");
+        ESP_LOGE(TAG, "Unsupported capture pixel format; select RGB565/RGB888 or packed YUV422");
         return ESP_ERR_NOT_SUPPORTED;
     }
     const size_t row_bytes = static_cast<size_t>(v->width) * v->pixel_bytes;
@@ -375,6 +391,8 @@ static esp_err_t drain_completed_frames(bot_vision_t *v)
 
 static uint8_t pixel_luma(const uint8_t *pixel, uint32_t fourcc)
 {
+    if (fourcc == V4L2_PIX_FMT_UYVY) return pixel[1];
+    if (fourcc == V4L2_PIX_FMT_YUYV) return pixel[0];
     unsigned r, g, b;
     if (fourcc == V4L2_PIX_FMT_RGB24) {
         r = pixel[0]; g = pixel[1]; b = pixel[2];
@@ -397,14 +415,19 @@ static bool copy_frame(bot_vision_t *v, const struct v4l2_buffer &buffer)
     const uint8_t *source = v->buffers[buffer.index];
     uint64_t luma = 0;
     unsigned samples = 0;
+    const bool yuv = v->fourcc == V4L2_PIX_FMT_UYVY || v->fourcc == V4L2_PIX_FMT_YUYV;
     for (size_t y = 0; y < v->height; ++y) {
         const uint8_t *row = source + y * v->stride;
         if (!v->config.rotate_180) {
             memcpy(v->image + y * v->width * v->pixel_bytes, row, v->width * v->pixel_bytes);
+        } else if (yuv) {
+            bot_vision_reverse_yuv422_row(row,
+                v->image + (v->height - 1 - y) * v->width * 2, v->width,
+                v->fourcc == V4L2_PIX_FMT_UYVY);
         }
         for (size_t x = 0; x < v->width; ++x) {
             const uint8_t *pixel = row + x * v->pixel_bytes;
-            if (v->config.rotate_180) {
+            if (v->config.rotate_180 && !yuv) {
                 const size_t index = (v->height - 1 - y) * v->width + v->width - 1 - x;
                 memcpy(v->image + index * v->pixel_bytes, pixel, v->pixel_bytes);
             }
@@ -444,6 +467,21 @@ static bool face_observation(const dl::detect::result_t &face, const bot_vision_
     return true;
 }
 
+static void preview_frame(bot_vision_t *v, const vatt_observation_t *observations, size_t count)
+{
+    if (!v->config.on_preview) return;
+    bot_vision_pixels_t format = BOT_VISION_RGB888;
+    switch (v->fourcc) {
+    case V4L2_PIX_FMT_RGB565: format = BOT_VISION_RGB565_LE; break;
+    case V4L2_PIX_FMT_RGB565X: format = BOT_VISION_RGB565_BE; break;
+    case V4L2_PIX_FMT_UYVY: format = BOT_VISION_UYVY; break;
+    case V4L2_PIX_FMT_YUYV: format = BOT_VISION_YUYV; break;
+    default: break;
+    }
+    v->config.on_preview(v->config.context, v->image, v->width, v->height,
+                         format, v->working.capture_ms, observations, count);
+}
+
 static esp_err_t capture_and_infer(bot_vision_t *v)
 {
     esp_err_t result = drain_completed_frames(v);
@@ -475,6 +513,7 @@ static esp_err_t capture_and_infer(bot_vision_t *v)
         return ESP_OK;
     }
     if (v->working.mean_luma < v->config.min_mean_luma) {
+        preview_frame(v, nullptr, 0);
         ++v->working.dropped_dark;
         unavailable(v, BOT_VISION_DEGRADED, BOT_VISION_FRAME_DARK, ESP_OK);
         return ESP_OK;
@@ -486,10 +525,13 @@ static esp_err_t capture_and_infer(bot_vision_t *v)
     image.pix_type = v->image_type;
     const uint32_t infer_started = now_ms();
     const auto &faces = v->detector->run(image);
+    v->working.model_faces = static_cast<uint8_t>(std::min(faces.size(), static_cast<size_t>(255)));
+    v->working.rejected_faces = 0;
     v->working.inference_ms = now_ms() - infer_started;
     if (!wants_capture(v)) return ESP_ERR_INVALID_STATE;
     if (now_ms() - v->working.capture_ms + v->working.capture_uncertainty_ms >
         v->config.max_result_age_ms) {
+        preview_frame(v, nullptr, 0);
         ++v->working.dropped_stale;
         unavailable(v, BOT_VISION_DEGRADED, BOT_VISION_FRAME_STALE, ESP_ERR_TIMEOUT);
         return ESP_OK;
@@ -502,6 +544,7 @@ static esp_err_t capture_and_infer(bot_vision_t *v)
         vatt_observation_t observation{};
         if (!face_observation(face, v, &observation)) {
             malformed = true;
+            if (v->working.rejected_faces < 255) ++v->working.rejected_faces;
             continue;
         }
         size_t position = 0;
@@ -514,16 +557,24 @@ static esp_err_t capture_and_infer(bot_vision_t *v)
     }
     if (!count && malformed) {
         ++v->working.dropped_invalid;
-        unavailable(v, BOT_VISION_DEGRADED, BOT_VISION_FRAME_INVALID, ESP_ERR_INVALID_RESPONSE);
+        v->working.state = BOT_VISION_DEGRADED;
+        v->working.quality = BOT_VISION_FRAME_INVALID;
+        v->working.error = ESP_ERR_INVALID_RESPONSE;
+        v->working.observation_valid = false;
+        v->working.faces_detected = 0;
+        publish_observations(v, nullptr, 0, now_ms(), false);
+        preview_frame(v, nullptr, 0);
         return ESP_OK;
     }
     v->working.state = BOT_VISION_CAPTURING;
     v->working.quality = BOT_VISION_FRAME_OK;
     v->working.error = ESP_OK;
     v->working.observation_valid = true;
+    v->working.faces_detected = static_cast<uint8_t>(count);
     // Calibration is reported separately. Runtime policy may allow approximate
     // visual following before calibration, but this is never gaze evidence.
     publish_observations(v, observations, count, v->working.capture_ms, true);
+    preview_frame(v, observations, count);
     return ESP_OK;
 }
 
@@ -554,6 +605,16 @@ static void vision_task(void *arg)
             continue;
         }
         paused_reported = false;
+        if (v->fd >= 0 && v->applied_orientation != v->sensor_orientation.load()) {
+            unavailable(v, BOT_VISION_STARTING, BOT_VISION_FRAME_NONE, ESP_OK);
+            const esp_err_t closed = close_stream(v);
+            if (closed != ESP_OK) {
+                recovering = true;
+                unavailable(v, BOT_VISION_DEGRADED, BOT_VISION_FRAME_CAMERA_ERROR, closed);
+                wait_control(v, v->config.retry_ms);
+            } else retire_tracking(v);
+            continue;
+        }
         if (recovering) {
             const esp_err_t closed = close_stream(v);
             if (closed != ESP_OK) {
@@ -562,6 +623,7 @@ static void vision_task(void *arg)
                 continue;
             }
             recovering = false;
+            retire_tracking(v);
         }
         if (v->fd < 0) {
             if (!v->tracker) {
@@ -656,7 +718,7 @@ extern "C" bot_vision_config_t bot_vision_default_config(void)
     config.max_result_age_ms = 750;
     config.capture_uncertainty_ms = 200;
     config.retry_ms = 2000;
-    config.min_mean_luma = 12;
+    config.min_mean_luma = 20; // also rejects nominal black Y=16 in limited-range YUV
     config.warmup_frames = 2;
     config.min_face_confidence = 0.5f;
     config.tracker = vatt_default_config();
@@ -668,7 +730,7 @@ extern "C" esp_err_t bot_vision_start(const bot_vision_config_t *config, bot_vis
 {
     if (!config || !out) return ESP_ERR_INVALID_ARG;
     *out = nullptr;
-    if (!config->prepare_camera || !config->on_snapshot ||
+    if (!config->prepare_camera || !config->on_snapshot || config->sensor_orientation > 3 ||
         !config->dequeue_timeout_ms || !config->frame_interval_ms || !config->retry_ms ||
         config->max_frame_width < 2 || config->max_frame_height < 2 ||
         config->max_frame_width > 1920 || config->max_frame_height > 1080 ||
@@ -684,6 +746,7 @@ extern "C" esp_err_t bot_vision_start(const bot_vision_config_t *config, bot_vis
     snprintf(v->device_path, sizeof(v->device_path), "%s", path);
     v->config.device_path = v->device_path;
     v->enabled.store(config->start_enabled);
+    v->sensor_orientation.store(config->sensor_orientation);
     v->working.state = BOT_VISION_STOPPED;
     v->working.calibration_valid = config->calibration_valid;
     v->status = v->working;
@@ -716,6 +779,15 @@ extern "C" esp_err_t bot_vision_set_enabled(bot_vision_t *v, bool enabled)
     if (!v) return ESP_ERR_INVALID_ARG;
     if (v->stopping.load()) return ESP_ERR_INVALID_STATE;
     v->enabled.store(enabled);
+    xTaskNotifyGive(v->task);
+    return ESP_OK;
+}
+
+extern "C" esp_err_t bot_vision_set_sensor_orientation(bot_vision_t *v, uint8_t orientation)
+{
+    if (!v || orientation > 3) return ESP_ERR_INVALID_ARG;
+    if (v->stopping.load()) return ESP_ERR_INVALID_STATE;
+    v->sensor_orientation.store(orientation);
     xTaskNotifyGive(v->task);
     return ESP_OK;
 }

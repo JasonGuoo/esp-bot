@@ -65,7 +65,7 @@ static void render(void *instance, const face_theme_t *theme,
             default: break;
         }
         if (state->blinking || state->expression == FACE_EX_BLINK) h = height * 5 / 100;
-        x = width * (i ? 68 : 32) / 100 - w / 2 + state->gaze_x * width / 1700;
+        x = width * (i ? 68 : 32) / 100 - w / 2 + state->gaze_x * width / 1100;
         y += state->gaze_y * height / 1700;
         place(r->eye[i], x, y, w, h);
         lv_obj_set_style_bg_color(r->eye[i], lv_color_hex(theme->eye), 0);

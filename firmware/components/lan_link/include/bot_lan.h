@@ -62,7 +62,8 @@ typedef void (*bot_lan_callback_t)(const bot_lan_event_t *event, void *ctx);
 typedef struct {
     char device_id[65];       /* ASCII alnum, underscore or dash; max 64 */
     char device_name[65];     /* UTF-8, max 64 bytes */
-    bool auto_connect;       /* auto-connect only when exactly ONE server is found */
+    bool auto_connect;       /* configured server, or exactly one when unconfigured */
+    char preferred_server_id[48]; /* public discovery selector, NOT authentication */
     bool mdns_preinitialized; /* true if another component already called mdns_init */
     uint32_t scan_interval_ms; /* 0 selects 5000 ms */
 } bot_lan_config_t;

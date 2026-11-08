@@ -16,8 +16,9 @@ struct bot_bus {
 
 static bool critical_event(const bot_event_t *event)
 {
-    /* Only replaceable health observations may use the lossy queue. */
+    /* Replaceable observations must not turn queue pressure into a fault. */
     if (event->kind == BOT_EVENT_DISPLAY_HEALTH && event->data.display.error == ESP_OK) return false;
+    if (event->kind == BOT_EVENT_SOUND_ACTIVITY) return false;
     return true;
 }
 

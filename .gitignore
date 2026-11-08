@@ -1,5 +1,7 @@
 # Local secrets and ESP-IDF build artifacts
 firmware/build/
+firmware/.bringup/
+firmware/.toolchains/
 firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/managed_components/

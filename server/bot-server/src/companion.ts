@@ -1,7 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LocalCamera, PcmRecorder, base64ToBuffer, readImageFile, readWavFile, type CapturedWav } from "./capture";
+import { CONSOLE_PANELS, consoleTemplate, type ConsolePanel } from "./console-layout";
+import { renderActivity, renderCapabilities, renderDeviceStatus, renderRuntimeMetrics } from "./console-presenters";
 import "./companion.css";
+import "./console.css";
 
 type JsonObject = Record<string, unknown>;
 type Profile = { id: string; display_name: string; is_child: boolean };
@@ -51,49 +54,21 @@ function errorText(error: unknown): string {
   if (text.includes("NotAllowedError") || text.includes("Permission denied")) return "没有获得麦克风或摄像头权限。可在 macOS 设置里开启，或选择本地文件。";
   if (text.includes("NotFoundError")) return "没有找到可用的麦克风或摄像头。可选择本地文件继续。";
   if (text.includes("capture_cancelled")) return "已取消采集。";
+  for (const [code, message] of [
+    ["brain_not_started", "服务尚未启动，请点击左下角“启动服务”。"],
+    ["all_routes_unavailable", "当前没有可调用的模型路线。请在“模型与密钥”检查密钥、路线开关和冷却状态。"],
+    ["local_worker_not_configured", "本地模型环境尚未配置，请在“本地能力”检查 Python 与 Worker 路径。"],
+    ["brain_busy", "还有一个任务正在进行，可以先停止当前任务再重试。"],
+    ["api_key_keychain_authorization_timeout", "等待 macOS 钥匙串授权已超时，密钥仍然保留。请完成系统授权，再点击“启动服务”。"],
+    ["api_key_keychain_read", "macOS 未允许读取已保存密钥。请解锁登录钥匙串并完成系统授权，再启动服务。无需重新填写密钥。"],
+  ]) if (text.includes(code)) return message;
   return text.slice(0, 2000);
 }
 
-export function mountCompanion(container: HTMLElement, options: { mock?: boolean } = {}): CompanionController {
+export function mountCompanion(container: HTMLElement): CompanionController {
   // Static application template only. Every model, file, profile and tool value
   // below is assigned with textContent / DOM properties, never interpolated HTML.
-  container.innerHTML = `
-    <div class="cc-shell">
-      <header class="cc-head">
-        <div class="cc-pet" id="cc-pet" data-expression="idle" aria-hidden="true"><i></i><i></i><b></b></div>
-        <div class="cc-heading"><span class="cc-kicker">MAC 交互台</span><h1>小呆 <span>在这里</span></h1><p id="cc-phase" role="status">聊一聊，或者一起发现一个小原理。</p></div>
-        <div class="cc-head-actions"><span class="cc-pill" id="cc-service-pill">正在读取状态</span><button type="button" class="cc-button primary" id="cc-start">启动服务</button><button type="button" class="cc-button stop" id="cc-stop">■ 停止</button></div>
-      </header>
-      <nav class="cc-tabs" aria-label="小呆功能"><button type="button" class="selected" data-panel="talk" aria-selected="true">对话</button><button type="button" data-panel="family" aria-selected="false">家庭与记忆</button><button type="button" data-panel="settings" aria-selected="false">服务与设置</button></nav>
-      <p id="cc-notice" class="cc-notice" role="status" aria-live="polite" hidden></p>
-
-      <div class="cc-conversation-bar"><label for="cc-profile">本轮成员</label><select id="cc-profile"><option value="">未指定 · 只用共享记忆</option></select><button type="button" class="cc-button quiet" id="cc-new-conversation">新对话</button><button type="button" class="cc-button quiet" id="cc-forget-conversation">忘记这段</button></div>
-      <section class="cc-panel cc-talk" id="cc-panel-talk">
-        <div class="cc-messages" id="cc-messages" role="log" aria-live="polite" aria-relevant="additions text"></div>
-        <div id="cc-permissions" class="cc-permissions" aria-label="待家长确认的操作" hidden></div>
-        <div class="cc-draft" id="cc-draft" hidden><span id="cc-draft-label"></span><button type="button" class="cc-button quiet" id="cc-draft-remove">移除</button></div>
-        <form id="cc-chat-form" class="cc-composer"><textarea id="cc-input" maxlength="4000" rows="2" autocomplete="off" placeholder="给小呆一个问题，或者一起想个有趣的玩法…" aria-label="发给小呆的话"></textarea><div class="cc-composer-bottom"><div class="cc-input-actions"><button type="button" class="cc-button" id="cc-record">● 录一段</button><button type="button" class="cc-button quiet" id="cc-choose-wav">选择 WAV</button><input type="file" id="cc-wav" accept=".wav,audio/wav,audio/x-wav" hidden><label class="cc-check"><input type="checkbox" id="cc-speak" checked>朗读回复</label></div><button type="submit" class="cc-button primary" id="cc-send">发送 ↑</button></div><p class="cc-caption" id="cc-capture-hint">按下才录音，最长 30 秒；结束后点“发送”。不用连接机器人。</p></form>
-      </section>
-
-      <section class="cc-panel cc-scroll" id="cc-panel-family" hidden>
-        <div class="cc-family-grid">
-          <section class="cc-box"><h2>家庭成员</h2><p class="cc-muted">只有明确选择的成员，才会使用对应的个人记忆。识别结果不会自动切换身份。</p><form id="cc-profile-form" class="cc-form"><label>新成员昵称<input id="cc-profile-name" maxlength="80" required placeholder="例如：小米"></label><label class="cc-check"><input type="checkbox" id="cc-profile-child" checked>儿童档案（手动指定）</label><button class="cc-button" type="submit">创建档案</button></form><div id="cc-profile-list" class="cc-row-list"></div></section>
-          <section class="cc-box"><h2>登记人脸 / 声纹</h2><p class="cc-muted" id="cc-enrollment-owner">请先在“本轮成员”中选择一个档案。</p><div class="cc-inline"><select id="cc-identity-kind" aria-label="登记类型"><option value="face">人脸</option><option value="speaker">声纹</option></select><button type="button" class="cc-button" id="cc-add-samples">选择样本</button><button type="button" class="cc-button quiet" id="cc-sample-camera">拍一张</button><button type="button" class="cc-button quiet" id="cc-sample-record">录一段样本</button><input type="file" id="cc-samples" accept="image/jpeg,image/png" multiple hidden></div><p class="cc-caption" id="cc-sample-guidance">至少 3 张不同照片，每张只有本人。样本留在本机。</p><div id="cc-sample-list" class="cc-sample-list"></div><label class="cc-check"><input type="checkbox" id="cc-enroll-consent">我是家长 / 本人，明确同意本次登记</label><label class="cc-check"><input type="checkbox" id="cc-enroll-replace">替换该成员原来的同类登记</label><div class="cc-inline"><button type="button" class="cc-button primary" id="cc-enroll">登记样本</button><button type="button" class="cc-button quiet" id="cc-clear-samples">清除待登记样本</button></div><div id="cc-enrollment-list" class="cc-row-list"></div></section>
-          <section class="cc-box"><h2>识别一次</h2><p class="cc-muted">本地提取特征并寻找已登记候选。相似度不是正确率；未知或多人照片会明确显示。</p><div class="cc-inline"><select id="cc-recognize-kind" aria-label="识别类型"><option value="face">人脸</option><option value="speaker">声纹</option></select><button type="button" class="cc-button" id="cc-recognize-file">选择文件并识别</button><button type="button" class="cc-button quiet" id="cc-recognize-camera">拍照识别</button><button type="button" class="cc-button quiet" id="cc-recognize-record">录音识别</button><input type="file" id="cc-recognize-input" accept="image/jpeg,image/png" hidden></div><div id="cc-identity-result" class="cc-identity-result">尚未请求识别。</div></section>
-          <section class="cc-box"><h2 id="cc-memory-form-title">记住一件小事</h2><p class="cc-muted">当前对话使用云端模型。只有“已确认”并“允许提供给云端”的记忆才参与回答。</p><form id="cc-memory-form" class="cc-form"><div class="cc-two-fields"><label>归属<select id="cc-memory-scope"><option value="household">家庭共享</option><option value="profile">某个成员</option></select></label><label>成员<select id="cc-memory-owner"><option value="">请选择成员</option></select></label></div><label>内容<textarea id="cc-memory-content" rows="3" maxlength="2000" required placeholder="例如：喜欢用恐龙做数学题的例子。"></textarea></label><div class="cc-two-fields"><label>分类<input id="cc-memory-category" value="preference" maxlength="64" required></label><label>来源<select id="cc-memory-source"><option value="guardian_note">家长填写</option><option value="user_statement">本人表达</option><option value="assistant_suggestion">助手建议待检查</option></select></label></div><label>来源备注（可选）<input id="cc-memory-ref" maxlength="256" placeholder="例如：今天一起聊天时确认"></label><label>到期时间（留空则长期）<input id="cc-memory-expiry" type="datetime-local"></label><label class="cc-check"><input type="checkbox" id="cc-memory-confirmed">我已确认内容</label><label class="cc-check"><input type="checkbox" id="cc-memory-cloud">允许将这一条提供给云端模型</label><div class="cc-inline"><button class="cc-button primary" type="submit" id="cc-memory-save">保存记忆</button><button type="button" class="cc-button quiet" id="cc-memory-reset">清空表单</button></div></form></section>
-        </div>
-        <section class="cc-box cc-memory-box"><div class="cc-section-title"><h2>记忆清单 <span id="cc-memory-count"></span></h2><input id="cc-memory-filter" type="search" placeholder="搜索内容 / 成员" aria-label="筛选记忆"><button type="button" class="cc-button quiet" id="cc-family-refresh">刷新</button></div><div id="cc-memory-list" class="cc-memory-list"></div></section>
-      </section>
-
-      <section class="cc-panel cc-scroll" id="cc-panel-settings" hidden>
-        <section class="cc-box"><div class="cc-section-title"><h2>服务</h2><button type="button" class="cc-button quiet" id="cc-refresh-status">刷新状态</button><button type="button" class="cc-button quiet" id="cc-service-stop">停止服务</button><button type="button" class="cc-button quiet" id="cc-reload">重载配置</button></div><p class="cc-muted" id="cc-status-summary">正在读取本地服务状态。</p><div class="cc-routes" id="cc-routes"></div><p class="cc-caption">优先级按配置顺序使用。没有服务商返回的剩余额度时，不显示估算余额。</p><h3>继承的工具</h3><div id="cc-mcp" class="cc-row-list"></div><details><summary>完整状态（不含密钥）</summary><pre id="cc-status-json" class="cc-json"></pre></details></section>
-        <section class="cc-box"><div class="cc-section-title"><h2>本地语音与视觉</h2><button type="button" class="cc-button" id="cc-models-status">查看模型状态</button><button type="button" class="cc-button quiet" id="cc-models-unload">卸载已加载模型</button></div><p class="cc-muted">ASR、人脸和声纹在 Mac 本地运行；第一次使用前，需要按文档准备依赖与模型。这里不会自动下载。</p><pre id="cc-models-json" class="cc-json">尚未请求模型状态。</pre></section>
-        <section class="cc-box"><div class="cc-section-title"><h2>配置 brain.json</h2><button type="button" class="cc-button quiet" id="cc-config-read">重新读取</button><button type="button" class="cc-button primary" id="cc-config-save">保存并重载</button></div><p class="cc-muted">配置模型顺序、环境变量名称、本地模型路径和允许展示的媒体域名。修改后服务会停止，点击“启动服务”继续。</p><p class="cc-caption" id="cc-config-path"></p><textarea id="cc-config-editor" class="cc-config-editor" rows="20" spellcheck="false" aria-label="brain.json 配置"></textarea></section>
-        <details class="cc-box"><summary>设备安全连接凭据</summary><p class="cc-muted">供支持 v3 的设备使用，需要 WSS 证书信任。旧版 LAN 诊断配对不等于安全音频连接。</p><div class="cc-inline"><input id="cc-device-id" maxlength="64" placeholder="设备 ID" aria-label="设备 ID"><button type="button" class="cc-button" id="cc-credential-issue">签发 / 轮换凭据</button><button type="button" class="cc-button quiet" id="cc-credential-refresh">刷新列表</button></div><div id="cc-token-once" class="cc-token" hidden><strong>仅本次显示，请通过受信任的方式写入设备。</strong><code id="cc-token-value"></code><button type="button" class="cc-button quiet" id="cc-token-dismiss">隐藏并清除</button></div><div id="cc-credential-list" class="cc-row-list"></div></details>
-        <section class="cc-box"><h2>忘记对话</h2><p class="cc-muted">清除本地 conversation 记录和对应的 OpenCode 会话，保留单独保存的记忆与档案。</p><button type="button" class="cc-button danger" id="cc-forget-all">忘记所有对话</button></section>
-      </section>
-      <dialog id="cc-camera-dialog" class="cc-camera-dialog"><h2 id="cc-camera-title">本地相机预览</h2><p class="cc-muted">画面只留在本机。拍摄后会关闭摄像头。</p><video id="cc-camera-video" autoplay muted playsinline></video><div class="cc-inline"><button type="button" class="cc-button primary" id="cc-camera-snapshot">拍摄</button><button type="button" class="cc-button quiet" id="cc-camera-close">关闭相机</button></div></dialog>
-    </div>`;
+  container.innerHTML = consoleTemplate;
 
   const $ = <T extends HTMLElement>(selector: string): T => {
     const node = container.querySelector<T>(selector);
@@ -105,13 +80,18 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
   const memoryOwner = $<HTMLSelectElement>("#cc-memory-owner");
   const identityKind = $<HTMLSelectElement>("#cc-identity-kind");
   const recognizeKind = $<HTMLSelectElement>("#cc-recognize-kind");
+  const keyRoute = $<HTMLSelectElement>("#cc-api-key-route");
+  const keyInput = $<HTMLInputElement>("#cc-api-key-value");
+  const memberFocus = $<HTMLSelectElement>("#cc-member-focus");
+  const memoryDialog = $<HTMLDialogElement>("#cc-memory-dialog");
+  const profileDialog = $<HTMLDialogElement>("#cc-profile-dialog");
   const messages = $("#cc-messages");
   const recorder = new PcmRecorder();
   const camera = new LocalCamera();
   const cameraDialog = $<HTMLDialogElement>("#cc-camera-dialog");
   let visible = true;
   let disposed = false;
-  let panel = "talk";
+  let panel: ConsolePanel = "talk";
   let profiles: Profile[] = [];
   let memories: MemoryRecord[] = [];
   let enrollments: Enrollment[] = [];
@@ -124,7 +104,11 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
   let operationBusy = false;
   let statusBusy = false;
   let permissionBusy = false;
+  let questionBusy = false;
+  let questionSignature = "";
+  let pendingQuestionCount = 0;
   let serviceReady = false;
+  let serviceRunning = false;
   let recordPurpose: CapturePurpose | null = null;
   let captureConverting = false;
   let cameraPurpose: "enroll" | "recognize" = "enroll";
@@ -139,15 +123,27 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
   let audioUrl: string | null = null;
   const replayClips = new Map<string, { base64: string; control: HTMLButtonElement }>();
   let unsubscribe: UnlistenFn | null = null;
+  let credentialRoutes: JsonObject[] = [];
+  let loadedConfiguration: JsonObject | null = null;
+  let rawConfigDirty = false;
+  let routeFormDirty = false;
+  let editingRouteId = "";
+  let editingProfileId: string | null = null;
+  let unsubscribeLan: UnlistenFn | null = null;
+  const activity: { label: string; at: number }[] = [];
+  const dirtyConfigurationForms = new Set<string>();
+  let pendingPermissionCount = 0;
+  let latestModelHealth: JsonObject | null = null;
 
   const request = async <T = unknown>(method: string, payload: unknown = {}): Promise<T> => {
-    if (options.mock) throw new Error("当前是旧版界面预览模式；小呆服务没有被调用。请在 Tauri 应用中使用。");
     return invoke<T>("companion_request", { method, payload });
   };
 
   function notice(text: string, error = false): void {
     if (disposed) return;
     const node = $("#cc-notice");
+    $("#cc-notice-wrap").hidden = !text;
+    $("#cc-notice-wrap").classList.toggle("error", error);
     node.hidden = !text;
     node.classList.toggle("error", error);
     node.textContent = text;
@@ -158,6 +154,7 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
       thinking: "我想一想，也查一查需要的资料…", speaking: "小呆正在说话。", error: "这一步没完成，可以看看提示。",
     };
     $("#cc-phase").textContent = description ?? defaults[value];
+    $("#cc-phase").hidden = panel !== "talk" && value === "idle";
     $("#cc-phase").setAttribute("aria-live", value === "listening" ? "off" : "polite");
     const allowed = new Set(["idle", "happy", "curious", "thinking", "surprised", "sleepy", "shy", "listening", "speaking"]);
     const chosen = expression ?? (value === "error" ? "curious" : value);
@@ -173,32 +170,54 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
     return node;
   }
   function activatePanel(next: string): void {
-    if (!["talk", "family", "settings"].includes(next)) return;
-    if (panel !== next) { cancelCapture(); closeCamera(); }
-    panel = next;
-    for (const tab of Array.from(container.querySelectorAll<HTMLButtonElement>(".cc-tabs button"))) {
-      const active = tab.dataset.panel === next;
-      tab.classList.toggle("selected", active); tab.setAttribute("aria-selected", String(active));
+    const page = CONSOLE_PANELS.find((candidate) => candidate.id === next);
+    if (!page) return;
+    if (panel !== next) {
+      cancelCapture(); closeCamera(); keyInput.value = ""; if (panel === "devices") clearToken();
+      if (!operationBusy && !turnBusy) notice("");
     }
-    for (const candidate of ["talk", "family", "settings"]) $("#cc-panel-" + candidate).hidden = candidate !== next;
-    if (next === "settings") void refreshStatus();
+    panel = page.id;
+    for (const tab of Array.from(container.querySelectorAll<HTMLButtonElement>(".cc-nav-item"))) {
+      const active = tab.dataset.panel === next;
+      tab.classList.toggle("selected", active);
+      if (active) tab.setAttribute("aria-current", "page"); else tab.removeAttribute("aria-current");
+    }
+    for (const candidate of CONSOLE_PANELS) {
+      const pane = $("#cc-panel-" + candidate.id);
+      pane.hidden = candidate.id !== next;
+      pane.setAttribute("aria-hidden", String(candidate.id !== next));
+    }
+    $("#cc-page-title").textContent = page.label;
+    $("#cc-page-group").textContent = page.group;
+    $("#cc-page-description").textContent = page.description;
+    $("#cc-phase").hidden = next !== "talk" && !turnBusy && !recordPurpose && !captureConverting;
+    $("#cc-approval-banner").hidden = pendingPermissionCount === 0 || next === "tools";
+    $("#cc-question-banner").hidden = pendingQuestionCount === 0 || next === "talk";
+    try { localStorage.setItem("espbot.console.panel", next); } catch { /* Navigation remains usable without storage. */ }
+    if (["settings", "models", "devices", "tools"].includes(next)) void refreshStatus();
+    if (next === "family" || next === "memory") void refreshFamily();
+    if (next === "devices") void refreshCredentials().catch((error) => notice(errorText(error), true));
+    if (next === "tools") void refreshPermissions();
   }
   function updateControls(): void {
-    const blocked = turnBusy || operationBusy || captureConverting || options.mock === true;
+    const blocked = turnBusy || operationBusy || captureConverting;
     $<HTMLButtonElement>("#cc-send").disabled = blocked || !serviceReady || recordPurpose !== null || (!wavDraft && !input.value.trim());
     input.disabled = turnBusy || wavDraft !== null;
     profileSelect.disabled = blocked || recordPurpose !== null;
     $<HTMLButtonElement>("#cc-start").disabled = blocked || serviceReady;
+    $<HTMLButtonElement>("#cc-service-stop").disabled = operationBusy || !serviceRunning;
+    $<HTMLButtonElement>("#cc-stop").disabled = !(turnBusy || recordPurpose || captureConverting || audio || operationBusy);
+    memberFocus.disabled = blocked;
     $<HTMLButtonElement>("#cc-record").disabled = blocked || (recordPurpose !== null && recordPurpose !== "chat");
     $<HTMLButtonElement>("#cc-choose-wav").disabled = blocked || recordPurpose !== null;
     $<HTMLButtonElement>("#cc-record").textContent = recordPurpose === "chat" ? "■ 结束录音" : "● 录一段";
     $<HTMLButtonElement>("#cc-enroll").disabled = blocked || recordPurpose !== null || !selectedProfile
       || samples.length < minSamples || !$<HTMLInputElement>("#cc-enroll-consent").checked;
-    $<HTMLButtonElement>("#cc-sample-camera").disabled = blocked || identityKind.value !== "face" || recordPurpose !== null;
-    $<HTMLButtonElement>("#cc-sample-record").disabled = blocked || identityKind.value !== "speaker"
+    $<HTMLButtonElement>("#cc-sample-camera").disabled = blocked || !selectedProfile || identityKind.value !== "face" || recordPurpose !== null;
+    $<HTMLButtonElement>("#cc-sample-record").disabled = blocked || !selectedProfile || identityKind.value !== "speaker"
       || (recordPurpose !== null && recordPurpose !== "enroll");
     $<HTMLButtonElement>("#cc-sample-record").textContent = recordPurpose === "enroll" ? "■ 结束样本录音" : "录一段样本";
-    $<HTMLButtonElement>("#cc-add-samples").disabled = blocked || recordPurpose !== null;
+    $<HTMLButtonElement>("#cc-add-samples").disabled = blocked || !selectedProfile || recordPurpose !== null;
     $<HTMLButtonElement>("#cc-clear-samples").disabled = blocked || recordPurpose !== null;
     for (const control of Array.from(container.querySelectorAll<HTMLButtonElement>("#cc-sample-list button"))) control.disabled = blocked || recordPurpose !== null;
     $<HTMLButtonElement>("#cc-recognize-file").disabled = blocked || recordPurpose !== null;
@@ -206,9 +225,23 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
     $<HTMLButtonElement>("#cc-recognize-record").disabled = blocked || recognizeKind.value !== "speaker"
       || (recordPurpose !== null && recordPurpose !== "recognize");
     $<HTMLButtonElement>("#cc-recognize-record").textContent = recordPurpose === "recognize" ? "■ 结束并识别" : "录音识别";
+    $("#cc-sample-camera").hidden = identityKind.value !== "face";
+    $("#cc-sample-record").hidden = identityKind.value !== "speaker";
+    $("#cc-recognize-camera").hidden = recognizeKind.value !== "face";
+    $("#cc-recognize-record").hidden = recognizeKind.value !== "speaker";
     identityKind.disabled = blocked || recordPurpose !== null;
     recognizeKind.disabled = blocked || recordPurpose !== null;
-    $("#cc-enrollment-owner").textContent = selectedProfile ? `登记给：${profileName(selectedProfile)}。请确认样本都是本人。` : "请先在“本轮成员”中选择一个档案。";
+    const keyConfigurable = credentialRoutes.some((route) => route.id === keyRoute.value && route.credential_editable === true);
+    keyRoute.disabled = blocked || credentialRoutes.length === 0;
+    keyInput.disabled = blocked || !keyConfigurable;
+    $<HTMLButtonElement>("#cc-api-key-save").disabled = blocked || !keyConfigurable || !keyInput.value.trim();
+    $<HTMLButtonElement>("#cc-api-key-delete").disabled = blocked || !keyConfigurable
+      || !credentialRoutes.some((route) => route.id === keyRoute.value && route.keychain_saved === true);
+    $<HTMLButtonElement>("#cc-api-key-save").textContent = credentialRoutes.some((route) => route.id === keyRoute.value && route.keychain_saved === true) ? "更新密钥" : "保存密钥";
+    for (const form of Array.from(container.querySelectorAll<HTMLFormElement>("#cc-route-form, #cc-local-form, #cc-tools-form, #cc-native-form, #cc-gateway-form, #cc-preferences-form"))) {
+      for (const control of Array.from(form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement>("input, textarea, select, button"))) control.disabled = blocked || !loadedConfiguration;
+    }
+    $("#cc-enrollment-owner").textContent = selectedProfile ? `登记给：${profileName(selectedProfile)}。请确认样本都是本人。` : "先在上方选择成员，再添加登记样本。";
     $("#cc-sample-guidance").textContent = identityKind.value === "face"
       ? `${minSamples}–${maxSamples} 张不同照片，每张只有本人。样本留在本机。`
       : `${minSamples}–${maxSamples} 段不同录音，每段 3–30 秒，仅本人说话。样本留在本机。`;
@@ -263,7 +296,7 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
     if (messages.children.length) return;
     const welcome = element("div", "cc-welcome");
     welcome.append(element("span", "cc-welcome-mark", "✦"), element("h2", "", "今天，从一个小问题开始"),
-      element("p", "", "文字、声音和屏幕卡片一起用。机器人还没到，也可以先在 Mac 上聊。"));
+      element("p", "", "文字、声音和屏幕卡片一起用。不连接机器人，也能在这台 Mac 上聊。"));
     const suggestions = element("div", "cc-suggestions");
     for (const text of ["为什么月亮会变形？", "用恐龙讲一道数学题", "陪我安排放学后的时间"]) {
       suggestions.append(button(text, () => { input.value = text; updateControls(); input.focus(); }, "cc-suggestion"));
@@ -392,7 +425,7 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
   }
   async function toggleRecording(purpose: CapturePurpose): Promise<void> {
     if (recordPurpose === purpose) { await finishRecording(); return; }
-    if (turnBusy || operationBusy || captureConverting || recordPurpose || options.mock) return;
+    if (turnBusy || operationBusy || captureConverting || recordPurpose) return;
     if (purpose === "enroll" && !selectedProfile) { notice("请先选择要登记的家庭成员。", true); return; }
     stopPlayback(); closeCamera();
     const generation = ++mediaGeneration;
@@ -498,15 +531,23 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
     const previousOwner = memoryOwner.value;
     profileSelect.replaceChildren(new Option("未指定 · 只用共享记忆", ""));
     memoryOwner.replaceChildren(new Option("请选择成员", ""));
+    memberFocus.replaceChildren(new Option("未指定成员", ""));
     const host = $("#cc-profile-list"); host.replaceChildren();
     for (const profile of profiles) {
       profileSelect.add(new Option(profile.display_name, profile.id));
       memoryOwner.add(new Option(profile.display_name, profile.id));
+      memberFocus.add(new Option(profile.display_name, profile.id));
       const row = element("div", "cc-manage-row");
       const meta = element("div", "cc-manage-meta");
       meta.append(element("strong", "", profile.display_name), element("span", "cc-caption", profile.is_child ? "儿童档案 · 手动指定" : "家庭成员"));
       const actions = element("div", "cc-inline");
-      actions.append(button(profile.id === selectedProfile ? "本轮已选择" : "选择此人", () => changeProfile(profile.id)),
+      actions.append(button(profile.id === selectedProfile ? "已选择" : "选择此人", () => changeProfile(profile.id)),
+        button("编辑", () => {
+          editingProfileId = profile.id;
+          $<HTMLInputElement>("#cc-profile-edit-name").value = profile.display_name;
+          $<HTMLInputElement>("#cc-profile-edit-child").checked = profile.is_child;
+          profileDialog.showModal();
+        }),
         button("删除", () => perform("正在删除档案与关联数据…", async () => {
           if (!window.confirm(`删除“${profile.display_name}”的档案、关联记忆、声纹和人脸登记？对应对话也会清理。`)) { notice(""); return; }
           await stopEverything(false); await request("profile.delete", { profile_id: profile.id });
@@ -517,6 +558,7 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
       row.append(meta, actions); host.append(row);
     }
     profileSelect.value = selectedProfile ?? "";
+    memberFocus.value = selectedProfile ?? "";
     memoryOwner.value = editingMemory?.profile_id ?? (previousOwner || selectedProfile || "");
     if (!profiles.length) host.append(element("p", "cc-muted", "还没有家庭成员档案。可以先匿名聊天。"));
     updateControls();
@@ -612,7 +654,7 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
     $<HTMLInputElement>("#cc-memory-cloud").checked = memory.allow_cloud;
     $<HTMLInputElement>("#cc-memory-expiry").value = memory.expires_at_ms
       ? new Date(memory.expires_at_ms - new Date(memory.expires_at_ms).getTimezoneOffset() * 60_000).toISOString().slice(0, 16) : "";
-    $("#cc-memory-form").scrollIntoView({ behavior: "smooth", block: "center" });
+    memoryDialog.showModal();
   }
   async function saveMemory(): Promise<void> {
     const scope = $<HTMLSelectElement>("#cc-memory-scope").value;
@@ -630,24 +672,32 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
     if (scope === "profile" && !payload.profile_id) throw new Error("请为这条个人记忆选择成员。");
     if (payload.expires_at_ms !== null && (!Number.isFinite(payload.expires_at_ms) || payload.expires_at_ms <= Date.now())) throw new Error("到期时间应在将来。");
     await stopEverything(false); await request("memory.save", payload);
-    resetMemoryForm(); resetConversationView(); await refreshFamily(); notice("记忆已保存，对话已重新开始以应用新内容。");
+    memoryDialog.close(); resetMemoryForm(); resetConversationView(); await refreshFamily(); notice("记忆已保存，对话已重新开始以应用新内容。");
   }
   async function refreshStatus(): Promise<void> {
-    if (statusBusy || disposed || options.mock) return;
+    if (statusBusy || disposed) return;
     statusBusy = true;
     try {
       const value = object(await request("service.status"));
       if (disposed) return;
       const harness = object(value.harness);
       serviceReady = value.ready === true && value.accepting_turns === true && harness.healthy === true;
+      serviceRunning = harness.running === true || object(value.gateway).running === true;
       const pill = $("#cc-service-pill");
-      pill.textContent = serviceReady ? "服务已启动" : value.ready === false ? "配置待处理" : "服务未启动";
+      pill.textContent = serviceReady ? "对话服务运行中" : value.ready === false ? "配置待处理" : "对话服务未启动";
       pill.classList.toggle("ready", serviceReady);
+      $("#cc-service-dot").classList.toggle("ready", serviceReady);
+      $("#cc-service-dot").classList.toggle("error", value.ready === false || (serviceRunning && !serviceReady));
+      $("#cc-service-caption").textContent = `OpenCode ${string(harness.version, string(harness.source_version, "版本待读取"))} · Mac 本机`;
+      $("#cc-updated-at").textContent = `更新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })} · 每 15 秒刷新`;
       $("#cc-status-summary").textContent = value.ready === false ? string(value.error, "配置未完成")
-        : `${serviceReady ? "可以开始对话" : "先完成配置并启动服务"} · OpenCode ${string(harness.version, string(harness.source_version, "版本待读取"))} · ${string(harness.mode, "managed")}`;
+        : `${serviceReady ? "可以开始对话" : serviceRunning ? "对话服务未就绪，可停止后重试" : "对话服务未启动，可在左下角启动"} · OpenCode ${string(harness.version, string(harness.source_version, "版本待读取"))} · ${string(harness.mode, "managed")}`;
       $("#cc-status-json").textContent = pretty(value);
       $("#cc-config-path").textContent = string(value.config_path);
+      renderKeySettings(list(harness.routes));
       renderRoutes(list(harness.routes));
+      renderDeviceStatus(container, value);
+      renderRuntimeMetrics(container, value);
       const mcp = $("#cc-mcp"); mcp.replaceChildren();
       for (const item of list(harness.mcp)) {
         const server = object(item);
@@ -658,7 +708,7 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
       if (harness.mcp_error) mcp.append(element("p", "cc-caption", string(harness.mcp_error)));
       updateControls();
     } catch (error) {
-      if (!disposed) { serviceReady = false; $("#cc-service-pill").textContent = "状态不可用"; $("#cc-status-summary").textContent = errorText(error); updateControls(); }
+      if (!disposed) { serviceReady = false; $("#cc-service-pill").textContent = "状态不可用"; $("#cc-service-dot").classList.remove("ready"); $("#cc-service-dot").classList.add("error"); $("#cc-status-summary").textContent = errorText(error); updateControls(); }
     } finally { statusBusy = false; }
   }
   function renderRoutes(routes: unknown[]): void {
@@ -666,38 +716,187 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
     routes.forEach((value, index) => {
       const route = object(value);
       const card = element("article", "cc-route");
+      card.classList.toggle("selected", route.id === keyRoute.value);
       card.append(element("span", "cc-route-order", String(index + 1)), element("strong", "", string(route.label, string(route.id))), element("code", "", string(route.model_id)));
-      let state = route.enabled === false ? "已停用" : route.credential_env_present === false ? "等待配置密钥" : "按顺序可用";
+      let state = route.enabled === false ? "已停用" : route.inherited_provider === true ? "使用 OpenCode 现有登录"
+        : route.credential_present !== true ? "等待配置密钥" : "已配置密钥 · 等待实际调用确认";
       if (route.cooling_down === true) state = `暂时跳过 · ${new Date(number(route.retry_at_ms)).toLocaleTimeString()} 后再尝试`;
       card.append(element("span", "cc-caption", state));
       if (route.last_failure) card.append(element("span", "cc-caption", string(route.last_failure)));
+      card.append(route.id === keyRoute.value ? element("span", "cc-tag good", "当前选择") : button("配置此路线", () => selectRoute(string(route.id))));
       if (route.cooling_down === true) card.append(button("重新尝试此路线", () => perform("正在清除该路线的冷却状态…", async () => {
         await request("harness.route.reset", { route_id: string(route.id) }); await refreshStatus(); notice("冷却状态已清除，下次对话按模型顺序重试。");
       })));
       host.append(card);
     });
   }
+  function renderKeySettings(routes: unknown[]): void {
+    credentialRoutes = routes.map(object);
+    const selected = keyRoute.value;
+    const editable = credentialRoutes;
+    const signature = JSON.stringify(editable.map((route) => [route.id, route.label]));
+    // Status refresh must preserve both the selection and an unsaved password.
+    if (keyRoute.dataset.signature !== signature) {
+      keyRoute.replaceChildren();
+      for (const route of editable) {
+        const option = element("option", "", string(route.label, string(route.id)));
+        option.value = string(route.id); keyRoute.append(option);
+      }
+      if (editable.some((route) => route.id === selected)) keyRoute.value = selected;
+      else keyInput.value = "";
+      keyRoute.dataset.signature = signature;
+    }
+    const route = credentialRoutes.find((item) => item.id === keyRoute.value);
+    $("#cc-api-key-status").textContent = !route
+      ? "没有可在此配置的路线。Mac 管理模式可保存密钥；attach 模式或继承的 provider 请在 OpenCode 中配置。"
+      : route.inherited_provider === true ? "此路线使用 OpenCode 已有的登录。密钥由 OpenCode 管理。"
+      : route.credential_error ? `钥匙串状态不可用：${string(route.credential_error)}`
+      : `${string(route.label)}：${route.keychain_saved === true ? "已配置 · macOS 钥匙串" : route.credential_env_present === true ? "已配置 · 启动环境变量" : "尚未配置密钥"}。${route.keychain_saved === true && route.credential_env_present === true ? "钥匙串优先；移除后仍会使用环境变量。" : ""}`;
+    populateRouteForm();
+    updateControls();
+  }
+  async function changeApiKey(remove = false): Promise<void> {
+    const routeId = keyRoute.value;
+    const route = credentialRoutes.find((item) => item.id === routeId);
+    if (!route || route.credential_editable !== true) return;
+    if (remove && !window.confirm(`移除 ${string(route.label)} 保存在本机钥匙串的密钥？服务将停止；已有环境变量和 OpenCode 登录不受影响。`)) return;
+    let key = keyInput.value.trim();
+    keyInput.value = "";
+    if (!remove && (!key || key.length > 4096 || /[^\x21-\x7e]/.test(key))) {
+      key = ""; updateControls(); notice("API Key 应为不含空格和换行的英文、数字或符号。", true); return;
+    }
+    await perform(remove ? "正在移除密钥…" : "正在保存到 macOS 钥匙串…", async () => {
+      await stopEverything(false);
+      try {
+        const pending = request(remove ? "api_key.delete" : "api_key.save", { route_id: routeId, ...(remove ? {} : { api_key: key }) });
+        key = "";
+        await pending;
+        serviceReady = false; updateControls();
+        await refreshStatus();
+        addActivity(remove ? "已移除本机模型密钥" : "模型密钥已更新");
+        notice(remove ? "已移除本机保存的密钥。点击“启动服务”继续。" : "密钥已保存在 macOS 钥匙串。点击“启动服务”生效。");
+      } finally { key = ""; }
+    });
+    key = "";
+  }
   async function loadConfiguration(): Promise<void> {
     const config = object(await request("config.read"));
     if (disposed) return;
-    $<HTMLTextAreaElement>("#cc-config-editor").value = pretty(config, 200_000);
+    loadedConfiguration = config;
+    if (!rawConfigDirty) $<HTMLTextAreaElement>("#cc-config-editor").value = pretty(config, 200_000);
+    populateConfigurationForms(config);
     approvedMediaHosts = new Set(list(object(config.conversation).media_hosts).map((value) => string(value).toLowerCase()).filter(Boolean));
     $<HTMLInputElement>("#cc-speak").checked = object(config.conversation).default_speak !== false;
     minSamples = Math.min(20, Math.max(3, number(object(config.memory).min_enrollment_samples, 3)));
     maxSamples = Math.min(32, Math.max(minSamples, number(object(config.memory).max_enrollment_samples, 12)));
     updateControls();
   }
+  function configuredRoutes(): JsonObject[] {
+    return list(object(loadedConfiguration?.harness).routes).map(object);
+  }
+  function selectRoute(id: string): void {
+    if (id !== editingRouteId && routeFormDirty && !window.confirm("所选模型有尚未保存的修改。放弃这些修改并切换路线？")) {
+      keyRoute.value = editingRouteId; return;
+    }
+    keyInput.value = ""; keyRoute.value = id;
+    if (editingRouteId !== id) { editingRouteId = ""; routeFormDirty = false; dirtyConfigurationForms.delete("cc-route-form"); }
+    renderKeySettings(credentialRoutes); renderRoutes(credentialRoutes);
+  }
+  function populateRouteForm(force = false): void {
+    const routes = configuredRoutes();
+    const index = routes.findIndex((route) => route.id === keyRoute.value);
+    if (index < 0 || (!force && editingRouteId === keyRoute.value)) return;
+    const route = routes[index]; editingRouteId = string(route.id); routeFormDirty = false;
+    $<HTMLInputElement>("#cc-route-model").value = string(route.model_id);
+    $<HTMLInputElement>("#cc-route-endpoint").value = string(route.base_url);
+    $<HTMLInputElement>("#cc-route-enabled").checked = route.enabled !== false;
+    const priority = $<HTMLSelectElement>("#cc-route-priority"); priority.replaceChildren();
+    routes.forEach((_, i) => priority.add(new Option(`第 ${i + 1} 顺位`, String(i)))); priority.value = String(index);
+    $("#cc-route-reference").textContent = `Provider：${string(route.provider_id)} · 密钥引用：${string(route.api_key_env, "使用 OpenCode 登录")}。端点留空则继承 OpenCode provider。`;
+    $("#cc-route-dirty").textContent = "";
+  }
+  function populateConfigurationForms(config: JsonObject): void {
+    const harness = object(config.harness), models = object(config.models), gateway = object(config.gateway), conversation = object(config.conversation);
+    const inputValue = (selector: string, value: unknown): void => { $<HTMLInputElement>(selector).value = typeof value === "number" ? String(value) : string(value); };
+    inputValue("#cc-local-python", models.python); inputValue("#cc-local-script", models.script);
+    inputValue("#cc-local-model-dir", models.model_dir); inputValue("#cc-local-voice", models.voice); inputValue("#cc-local-timeout", models.request_timeout_seconds);
+    $<HTMLSelectElement>("#cc-asr-backend").value = string(models.asr_backend, "whisper");
+    inputValue("#cc-rma-qwen-python", models.rma_qwen_python); inputValue("#cc-rma-qwen-worker", models.rma_qwen_worker); inputValue("#cc-rma-qwen-model", models.rma_qwen_model);
+    inputValue("#cc-tools-inherit", harness.inherit_config);
+    $<HTMLTextAreaElement>("#cc-mcp-names").value = list(harness.required_mcp).map((value) => string(value)).filter(Boolean).join("\n");
+    const native = new Set(list(harness.native_actions).map((value) => string(value)));
+    for (const action of ["read", "glob", "grep", "edit", "shell", "webfetch", "skill"]) {
+      $<HTMLInputElement>(`#cc-native-${action}`).checked = native.has(action);
+    }
+    $<HTMLInputElement>("#cc-native-external").checked = harness.allow_external_directories === true;
+    $<HTMLSelectElement>("#cc-native-mode").value = string(harness.native_execution_mode, "ask");
+    inputValue("#cc-gateway-bind", gateway.bind); inputValue("#cc-gateway-max", gateway.max_connections);
+    inputValue("#cc-gateway-cert", gateway.certificate_pem); inputValue("#cc-gateway-key", gateway.private_key_pem);
+    $<HTMLInputElement>("#cc-gateway-enabled").checked = gateway.enabled === true;
+    inputValue("#cc-opencode-path", harness.executable); $<HTMLSelectElement>("#cc-opencode-mode").value = string(harness.mode, "managed");
+    $<HTMLInputElement>("#cc-auto-start").checked = config.auto_start === true;
+    $<HTMLInputElement>("#cc-default-speak").checked = conversation.default_speak !== false;
+    inputValue("#cc-reply-limit", conversation.max_reply_characters); inputValue("#cc-session-idle", conversation.idle_session_seconds);
+    $<HTMLTextAreaElement>("#cc-media-hosts").value = list(conversation.media_hosts).map((host) => string(host)).join("\n");
+    populateRouteForm(true);
+  }
+  async function patchConfiguration(update: (config: JsonObject) => void, sourceForm: string): Promise<void> {
+    if (rawConfigDirty) {
+      activatePanel("settings");
+      throw new Error("高级配置有尚未保存的内容。请先保存，或点“重新读取”放弃修改，再使用其他设置表单。");
+    }
+    if ([...dirtyConfigurationForms].some((id) => id !== sourceForm)) throw new Error("其他页面还有未保存的设置。请先保存或重新读取那些修改，再提交当前表单。");
+    // Read fresh data and change only this form's fields. Other routes and private paths survive.
+    const config = object(await request("config.read"));
+    update(config);
+    await request("config.save", config);
+    await stopEverything(false); await request("service.reload");
+    serviceReady = false; serviceRunning = false; routeFormDirty = false;
+    dirtyConfigurationForms.delete(sourceForm);
+    resetConversationView(); await loadConfiguration(); await refreshStatus();
+    addActivity("服务设置已更新");
+    notice("设置已保存。服务已停止，点击左下角“启动服务”生效。");
+  }
+  function formInput(selector: string): string { return $<HTMLInputElement>(selector).value.trim(); }
+  function formNumber(selector: string, minimum: number, maximum: number): number {
+    const value = Number(formInput(selector));
+    if (!Number.isInteger(value) || value < minimum || value > maximum) throw new Error(`数值应为 ${minimum} 到 ${maximum} 之间的整数。`);
+    return value;
+  }
+  function optionalPath(selector: string): string | null {
+    const path = formInput(selector);
+    if (path && !path.startsWith("/")) throw new Error("文件与目录请填写这台 Mac 的绝对路径，以 / 开头。");
+    return path || null;
+  }
+  function addActivity(label: string): void {
+    activity.push({ label, at: Date.now() });
+    if (activity.length > 40) activity.shift();
+    renderActivity(container, activity);
+  }
+  function discardConfigurationDrafts(): boolean {
+    if ((rawConfigDirty || dirtyConfigurationForms.size > 0) && !window.confirm("重新读取已保存的设置，并放弃各页尚未保存的表单修改？")) return false;
+    rawConfigDirty = false; routeFormDirty = false; dirtyConfigurationForms.clear();
+    $("#cc-config-dirty").textContent = ""; $("#cc-route-dirty").textContent = "";
+    return true;
+  }
   async function refreshPermissions(): Promise<void> {
-    if (permissionBusy || disposed || options.mock) return;
+    if (permissionBusy || disposed) return;
     permissionBusy = true;
     try {
       const permissions = list(await request("harness.permissions"));
       if (disposed) return;
+      pendingPermissionCount = permissions.length;
       const host = $("#cc-permissions"); host.replaceChildren(); host.hidden = permissions.length === 0;
+      $("#cc-permissions-empty").hidden = permissions.length > 0;
+      $("#cc-permission-count").textContent = `${permissions.length} 项`;
+      $("#cc-nav-pending").hidden = permissions.length === 0;
+      $("#cc-nav-pending").textContent = String(permissions.length);
+      $("#cc-approval-banner").hidden = permissions.length === 0 || panel === "tools";
+      $("#cc-approval-summary").textContent = `${permissions.length} 项工具操作等待确认，任务正在等待你的决定。`;
       for (const value of permissions.slice(0, 16)) {
         const permission = object(value);
         const name = string(permission.action, string(permission.permission, "工具操作"));
-        const details = { action: name, description: permission.description, patterns: permission.patterns, input: permission.input };
+        const details = { action: name, description: permission.description, targets: permission.patterns, actual_details: permission.metadata, model_input: permission.input };
         const encoded = JSON.stringify(details, null, 2) ?? "{}";
         const card = element("section", "cc-permission");
         card.append(element("strong", "", `请家长确认：${name}`), element("pre", "cc-json", encoded.length <= 24_000 ? encoded : `${encoded.slice(0, 24_000)}\n参数过长，不能在此批准。`));
@@ -715,9 +914,65 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
         allow.disabled = encoded.length > 24_000;
         actions.append(allow, button("拒绝", () => reply(false), "cc-button danger")); card.append(actions); host.append(card);
       }
-      if (permissions.length && panel !== "talk") notice("有一项工具操作等待家长确认，请切换到“对话”查看具体内容。");
     } catch (error) { if (turnBusy) notice(errorText(error), true); }
     finally { permissionBusy = false; }
+  }
+  async function refreshQuestions(): Promise<void> {
+    if (questionBusy || disposed) return;
+    questionBusy = true;
+    try {
+      const questions = list(await request("harness.questions")).map(object);
+      if (disposed) return;
+      pendingQuestionCount = questions.length;
+      $("#cc-question-banner").hidden = questions.length === 0 || panel === "talk";
+      const host = $("#cc-questions"); host.hidden = questions.length === 0;
+      const signature = JSON.stringify(questions);
+      if (signature === questionSignature) return; // Keep partially typed answers while polling.
+      questionSignature = signature; host.replaceChildren();
+      for (const question of questions) {
+        const form = element("form", "cc-question");
+        form.append(element("strong", "", "小呆想请你确认一件事"));
+        const fields = list(question.fields).map(object);
+        for (const field of fields) {
+          const key = string(field.key), multiple = field.type === "multiselect";
+          const group = element("fieldset");
+          group.append(element("legend", "", string(field.description, string(field.title, "请选择"))));
+          for (const option of list(field.options).map(object)) {
+            const label = element("label", "cc-check");
+            const choice = element("input"); choice.type = multiple ? "checkbox" : "radio";
+            choice.name = key; choice.value = string(option.value);
+            const description = string(option.description);
+            label.append(choice, element("span", "", `${string(option.label)}${description ? ` — ${description}` : ""}`)); group.append(label);
+          }
+          const custom = element("textarea"); custom.name = `${key}-custom`; custom.rows = 2; custom.maxLength = 4000;
+          custom.placeholder = multiple ? "也可以补充其他选项" : "也可以输入自己的回答"; group.append(custom); form.append(group);
+        }
+        const actions = element("div", "cc-inline");
+        const submit = element("button", "cc-button primary", "发送回答"); submit.type = "submit";
+        const skip = button("暂不回答", async () => {
+          skip.disabled = true;
+          try { await request("harness.question.reply", { session_id: question.session_id, form_id: question.form_id, answer: null }); questionSignature = ""; await refreshQuestions(); }
+          catch (error) { notice(errorText(error), true); skip.disabled = false; }
+        });
+        actions.append(submit, skip); form.append(actions);
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          const data = new FormData(form), answer: JsonObject = {};
+          for (const field of fields) {
+            const key = string(field.key), custom = string(data.get(`${key}-custom`)).trim();
+            const selected = data.getAll(key).filter((value): value is string => typeof value === "string");
+            if (field.type === "multiselect") answer[key] = custom ? [...selected, custom] : selected;
+            else if (custom || selected.length) answer[key] = custom || selected[0];
+          }
+          submit.disabled = true; skip.disabled = true;
+          void request("harness.question.reply", { session_id: question.session_id, form_id: question.form_id, answer })
+            .then(() => { questionSignature = ""; return refreshQuestions(); })
+            .catch((error) => { notice(errorText(error), true); submit.disabled = false; skip.disabled = false; });
+        });
+        host.append(form);
+      }
+    } catch (error) { if (turnBusy) notice(errorText(error), true); }
+    finally { questionBusy = false; }
   }
   async function refreshCredentials(): Promise<void> {
     const credentials = list(await request("device.credentials.list"));
@@ -737,28 +992,122 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
   const on = (selector: string, action: () => void | Promise<void>) => {
     $(selector).addEventListener("click", () => { void action(); });
   };
+  const form = (selector: string, label: string, action: () => Promise<void>) => {
+    $<HTMLFormElement>(selector).addEventListener("submit", (event) => { event.preventDefault(); void perform(label, action); });
+  };
+  container.addEventListener("invalid", (event) => {
+    // Keep validation actionable when the field lives in a collapsed advanced section.
+    let section = (event.target as HTMLElement).closest("details");
+    while (section) { section.open = true; section = section.parentElement?.closest("details") ?? null; }
+  }, true);
+  on("#cc-notice-dismiss", () => notice(""));
+  on("#cc-review-permissions", () => activatePanel("tools"));
+  on("#cc-review-questions", () => activatePanel("talk"));
+  on("#cc-tools-refresh", async () => { await refreshStatus(); await refreshPermissions(); });
+  on("#cc-memory-add", () => { resetMemoryForm(); memoryDialog.showModal(); });
+  on("#cc-memory-cancel", () => { memoryDialog.close(); resetMemoryForm(); });
+  on("#cc-profile-edit-cancel", () => { profileDialog.close(); editingProfileId = null; });
+  memberFocus.addEventListener("change", () => { void changeProfile(memberFocus.value || null); });
+  form("#cc-profile-edit-form", "正在更新成员档案…", async () => {
+    if (!editingProfileId) return;
+    const profile = { display_name: formInput("#cc-profile-edit-name"), is_child: $<HTMLInputElement>("#cc-profile-edit-child").checked };
+    await stopEverything(false); await request("profile.update", { profile_id: editingProfileId, profile });
+    profileDialog.close(); editingProfileId = null; resetConversationView(); await refreshFamily(); notice("成员档案已更新。");
+  });
+  form("#cc-route-form", "正在保存模型设置…", async () => {
+    const routeId = editingRouteId;
+    const model = formInput("#cc-route-model"), endpoint = formInput("#cc-route-endpoint");
+    const enabled = $<HTMLInputElement>("#cc-route-enabled").checked;
+    const priority = formNumber("#cc-route-priority", 0, Math.max(0, configuredRoutes().length - 1));
+    if (!model || !routeId) throw new Error("请选择模型路线并填写模型名称。");
+    await patchConfiguration((config) => {
+      const harness = object(config.harness), routes = list(harness.routes).map(object);
+      const index = routes.findIndex((route) => route.id === routeId);
+      if (index < 0) throw new Error("这条模型路线已经改变，请重新读取配置。");
+      const route = routes.splice(index, 1)[0]; route.model_id = model; route.base_url = endpoint || null; route.enabled = enabled;
+      routes.splice(priority, 0, route); harness.routes = routes; config.harness = harness;
+    }, "cc-route-form");
+  });
+  form("#cc-local-form", "正在保存本地模型环境…", async () => {
+    const update = { python: formInput("#cc-local-python"), script: optionalPath("#cc-local-script"), model_dir: optionalPath("#cc-local-model-dir"), voice: formInput("#cc-local-voice") || null, request_timeout_seconds: formNumber("#cc-local-timeout", 1, 600), asr_backend: formInput("#cc-asr-backend"), rma_qwen_python: optionalPath("#cc-rma-qwen-python"), rma_qwen_worker: optionalPath("#cc-rma-qwen-worker"), rma_qwen_model: optionalPath("#cc-rma-qwen-model") };
+    if (update.asr_backend === "rma_qwen" && (!update.rma_qwen_python || !update.rma_qwen_worker || !update.rma_qwen_model)) throw new Error("使用 RMA Qwen 时，请填写 RMA Python、Worker 和模型目录。");
+    await patchConfiguration((config) => { config.models = { ...object(config.models), ...update }; }, "cc-local-form");
+    latestModelHealth = null; renderCapabilities(container); $("#cc-models-json").textContent = "本地环境已改变，请重新检查能力状态。";
+  });
+  form("#cc-tools-form", "正在保存工具配置来源…", async () => {
+    const inherited = optionalPath("#cc-tools-inherit");
+    const names = [...new Set($<HTMLTextAreaElement>("#cc-mcp-names").value.split(/[\n,]+/).map((name) => name.trim()).filter(Boolean))];
+    if (names.length > 16 || names.some((name) => !/^[A-Za-z0-9_-]{1,128}$/.test(name))) throw new Error("最多填写 16 个服务名；名称只能包含英文字母、数字、下划线或连字符。");
+    await patchConfiguration((config) => {
+      const harness = object(config.harness);
+      const readTools = list(harness.read_tools).map((name) => string(name)).filter((name) => names.some((server) => name.startsWith(`${server}_`)));
+      config.harness = { ...harness, inherit_config: inherited, required_mcp: names, read_tools: readTools };
+    }, "cc-tools-form");
+  });
+  form("#cc-native-form", "正在保存 OpenCode 工作能力…", async () => {
+    const native = ["read", "glob", "grep", "edit", "shell", "webfetch", "skill"]
+      .filter((action) => $<HTMLInputElement>(`#cc-native-${action}`).checked);
+    const external = $<HTMLInputElement>("#cc-native-external").checked;
+    const mode = $<HTMLSelectElement>("#cc-native-mode").value;
+    if (native.includes("shell") && !external) throw new Error("终端拥有当前 Mac 账户的权限。要启用终端，请先允许访问工作区外的目录。");
+    await patchConfiguration((config) => { config.harness = { ...object(config.harness), native_actions: native, native_execution_mode: mode, allow_external_directories: external }; }, "cc-native-form");
+  });
+  form("#cc-gateway-form", "正在保存设备网关设置…", async () => {
+    const update = { enabled: $<HTMLInputElement>("#cc-gateway-enabled").checked, bind: formInput("#cc-gateway-bind"), max_connections: formNumber("#cc-gateway-max", 1, 64), certificate_pem: optionalPath("#cc-gateway-cert"), private_key_pem: optionalPath("#cc-gateway-key") };
+    await patchConfiguration((config) => { config.gateway = { ...object(config.gateway), ...update }; }, "cc-gateway-form");
+  });
+  form("#cc-preferences-form", "正在保存启动与对话偏好…", async () => {
+    const executable = formInput("#cc-opencode-path"), mode = $<HTMLSelectElement>("#cc-opencode-mode").value;
+    const autoStart = $<HTMLInputElement>("#cc-auto-start").checked;
+    const conversation = { default_speak: $<HTMLInputElement>("#cc-default-speak").checked, max_reply_characters: formNumber("#cc-reply-limit", 100, 4000), idle_session_seconds: formNumber("#cc-session-idle", 30, 1800), media_hosts: [...new Set($<HTMLTextAreaElement>("#cc-media-hosts").value.split(/[\n,]+/).map((host) => host.trim().toLowerCase()).filter(Boolean))] };
+    await patchConfiguration((config) => { config.auto_start = autoStart; config.harness = { ...object(config.harness), executable, mode }; config.conversation = { ...object(config.conversation), ...conversation }; }, "cc-preferences-form");
+  });
+  for (const id of ["cc-route-form", "cc-local-form", "cc-tools-form", "cc-native-form", "cc-gateway-form", "cc-preferences-form"]) {
+    $("#" + id).addEventListener("input", () => { dirtyConfigurationForms.add(id); });
+  }
+  $("#cc-route-form").addEventListener("input", () => { routeFormDirty = true; $("#cc-route-dirty").textContent = "有未保存的修改"; });
+  $("#cc-config-editor").addEventListener("input", () => { rawConfigDirty = true; $("#cc-config-dirty").textContent = "有未保存的修改"; });
   on("#cc-stop", () => stopEverything());
-  on("#cc-start", () => perform("正在启动 OpenCode…", async () => { await request("service.start"); await refreshStatus(); notice("服务启动请求已完成。"); }));
+  $<HTMLFormElement>("#cc-api-key-form").addEventListener("submit", (event) => { event.preventDefault(); void changeApiKey(); });
+  on("#cc-api-key-delete", () => changeApiKey(true));
+  keyRoute.addEventListener("change", () => selectRoute(keyRoute.value));
+  keyInput.addEventListener("input", updateControls);
+  on("#cc-start", () => perform("正在读取钥匙串并启动 OpenCode…如出现 macOS 授权窗口，请完成授权。", async () => { await request("service.start"); await refreshStatus(); notice("服务启动请求已完成。"); }));
   on("#cc-service-stop", () => perform("正在停止服务…", async () => { await stopEverything(false); await request("service.stop"); serviceReady = false; updateControls(); notice("服务已停止。"); }));
   on("#cc-refresh-status", () => refreshStatus());
-  on("#cc-reload", () => perform("正在重载配置…", async () => { await stopEverything(false); await request("service.reload"); resetConversationView(); await loadConfiguration(); await refreshFamily(); notice("配置已重载，点击“启动服务”继续。"); }));
-  on("#cc-config-read", () => perform("正在读取配置…", async () => { await loadConfiguration(); notice("已读取 brain.json。"); }));
+  on("#cc-reload", () => perform("正在重载配置…", async () => { if (!discardConfigurationDrafts()) return; await stopEverything(false); await request("service.reload"); resetConversationView(); await loadConfiguration(); await refreshFamily(); notice("配置已重载，点击“启动服务”继续。"); }));
+  on("#cc-config-read", () => perform("正在读取配置…", async () => {
+    if (!discardConfigurationDrafts()) return;
+    await loadConfiguration(); notice("已读取 brain.json。");
+  }));
   on("#cc-config-save", () => perform("正在保存配置…", async () => {
+    if (dirtyConfigurationForms.size > 0 && !window.confirm("高级配置将替换各页表单尚未保存的设置，继续保存？")) return;
     const raw = $<HTMLTextAreaElement>("#cc-config-editor").value;
     if (raw.length > 200_000) throw new Error("配置内容过大。");
     const parsed: unknown = JSON.parse(raw);
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("配置应为 JSON 对象。");
-    await stopEverything(false); await request("config.save", parsed); await request("service.reload");
+    await stopEverything(false); await request("config.save", parsed); rawConfigDirty = false; dirtyConfigurationForms.clear(); $("#cc-config-dirty").textContent = ""; await request("service.reload");
     resetConversationView(); await loadConfiguration(); await refreshFamily(); notice("配置已保存并重载。点击“启动服务”继续。");
   }));
-  on("#cc-models-status", () => perform("正在读取本地模型状态…", async () => { $("#cc-models-json").textContent = pretty(await request("models.status")); notice("已读取本地模型状态；worker 就绪不代表所有模型都已安装。"); }));
-  on("#cc-models-unload", () => perform("正在卸载本地模型…", async () => { await stopEverything(false); await request("models.unload"); $("#cc-models-json").textContent = "本地模型进程已退出；下次明确请求时按需加载。"; notice("已卸载。"); }));
-  for (const tab of Array.from(container.querySelectorAll<HTMLButtonElement>(".cc-tabs button"))) tab.addEventListener("click", () => activatePanel(tab.dataset.panel ?? "talk"));
+  on("#cc-models-status", () => perform("正在检查本机能力…", async () => {
+    const result = object(await request("models.status")); latestModelHealth = result; renderCapabilities(container, result);
+    $("#cc-models-json").textContent = pretty(result);
+    notice(result.ready === true ? "已读取本地安装信息；环境就绪不代表推理效果已验证。" : errorText(result.error ?? "本地 Worker 尚未就绪。"), result.ready !== true);
+    addActivity("已检查本地能力状态");
+  }));
+  on("#cc-models-unload", () => perform("正在释放本地模型…", async () => {
+    await stopEverything(false); await request("models.unload");
+    if (latestModelHealth) for (const model of Object.values(object(object(latestModelHealth.models).models))) object(model).loaded = false;
+    renderCapabilities(container, latestModelHealth ?? undefined);
+    $("#cc-models-json").textContent = "本地模型进程已退出；卡片保留上次检查的安装信息，下次明确请求时按需加载。";
+    notice("已释放本地模型，安装状态仍为上次检查结果。"); addActivity("本地模型已释放");
+  }));
+  for (const tab of Array.from(container.querySelectorAll<HTMLButtonElement>(".cc-nav-item"))) tab.addEventListener("click", () => activatePanel(tab.dataset.panel ?? "talk"));
   $<HTMLFormElement>("#cc-chat-form").addEventListener("submit", (event) => { event.preventDefault(); void sendTurn(); });
   input.addEventListener("input", updateControls);
   input.addEventListener("keydown", (event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void sendTurn(); } });
   profileSelect.addEventListener("change", () => { void changeProfile(profileSelect.value || null); });
-  on("#cc-new-conversation", async () => { await stopEverything(false); resetConversationView(); notice("已开始新对话。旧对话可在“服务与设置”中一起清理。"); });
+  on("#cc-new-conversation", async () => { await stopEverything(false); resetConversationView(); notice("已开始新对话。需要清理全部对话时，可前往“运行设置”。"); });
   on("#cc-forget-conversation", () => perform("正在忘记这段对话…", async () => {
     if (!window.confirm("忘记当前这段对话及其 OpenCode 会话？单独保存的记忆会保留。")) { notice(""); return; }
     const id = conversationId; await stopEverything(false); await request("conversation.forget", { conversation_id: id }); resetConversationView(); notice("这段对话已忘记。");
@@ -864,6 +1213,7 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
   on("#cc-token-dismiss", clearToken);
 
   function localCleanup(): void {
+    keyInput.value = "";
     turnGeneration += 1; mediaGeneration += 1; recorder.cancel(); camera.close();
     stopPlayback(); clearReplayClips(); clearToken(); samples = []; wavDraft = null;
   }
@@ -871,37 +1221,61 @@ export function mountCompanion(container: HTMLElement, options: { mock?: boolean
   window.addEventListener("pagehide", onPageHide);
   // Status is metadata-only. Never poll model inference or microphone/camera.
   const statusTimer = window.setInterval(() => { if (visible && !turnBusy && !operationBusy) void refreshStatus(); }, 15_000);
-  const permissionTimer = window.setInterval(() => { if (visible && (turnBusy || serviceReady)) void refreshPermissions(); }, 3_000);
-  if (!options.mock) {
+  const permissionTimer = window.setInterval(() => { if (visible && (turnBusy || serviceReady)) { void refreshPermissions(); void refreshQuestions(); } }, 3_000);
     void listen<unknown>("brain:event", (event) => {
       const data = object(event.payload); const kind = string(data.kind);
+      const labels: Record<string, string> = { "service.started": "对话服务已启动", "service.stopped": "对话服务已停止", "turn.started": "开始处理一次主动输入", "turn.completed": "本轮任务已完成", "turn.failed": "本轮任务未完成", "turn.cancelled": "本轮任务已取消", "harness_permission_required": "工具操作等待确认", "service.start_failed": "对话服务启动未完成" };
+      if (labels[kind]) addActivity(labels[kind]);
       if (kind.includes("permission")) void refreshPermissions();
-      if (["service.started", "service.stopped", "harness_started", "harness_stopped"].includes(kind)) void refreshStatus();
-      if (kind === "service.stopped") { cancelCapture(); closeCamera(); stopPlayback(); phase("idle", "服务已停止。"); }
+      if (kind.includes("question")) void refreshQuestions();
+      if (["service.started", "service.stopped", "harness_started", "harness_stopped"].includes(kind)) { void refreshStatus(); void refreshPermissions(); }
+      if (kind === "service.started") phase("idle", "服务已启动，可以开始对话。");
+      if (kind === "service.stopped") {
+        cancelCapture(); closeCamera(); stopPlayback(); phase("idle", "服务已停止。");
+        if (latestModelHealth) {
+          for (const model of Object.values(object(object(latestModelHealth.models).models))) object(model).loaded = false;
+          renderCapabilities(container, latestModelHealth);
+        }
+      }
       const eventTurn = string(data.turn_id);
       if (!eventTurn || eventTurn !== activeTurn) return;
       if (kind === "turn.transcribing") phase("thinking", "先在 Mac 上听懂这句话…");
       else if (kind === "turn.thinking") phase("thinking");
       else if (kind === "turn.synthesizing") phase("thinking", "正在用本地声音准备回复…");
       else if (kind === "harness_permission_required") phase("thinking", "有一项操作需要家长确认。");
+      else if (kind === "harness_question_required") phase("thinking", "小呆在等你的回答。");
+      else if (kind === "harness_tool_activity" && data.phase === "session.tool.called") {
+        const tool = string(data.tool);
+        if (tool) phase("thinking", `正在使用工具：${tool}`);
+      }
       else if (kind === "turn.cancelled") { stopPlayback(); phase("idle", "这一次已经停止。"); }
     }).then((stop) => { if (disposed) stop(); else unsubscribe = stop; }).catch((error) => notice(errorText(error), true));
+    void listen<unknown>("lan:event", (event) => {
+      const kind = string(object(event.payload).kind);
+      if (["bot_connected", "bot_disconnected", "server_started", "server_error"].includes(kind)) {
+        void refreshStatus();
+        if (kind === "bot_connected") addActivity("设备诊断连接已建立");
+        if (kind === "bot_disconnected") addActivity("设备诊断连接已断开");
+      }
+    }).then((stop) => { if (disposed) stop(); else unsubscribeLan = stop; }).catch(() => {});
     void Promise.allSettled([refreshStatus(), loadConfiguration(), refreshFamily()]).then((results) => {
       if (disposed) return;
       for (const result of results) if (result.status === "rejected") { notice(errorText(result.reason), true); break; }
     });
-  } else { $("#cc-service-pill").textContent = "预览 · 未连接服务"; notice("这是旧版界面的预览模式；没有调用小呆服务，也没有打开麦克风或摄像头。"); }
-  renderWelcome(); renderSamples(); resetMemoryForm(); updateControls();
+  renderWelcome(); renderSamples(); resetMemoryForm(); renderCapabilities(container); addActivity("控制台已打开"); updateControls();
+  let initialPanel = "talk";
+  try { initialPanel = localStorage.getItem("espbot.console.panel") ?? "talk"; } catch { /* Use the daily conversation page. */ }
+  activatePanel(CONSOLE_PANELS.some((page) => page.id === initialPanel) ? initialPanel : "talk");
 
   return {
     setVisible(next: boolean): void {
       visible = next;
-      if (!visible) { cancelCapture(); closeCamera(); stopPlayback(); clearReplayClips(); clearToken(); clearSamples(); wavDraft = null; renderDraft(); }
+      if (!visible) { keyInput.value = ""; cancelCapture(); closeCamera(); stopPlayback(); clearReplayClips(); clearToken(); clearSamples(); wavDraft = null; renderDraft(); }
       else { void refreshStatus(); void refreshPermissions(); }
     },
     dispose(): void {
       if (disposed) return;
-      disposed = true; localCleanup(); unsubscribe?.();
+      disposed = true; localCleanup(); unsubscribe?.(); unsubscribeLan?.();
       window.clearInterval(statusTimer); window.clearInterval(permissionTimer);
       window.removeEventListener("pagehide", onPageHide);
     },

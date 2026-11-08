@@ -5,6 +5,16 @@ system speech are called through the maintained upstream interfaces below.
 No model weights are committed to this repository, no upstream training
 pipeline is vendored, and no claim of real-device validation is made.
 
+## RMA Qwen3-ASR bridge
+
+- The optional `rma_qwen.py` bridge invokes the separately installed Reasonia
+  Meeting Assistant optimized Qwen worker over its existing private PCM/stdout
+  protocol. It does not copy the RMA engine, runtime, or model into this app.
+- That worker uses `moona3k/mlx-qwen3-asr`, pinned by RMA to commit
+  `41878a11cf338c59e13edc84bf4cb35f4b0f3ff6`, and the verified RMA
+  Qwen3-ASR 0.6B 8-bit artifact. Consult RMA's runtime documentation and the
+  relevant upstream code and model licenses before any redistribution.
+
 ## Apple MLX Whisper
 
 - Source: https://github.com/ml-explore/mlx-examples/tree/796f5b53cab69a3d48a44233ce21aae889e94a08/whisper

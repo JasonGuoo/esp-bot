@@ -2,16 +2,16 @@
 
 本组件面向 **ESP32-S31-Korvo-1 V1.1 / ESP32-S31**。它把官方 BSP、`esp_codec_dev` 和 ESP-SR 接成实际的采集、AFE、WakeNet、VAD 与可取消播放链路。没有自行实现唤醒算法，没有引入第二个麦克风读取者，也没有把 ESP32-S3 的板级配置套到 S31 上。
 
-**交付状态：源码与文档已编写；遵照用户要求，未编译、未运行测试、未刷机，硬件验证尚未进行。** 官方 API 的接线依据和版本见文末。自定义“小呆小呆”声学模型尚未提供，默认报告 `WAKE_MODEL_MISSING`；这不会阻止 codec 和手动会话路径启动。
+**首次实板接入（2026-11-06）：用户已明确要求本机构建、测试和烧录；已完成构建和烧录，并观察到麦克风非零采样。** 分项验收与当前限制以 [实板记录](../../../docs/board-bringup-2026-11-06.md) 为准；此前的未构建交付是历史状态。官方 API 的接线依据和版本见文末。自定义“小呆小呆”声学模型尚未提供，默认报告 `WAKE_MODEL_MISSING`；这不会阻止 codec 和手动会话路径启动。
 
 ## 1. 已实现的链路与边界
 
 | 环节 | 实现 |
 | --- | --- |
-| 板级初始化 | 复用 `bsp_i2c_init()`、`bsp_audio_init()`、`bsp_audio_get_codec_itf()` 与 BSP 引脚定义 |
+| 板级初始化 | 复用 `bsp_i2c_init()`、BSP 引脚定义与官方板级双麦 TDM 示例；本组件持有 I2S/data interface |
 | codec | 唯一 ES8389 `ESP_CODEC_DEV_TYPE_IN_OUT` 实例，ADC/DAC 共用它 |
 | 采集 | 唯一采集任务读取 16 kHz、双时隙 PCM16，取第一个 ADC 时隙作为 mono |
-| 本地检测 | 官方 `afe_config_init()` → `create_from_config()` → 独立 feed/fetch；使用官方 WebRTC VAD |
+| 本地检测 | 官方 `afe_config_init()` → `create_from_config()`；单个采集/AFE worker 顺序 reset/feed/fetch，使用官方 WebRTC VAD |
 | 唤醒 | 加载配置的精确模型名，并要求模型的完整关键词元数据恰好为 `小呆小呆` |
 | 会话隔离 | 四字段 token、内部 permission epoch、RX DMA 丢弃窗口与 AFE/VAD 重置 |
 | PCM 输出 | 只有会话及传输权限都开放才调用 `on_pcm`；输出原始第一 ADC 通道，带真实能力标记 |
@@ -25,9 +25,9 @@
 
 `bot_audio_create()` 限制板上只有一个音频 owner。主程序/平台可以提前初始化共享 I2C，但不能再调用 `bsp_audio_codec_speaker_init()`、`bsp_audio_codec_microphone_init()`，也不能同时读取或写入同一 I2S。图形与摄像头继续使用各自 BSP 接口。
 
-BSP 的 I2S/data interface 是进程生命周期的静态对象，当前官方 BSP 没有与 `bsp_audio_init()` 配对的公开 deinit。本组件停止时关闭自己创建的 ES8389 与 codec 控制对象，保留 BSP 所有的 I2S/data interface 和共享 I2C；重新启动先在静音状态清除 TX 残留。必须由本组件完成第一次 `bsp_audio_init()`，因为官方 BSP 在已有 TX/RX handle 时直接返回，不会替其他调用者重新配置音频格式。
+本组件自行创建并持有 TDM I2S/data interface，停止时关闭 ES8389 并释放这些对象；共享 I2C 仍由 BSP 持有。重新启动先在静音状态清除 TX 残留。其他组件不能初始化或占用同一 I2S。
 
-板级时钟及引脚来自 S31 BSP：MCLK 未连接（`GPIO_NUM_NC`），BCLK/LRCK/DOUT/DIN 使用 BSP 的 3/4/5/6 定义，功放使能使用 BSP 的 GPIO7。代码继承官方 ES8389 的从机、`use_mclk=false` 配置；没有宣称第二时隙一定是第二只麦克风或回声参考。
+板级时钟及引脚来自 S31 BSP：MCLK 未连接（`GPIO_NUM_NC`），BCLK/LRCK/DOUT/DIN 使用 BSP 的 3/4/5/6 定义，功放使能使用 BSP 的 GPIO7。代码继承官方 ES8389 的从机、`use_mclk=false` 配置；按乐鑫该板 DOA 示例选择四时隙中的 0 和 2 作为两路麦克风。AFE 只使用第一路，第二路用于声源方向，不宣称是已验证的回声参考。
 
 ## 2. 唤醒与降级行为
 
@@ -104,7 +104,7 @@ ESP-SR 2.6.1 的 CMake 在 `CONFIG_PARTITION_TABLE_CUSTOM` 开启且找到 `mode
 
 输入格式固定为 **16 kHz、mono、signed PCM16 little-endian**。`bot_audio_playback_write()` 每次接受 1..320 个样本，并复制到队列；不保留调用者指针。默认 12 个队列槽，满帧约 240 ms；END 标记也占一个槽。`ESP_ERR_TIMEOUT` 是背压，发送方应在当前 token 仍有效时重试；不能当作成功发送。
 
-操作顺序：`playback_begin(token,&id)` → 多次 `playback_write(id,...)` → `playback_end(id)`。BEGIN 到首块之间保持静音；首块前解除 codec 静音并开启功放，再发 STARTED。正常 END 推入足够零样本，让此前 DMA 中的音频离开队列，随后静音并发 DONE。API 的 DONE 是本地提交/排空完成，不是经过外部麦克风测量的实际声学结束。
+操作顺序：`playback_begin(token,&id)` → 多次 `playback_write(id,...)` → `playback_end(id)`。BEGIN 到首块之间保持功放关闭；首块前开启功放，再发 STARTED。正常 END 推入足够零样本，让此前 DMA 中的音频离开队列，随后关闭功放并发 DONE。ES8389 1.5.11 的 codec `set_mute` 实际写 ADC 静音位，因此正常播放结束不调用它，避免关闭麦克风。API 的 DONE 是本地提交/排空完成，不是经过外部麦克风测量的实际声学结束。
 
 `playback_cancel(id)` 或 `playback_cancel(0)` 不经过播放队列，不会因队列已满而丢失取消。它锁存取消并直接关闭功放，worker 随后静音、清理 TX DMA、丢弃队列并报告 CANCELLED。没有关闭 ADC。若 codec 写入/静音/排空失败，会报告 FAILED；排空失败后锁住新播放，必须成功停止并重启 owner 后恢复，避免下一次解除静音播放残留数据。
 
@@ -129,11 +129,11 @@ Wake 事件的 `echo_safe=true` 只表示当时未处于自身播放或尾音屏
 | `CONFIG_BOT_AUDIO_WAKE_MODEL_NAME` | 空字符串 | 必须替换成真实定制模型条目名 |
 | `CONFIG_BOT_AUDIO_MODEL_PARTITION` | `model` | 与官方自动打包/flash 路径一致 |
 | `CONFIG_BOT_AUDIO_OUTPUT_VOLUME` | 30 | codec 百分比，上限 60；不是声学分贝限值 |
-| `CONFIG_BOT_AUDIO_MIC_GAIN_DB` | 24 | 输入增益，范围 0..42 dB |
+| `CONFIG_BOT_AUDIO_MIC_GAIN_DB` | 36 | 双麦输入增益，范围 0..42 dB；沿用官方该板 DOA 示例 |
 | `CONFIG_BOT_AUDIO_WAKE_DEBOUNCE_MS` | 2000 | 接受的完整唤醒之间的最小间隔 |
 | `CONFIG_BOT_AUDIO_PLAYBACK_TAIL_MS` | 800 | 本机播放后检测抑制窗口 |
 | `CONFIG_BOT_AUDIO_PLAYBACK_QUEUE_FRAMES` | 12 | 有界播放队列槽数 |
-| `CONFIG_BOT_AUDIO_WORKER_PRIORITY` | 8 | 三个应用音频任务的优先级 |
+| `CONFIG_BOT_AUDIO_WORKER_PRIORITY` | 8 | 采集/AFE 与播放两个应用音频任务的优先级 |
 
 主程序使用 `bot_audio_default_config()`，设置 `on_event` 与 context 后 create/start。需要启用 PCM 回调时再接入 `on_pcm` 并提供对应的加密传输授权；当前主程序保留 `on_pcm=NULL`、`deliver_pcm=false`。VAD、wake、playback 回调与运行时状态的映射见 [INTEGRATION.md](INTEGRATION.md)。
 
@@ -141,7 +141,7 @@ Wake 事件的 `echo_safe=true` 只表示当时未处于自身播放或尾音屏
 
 ## 8. 官方来源与版本
 
-组件管理器依赖固定为 BSP **1.1.0**、`esp_codec_dev` **1.5.11**、ESP-SR **2.6.1**。1.5.11 符合 BSP 的 `~1.5` 依赖范围。项目基线为 **ESP-IDF >=6.1 / esp32s31**。仓库中没有复制官方推理二进制、训练权重或自建 DSP 算法。
+组件管理器依赖固定为 BSP **1.1.0**、`esp_codec_dev` **1.5.11**、ESP-SR **2.6.1** 和 `esp_apa_doa` **1.0.0**。1.5.11 符合 BSP 的 `~1.5` 依赖范围。项目基线为 **ESP-IDF >=6.1 / esp32s31**。APA 的预编译库由组件管理器获取，使用乐鑫产品专用的 modified MIT 许可，分发时须保留许可。
 
 | 来源 | 本组件复用的内容 |
 | --- | --- |
@@ -154,7 +154,7 @@ Wake 事件的 `echo_safe=true` 只表示当时未处于自身播放或尾音屏
 
 上述链接固定到实际阅读的 commit。官方依赖保留各自许可证；本组件的会话授权、token、取消和降级策略属于项目代码。没有引入官方 VAD 示例里的录音保存路径。
 
-### 硬件到位后的待验证事项
+### 尚待完成的声学验证
 
 主要待验证点是 S31 工具链与固定组件版本的实际兼容性、第一 ADC 时隙是否对应目标麦克风、实际输入增益、无 MCLK 时的 ES8389/I2S 工作、DMA 几何与读取行为、内存与任务负载、真正定制唤醒模型的准确率、播音音量与停止时延。双向同时工作的 codec 能力及共享 I2C 仲裁也需要上板观察。
 

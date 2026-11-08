@@ -1,180 +1,65 @@
-# ESP Bot Server — Rust + Tauri 2 local brain console
+# 小呆 Bot Server — Mac 控制台
 
-## Current Mac implementation — 2026-11-06
+Rust + Tauri 2 桌面应用，当前唯一对话入口为“小呆”。
+界面提供固定的八个功能入口：对话、家庭成员、记忆库、模型与密钥、本地能力、工具与授权、设备连接、运行设置。
+功能清单、交互结构和验收范围见 [控制台设计说明](../../docs/mac-console-design.md)。
 
-**[小呆 Mac bot-server 完整指南](../../docs/mac-bot-server.md)** is the current setup
-and implementation record. The main companion tab provides a device-independent path:
-OpenCode v2.2.5 harness, Qwen Coding Plan → GLM Coding Plan → DeepSeek Flash,
-inherited browser/deepseek-search, local ASR/TTS, explicit face/speaker enrollment,
-SQLite memory, parent tool approvals, rich cards and stop/cancellation.
+## 构建与启动
 
-Use [`local-models/README.md`](local-models/README.md) for model installation,
-[`tools/README.md`](tools/README.md) for MCP setup, and
-[`../../docs/mac-gateway.md`](../../docs/mac-gateway.md) for the new TLS device endpoint.
-`scripts/configure_mac.py` writes Mac paths; `brain.json` configures the new chain.
-The historical provider selection below remains in `config.json`.
+本机要求：Apple Silicon Mac、Xcode、Rust stable、Node.js 22。
 
-**Source-only delivery:** no tests, build, dependency resolution, model/API runs or
-CI. Existing Cargo.lock predates the new direct dependencies and needs normal
-resolution on the Mac. Firmware does not yet implement the WSS v3 client;
-diagnostic LAN v1 is not private media transport. BLE remains pending.
+```sh
+cd server/bot-server
+npm ci
+npm run tauri build
+open "src-tauri/target/release/bundle/macos/ESP Bot Server.app"
+```
 
-## Historical diagnostic LAN console — 2026-10-31
+构建先执行 TypeScript 检查与 Vite production build，再编译 Rust 和打包 App。
+App 内嵌前端、Python worker 源码和工具示例，直接打开不依赖 Vite。
+原生 macOS 标题栏负责拖动、缩放和窗口按钮。
 
-The following describes the retained diagnostic link and legacy text adapters.
-It is independent of the new companion tab and does not authenticate devices.
+开发时使用 `npm run tauri dev`，前端固定为 `127.0.0.1:1421`，避免与本机另一应用占用的 1420 冲突。直接启动 debug 二进制仍需要 Vite。
+依赖缓存完整时，可用 `npm run tauri build -- -- --offline` 完成离线构建。
+本项目不使用 GitHub CI / Actions 验证。
 
-Implemented today (2026-10-31):
+这台 Mac 经用户授权使用现有 Apple Development 证书签名本地 App。
+`npm run tauri build` 会读取 Git 忽略的 `runtime/macos-signing-identity` 中的公开证书指纹；
+证书私钥始终留在钥匙串。显式设置的 `APPLE_SIGNING_IDENTITY` 优先。
+本地身份文件不存在时维持 Tauri 默认签名行为；清理 `runtime/` 后需重新选择签名身份，
+否则重新打包可能使 macOS 再次要求钥匙串授权。开发签名用于本机开发，不等于公证发布。
 
-- **Persistent identity** — stable server id persisted in the app config
-  dir so the firmware-side mDNS-TXT / welcome id match survives restarts.
-- **Discovery + WebSocket transport** — mDNS advertise, hello/welcome
-  handshake, heartbeat, per-device sessions (unchanged v1 link contract).
-- **Pairing soft gate** — first-seen devices are pending and receive no
-  commands until approved in the console; denied devices get welcome +
-  Close 4003 `pairing_denied`. Persisted in `devices.json`. This is a
-  trusted-LAN UI gate, **not** authentication.
-- **Command push** — validated `face.set` request frames (v2 envelope)
-  over the live socket with ack correlation and staleness deadlines.
-  Commands to offline devices fail fast; there is no offline queue.
-- **Provider adapters** — `Provider` trait with an OpenAI-compatible
-  HTTP adapter (mlx-lm serve / LM Studio; ports the Python adapter
-  verbatim) and an experimental HF Speech-to-Speech Realtime-style WS
-  adapter (text-in/text-out only). Selected via `config.json`.
-- **Chat** — console chat box → provider → reply pushed to the selected
-  approved bot as `face.set {subtitle, expression:"happy"}`, mirroring the
-  Python `/v1/chat` behavior; unconfigured providers answer with an honest
-  `llm_not_configured` error, never a fake reply.
+## 在控制台配置 API Key
 
-Not implemented on this legacy link: authenticated audio/STT/TTS streaming,
-BLE provisioning/fallback, TLS or private media. The new Mac WSS service is
-documented separately; firmware-side integration remains pending.
+1. 打开 **模型与密钥 → API Key**。
+2. 选择 Qwen Coding Plan、GLM Coding Plan 或 DeepSeek Flash，粘贴对应 Key，点击 **保存密钥**。
+3. 保存后密钥输入框清空，只显示“已配置”；点击 **启动服务** 生效。
 
-## Run on macOS or Linux
+密钥保存在本机 macOS 登录钥匙串，不写入 `brain.json`、日志或浏览器存储。
+保存或移除密钥会先停止服务，避免旧进程继续使用旧密钥。
+已保存的钥匙串密钥优先于启动环境变量；移除后已有环境变量仍可生效。
+此入口用于 managed 模式的显式 provider。attach 模式及继承的 provider 由外部 OpenCode 配置凭据。
 
-Prerequisites: Rust stable, Node.js (supported by Vite 7), Tauri 2 CLI
-prerequisites, and on Linux the WebKitGTK/GTK development packages.
+`brain.json` 位于 `~/Library/Application Support/ai.reasonia.espbot.server/`。
+模型、端点与优先级在 **模型与密钥** 编辑；本机模型环境在 **本地能力**；启动偏好和完整 JSON 在 **运行设置**。
+默认模型顺序为 Qwen → GLM → DeepSeek；配置密钥不代表已确认账户额度或模型可用性。
 
-Development (vite dev server + hot reload, the window loads
-`http://localhost:1420`):
+OpenCode 使用官方 v2.2.5 或兼容的后续 v2。此次本机安装位于被 Git 忽略的
+`runtime/bin/opencode`，不是 App 内置安装器。其他 Mac 需要自行安装并配置可执行路径。
+本地 ASR、身份模型需要单独按文档准备；打开窗口不会下载模型或启动采集。
 
-    cd server/bot-server
-    npm install
-    npm run tauri dev
+## 实现与边界
 
-Standalone runnable binary (frontend assets embedded, no vite needed):
+- `src/companion.ts`：当前中文控制台与单一 `companion_request` IPC。
+- `src-tauri/src/brain`：主动回合、本地模型、设备 WSS v3 与控制台 API。
+- `src-tauri/src/harness`：官方 OpenCode 管理、路线、权限、取消、会话和钥匙串。
+- `src-tauri/src/memory`：SQLite 档案、记忆和身份登记。
+- `local-models`：本地 ASR、身份与系统 TTS worker。
 
-    npm run tauri build -- --no-bundle
-    src-tauri/target/release/espbot-server-console
+已删除旧 Chat、Provider、Events、Mock 预览和相关原型适配代码；不再读取旧 `config.json`。
+当前固件仍使用 LAN v1 发现和诊断连接，所以默认构建启用 `lan-diagnostics`。**设备连接** 显示真实在线设备及稳定服务器 ID；它不传输私密媒体，也不恢复原型 Chat 或手动 face 命令。
+当前设备接入使用 WSS v3 设计，固件客户端和 BLE 仍待集成，未声称硬件端到端通过。
 
-**Debug binaries need vite.** Any *debug* build (`cargo build`, or running
-`target/debug/espbot-server-console` directly) is compiled in Tauri dev mode
-and hardcodes the vite dev URL as its frontend — run without
-`npm run tauri dev` and the window comes up **blank**. This is Tauri 2
-behavior: `tauri-build` sets `cfg(dev)` for debug profiles, which makes the
-webview prefer `build.devUrl` over the embedded `frontendDist`. The stderr
-diagnostics make this visible instead of silent: a healthy start logs
-`[window] main -> <url>` plus `[page] Started/Finished <url>` — blank-window
-reports should start there.
-
-The application binds an ephemeral IPv4 TCP port on 0.0.0.0 and broadcasts
-the actual port via Bonjour/mDNS. No port number or IP needs to be configured
-on the ESP32. The console starts the service automatically in Tauri setup.
-
-Check advertisement:
-- macOS: `dns-sd -B _espbot-server._tcp local`, or `python3 scripts/mdns_query.py`
-- Linux: avahi-browse -rt _espbot-server._tcp
-
-Rust unit tests plus an in-process fake-bot end-to-end session test
-(hello → welcome → pairing gate → command → ack):
-
-    cargo test --manifest-path server/bot-server/src-tauri/Cargo.toml
-
-## Configuration
-
-On first launch the app creates `config.json` in the Tauri app config dir
-(macOS: `~/Library/Application Support/ai.reasonia.espbot.server/`):
-
-    {
-      "provider": "none",
-      "openai": {
-        "base_url": "http://127.0.0.1:8080/v1",
-        "api_key": null,
-        "model": "default"
-      },
-      "s2s": {
-        "url": "ws://127.0.0.1:7860/v1/realtime"
-      }
-    }
-
-Set `"provider"` to `"openai"` (with a `base_url`) or `"s2s"` (with a
-`url`), then press **reload config** in the console. A malformed file never
-crashes the app: the console shows `config_error` and keeps the previous
-selection. `provider: "none"` keeps chat honestly disabled.
-
-Files in the config dir: `server_id.txt` (stable identity),
-`devices.json` (pairing registry), `config.json` (providers).
-
-## Module structure
-
-- src-tauri/src/lan/discovery.rs: mDNS service registration
-- src-tauri/src/lan/protocol.rs: strict hello/welcome schema and tests
-- src-tauri/src/lan/frames.rs: v2 request/response envelope + face.set validation
-- src-tauri/src/lan/cmd.rs: CommandHub — outbound senders, ack correlation
-- src-tauri/src/lan/socket.rs: WebSocket accept, handshake, heartbeat, outbound pump
-- src-tauri/src/lan/e2e.rs: fake-bot end-to-end session test (no mDNS, no hardware)
-- src-tauri/src/lan/mod.rs: snapshot, event sink, listener
-- src-tauri/src/identity.rs: persistent server id
-- src-tauri/src/pairing.rs: pairing registry with atomic persistence
-- src-tauri/src/config.rs: provider config (load-or-default)
-- src-tauri/src/provider/: Provider trait, OpenAI-compatible and S2S adapters
-- src-tauri/src/lib.rs: Tauri lifecycle and console commands
-- src/main.ts: console UI — pairing approvals, device/chat target, chat, provider status
-
-## Security posture
-
-Automatic LAN-only peer filtering is **not** auth. Pairing is a soft gate:
-device ids are self-claimed, the link is unencrypted, and no secrets flow
-here. Do not operate the port on an untrusted LAN. Durable device
-identities, cryptographic pairing and an authenticated encrypted channel
-are required before any audio leaves the Bot (docs/local-first-hybrid-brain.md).
-
-## Validation honesty
-
-Verified for real (2026-10-31, on the dev Mac, no board required):
-
-- `cargo test`: 42 tests pass (41 by default, including the in-process
-  fake-bot end-to-end session test, plus 1 opt-in live-HTTP test —
-  see below).
-- The **real app binary** launches, creates its config dir, and serves.
-- **Real mDNS**: service `_espbot-server._tcp.local.` visible via raw
-  DNS-SD query (scripts/mdns_query.py); TXT `proto/id/path` correct; the
-  advertised id is stable across restarts (persistent identity works).
-- **Real WebSocket handshake** from a foreign process
-  (scripts/fake-bot.mjs): welcome `server_id` equals the mDNS TXT id.
-- **Pairing paths against the real app**: first-seen device persisted as
-  `pending` in devices.json; `denied` device receives welcome then Close
-  4003 `pairing_denied`; `approved` device receives commands.
-- **Full stack roundtrip** (via `VITE_ESPBOT_AUTOTEST=1 npm run tauri dev`):
-  webview `invoke` → `send_face_command`/`chat` → provider HTTP →
-  `face.set` frame delivered to the connected bot → ack correlated
-  (`command_acked` in the stderr event log).
-- **Real provider HTTP** through the actual adapter against a live local
-  OpenAI-compatible endpoint (the repo mock):
-  `node scripts/mock_llm_server.mjs && ESPBOT_TEST_OPENAI_BASE=http://127.0.0.1:8765/v1 cargo test -- --ignored real_http`.
-
-Dev scripts (Node ≥ 22, zero deps): `scripts/fake-bot.mjs` (fake device:
-handshake, events, receive/ack commands), `scripts/mock_llm_server.mjs`
-(OpenAI-compatible stub), `scripts/mdns_query.py` (raw DNS-SD browser).
-
-Still **not** verified: a live HF Speech-to-Speech sidecar (adapter is
-protocol-mapped only), a real GPU model (mock stands in), real ESP32-S31
-hardware (the firmware does not yet consume app frames — see
-shared/lan-discovery-v1.md), and literal mouse-clicks in the window (the
-same webview→IPC→command path is exercised by the autotest hook instead).
-
-Console events are also printed to stderr, so headless runs of the binary
-can be diagnosed without the window.
-
-See shared/lan-discovery-v1.md for the exact service/TXT/WebSocket/app-frame
-contract.
+详细设置与实际验收范围见 [Mac 控制台](../../docs/mac-console.md)、
+[Mac 大脑](../../docs/mac-bot-server.md)、[OpenCode](../../docs/mac-opencode.md)、
+[本地模型](../../docs/mac-local-models.md) 和 [WSS 网关](../../docs/mac-gateway.md)。

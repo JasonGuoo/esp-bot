@@ -21,6 +21,13 @@ static bool valid_pose(const attention_pose_t *p) {
     return p && isfinite(p->yaw_deg) && isfinite(p->pitch_deg);
 }
 
+int attention_sound_eye_x(float azimuth_deg) {
+    if (!isfinite(azimuth_deg) || azimuth_deg < 0 || azimuth_deg > 180) return 0;
+    /* Empirical screen-view mapping on this assembly: physical left yielded
+     * ~115 degrees and physical right ~66 degrees on the S31. */
+    return visual_offset(azimuth_deg - 90.0f, 45.0f, true);
+}
+
 attention_config_t attention_default_config(void) {
     return (attention_config_t){
         .yaw_min_deg=-45, .yaw_max_deg=45,

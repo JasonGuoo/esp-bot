@@ -1,28 +1,20 @@
 menu "Xiaodai local runtime"
 
-    config BOT_RUNTIME_BORED_AFTER_MS
-        int "Idle milliseconds before bored"
+    config BOT_RUNTIME_DAY_AWAKE_MS
+        int "Daytime awake interval before a brief drowsy period (ms)"
         range 1000 86400000
+        default 1200000
+        help
+            Begins after startup, an interaction, or the end of night. Daytime
+            does not enter indefinite sleep merely because nobody interacts.
+
+    config BOT_RUNTIME_DAY_DROWSY_MS
+        int "Duration of a daytime drowsy period (ms)"
+        range 1000 3600000
         default 60000
         help
-            Counted from explicit interaction/session end, not camera activity.
-            Must be smaller than DROWSY_AFTER_MS. Invalid combinations are
-            rejected by bot_runtime_create; the runtime does not reorder them.
-
-    config BOT_RUNTIME_DROWSY_AFTER_MS
-        int "Idle milliseconds before drowsy"
-        range 1001 86400001
-        default 180000
-        help
-            Must be greater than BORED_AFTER_MS and less than SLEEP_AFTER_MS.
-
-    config BOT_RUNTIME_SLEEP_AFTER_MS
-        int "Idle milliseconds before sleeping"
-        range 1002 86400002
-        default 300000
-        help
-            Must be greater than DROWSY_AFTER_MS. Local wake-word capture stays
-            running; this is not ESP deep sleep.
+            Automatically returns to awake afterwards without creating a
+            conversation. Daytime local face detection may remain active.
 
     config BOT_RUNTIME_WAKING_MS
         int "Waking expression duration (milliseconds)"
@@ -45,13 +37,5 @@ menu "Xiaodai local runtime"
         int "Explicit wake debounce (milliseconds)"
         range 0 30000
         default 1500
-
-    config BOT_RUNTIME_SLEEP_DISPLAY
-        bool "Request display sleep during sleeping"
-        default y
-        help
-            The platform still reports whether its panel/backlight path can
-            actually sleep. Night-dark always requests display sleep. Touch
-            and local wake-word capture must remain available.
 
 endmenu

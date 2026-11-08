@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+    "dev": "vite --host 127.0.0.1 --port 1421 --strictPort",
     "build": "tsc --noEmit && vite build",
-    "tauri": "tauri"
+    "tauri": "node scripts/tauri-local.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

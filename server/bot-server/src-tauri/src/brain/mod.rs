@@ -17,6 +17,7 @@ use settings::BrainConfig;
 use worker::ModelWorker;
 
 pub type EventSink = Arc<dyn Fn(Value) + Send + Sync>;
+pub type DiagnosticSnapshot = Arc<dyn Fn() -> Value + Send + Sync>;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,7 +122,7 @@ impl Brain {
     }
 
     pub fn emit(&self, kind: &str, turn_id: Option<&str>, payload: Value) {
-        (self.sink)(json!({"kind":kind,"turn_id":turn_id,"at_ms":crate::lan::now_ms(),"payload":payload}));
+        (self.sink)(json!({"kind":kind,"turn_id":turn_id,"at_ms":crate::time::now_ms(),"payload":payload}));
     }
 
     pub async fn cancel(&self, turn_id: Option<&str>) -> Result<(), String> {
@@ -281,14 +282,15 @@ pub struct BrainHost {
     pub config_dir: PathBuf,
     resource: Option<PathBuf>,
     sink: EventSink,
+    diagnostics: Option<DiagnosticSnapshot>,
     inner: RwLock<Result<Arc<Brain>,String>>,
     lifecycle: Mutex<()>,
 }
 
 impl BrainHost {
-    pub fn new(config_dir: PathBuf, resource: Option<PathBuf>, sink: EventSink) -> Arc<Self> {
+    pub fn new(config_dir: PathBuf, resource: Option<PathBuf>, sink: EventSink, diagnostics: Option<DiagnosticSnapshot>) -> Arc<Self> {
         let inner = Brain::new(config_dir.clone(), resource.clone(), Arc::clone(&sink));
-        Arc::new(Self {config_dir, resource, sink, inner:RwLock::new(inner), lifecycle:Mutex::new(())})
+        Arc::new(Self {config_dir, resource, sink, diagnostics, inner:RwLock::new(inner), lifecycle:Mutex::new(())})
     }
 
     pub fn get(&self) -> Result<Arc<Brain>, String> { self.inner.read().map_err(|_|"brain_host_poisoned".to_owned())?.clone() }

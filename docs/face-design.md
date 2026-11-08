@@ -6,7 +6,22 @@
 [20-pose reference](eveface_design.png). It uses cyan filled silhouettes, scan lines
 and a black background without pupils or a mouth. The previous design below remains
 the **Classic Outline / 经典线条** family with all five original palette IDs preserved.
-Settings now provides a candidate preview and 20-expression navigation before Apply.
+Settings now provides a candidate preview and 24-expression navigation before Apply.
+
+**2026-11-07 expressive update:** the shared EVE catalog now offers 24 selectable
+poses plus four lifecycle/compatibility poses. Eye contours interpolate and blinks
+close and reopen; the daytime idle scheduler occasionally uses short curious,
+discovery, smile, wink, laugh, gentle and affection poses between neutral pauses.
+Sideways gaze translates the paired silhouettes by up to 92 px at 800 px
+screen width without changing either eye's proportions. Both eyes use one
+shared gaze vector; the existing animation smooths motion and holds each idle
+glance. With a fresh
+face box above 20% of the camera image, the automatic
+reaction is a centered smiling blink, without conversation or idle glances.
+`overjoyed` alone adds white reflected highlights, fading with the blink; it is
+not selected by idle, normal happiness or the near-face reaction. It can be
+explicitly previewed over USB; meaningful automatic triggers require a future
+semantic emotion source. Classic Outline maps it to its nearest happy pose.
 
 Albert.io-inspired *simplicity only*, not imitation of artwork. Two large eyes dominate the 800×480 landscape display; no body, eyelashes, highlights, realistic iris, gradients, nose or permanent mouth. Strokes have round ends. A mouth is permitted only for `surprised` (one dot) or `shy` (one very short curve). No mouth in `happy`.
 
@@ -42,7 +57,7 @@ Interpolation and expression state are part of the Face controller, while *speci
 
 ## Animation budgets and integration
 
-Animation tick ~33ms when display is awake (initial design budget, not board-validated). Occasional blink around ~3.5s only **when allowed by runtime behavior state**; no normal blinking animation in SLEEPING/NIGHT_DARK. In IDLE→BORED→DROWSY the rendering profile can subtly slow eye activity, but it must not initiate speech or target acquisition. When tracking an engaged human, subtle expression changes (thinking/listening/shy) may change eye SHAPE, never silently replace the spatial gaze vector with a conflicting idle look. Camera-relative tracking may keep the pupils off-center with a fixed head; eyes return to center only when a future motor has physically aligned the head, or tracking is no longer valid. Avoid GPU-like rendering and large sprites; no audio or motor control inside Face.
+Animation tick ~33ms when display is awake (initial design budget, not board-validated). Blinking only occurs when allowed by runtime behavior state; no normal blinking animation in NIGHT_DARK. Daytime IDLE can use locally generated eye glances, with occasional short DROWSY periods, but it must not initiate speech or target acquisition. When tracking an engaged human, expression changes may change eye shape but never replace the spatial gaze vector with an idle look. Camera-relative tracking may keep the eyes off-center with a fixed head; physical head motion is not available in V1. Avoid GPU-like rendering and large sprites; no audio or motor control inside Face.
 
 Touch behavior: a screen tap reveals the corner gear for five seconds; gear opens Settings, then Appearance, then selection/Apply. Settings is not an always-visible bar. Touching a candidate card is not the same as applying it. Appearance tiles are rendered using the theme's own selected drawing driver. The module should remain callable from remote commands, speech/sentiment module, visual-attention module and motion coordinator.
 

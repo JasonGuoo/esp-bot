@@ -91,6 +91,16 @@ pub fn validate(config: &BrainConfig) -> Result<(), String> {
     if config.models.script.as_ref().is_some_and(|p| !p.is_absolute()) || config.models.model_dir.as_ref().is_some_and(|p| !p.is_absolute()) {
         return Err("model_paths_must_be_absolute".into());
     }
+    if !matches!(config.models.asr_backend.as_str(), "whisper" | "rma_qwen") {
+        return Err("asr_backend_invalid".into());
+    }
+    let rma_paths = [&config.models.rma_qwen_python, &config.models.rma_qwen_worker, &config.models.rma_qwen_model];
+    if rma_paths.iter().any(|path| path.as_ref().is_some_and(|p| !p.is_absolute())) {
+        return Err("rma_qwen_paths_must_be_absolute".into());
+    }
+    if config.models.asr_backend == "rma_qwen" && rma_paths.iter().any(|path| path.is_none()) {
+        return Err("rma_qwen_paths_required".into());
+    }
     if config.gateway.enabled {
         config.gateway.bind.parse::<std::net::SocketAddr>().map_err(|_| "gateway_bind_invalid")?;
         if config.gateway.certificate_pem.is_none() || config.gateway.private_key_pem.is_none() {
@@ -130,4 +140,24 @@ pub fn private_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let result = file.write_all(bytes).and_then(|_| file.sync_all()).and_then(|_| fs::rename(&temporary, path));
     if result.is_err() { let _ = fs::remove_file(&temporary); }
     result.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_model_configuration_remains_valid_and_rma_requires_absolute_paths() {
+        let mut config: BrainConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.models.asr_backend, "whisper");
+        assert!(validate(&config).is_ok());
+        config.models.asr_backend = "rma_qwen".into();
+        assert_eq!(validate(&config).unwrap_err(), "rma_qwen_paths_required");
+        config.models.rma_qwen_python = Some("/tmp/rma/python".into());
+        config.models.rma_qwen_worker = Some("relative/worker.py".into());
+        config.models.rma_qwen_model = Some("/tmp/rma/model".into());
+        assert_eq!(validate(&config).unwrap_err(), "rma_qwen_paths_must_be_absolute");
+        config.models.rma_qwen_worker = Some("/tmp/rma/worker.py".into());
+        assert!(validate(&config).is_ok());
+    }
 }

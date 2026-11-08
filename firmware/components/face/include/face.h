@@ -26,12 +26,15 @@ bool face_set_theme(face_view_t *view, const char *theme_id);
 
 /** idle, listening, happy, curious, thinking, surprised, sleepy, shy, blink,
  * bored, drowsy, sleeping, speaking, gentle, confused, discovery, laughing,
- * excited, wink, smug, skeptical, determined, annoyed, worried.
- * EVE has 20 reference poses; older themes use the nearest original pose. */
+ * excited, wink, smug, skeptical, determined, annoyed, worried, sad,
+ * affection, relieved, overjoyed. Older themes use the nearest original pose. */
 bool face_set_expression(face_view_t *view, const char *expression);
 
 /** -100..100 gaze offset; values are clamped and eased by the component timer. */
 void face_set_gaze(face_view_t *view, int x, int y);
+
+/** Current eased eye position for diagnostics; caller holds the LVGL lock. */
+void face_get_gaze(const face_view_t *view, int *x, int *y);
 
 /** Set caption text or NULL/"" to hide; truncates at 383 UTF-8 bytes. */
 void face_set_subtitle(face_view_t *view, const char *text);

@@ -9,6 +9,10 @@ use serde_json::{json, Map, Value};
 pub const SOURCE_VERSION: &str = "2.2.5";
 pub const AGENT_ID: &str = "xiaodai";
 const PACKAGE: &str = "@opencode/ai/providers/openai-compatible";
+/// V2 permission action names for built-ins currently supported by the
+/// console's per-operation approval bridge. Other actions stay denied until
+/// their interaction and lifecycle are explicitly integrated.
+pub const NATIVE_ACTIONS: &[&str] = &["read", "glob", "grep", "edit", "shell", "webfetch", "skill"];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -31,6 +35,12 @@ pub struct HarnessConfig {
     /// Ordered, never sorted by model price or a fabricated remaining balance.
     pub routes: Vec<ModelRoute>,
     pub required_mcp: Vec<String>,
+    /// Explicitly enabled built-in actions.
+    pub native_actions: Vec<String>,
+    /// `ask` reviews each call; `autonomous` uses the enabled actions directly.
+    pub native_execution_mode: String,
+    /// Permit a parent to approve access outside the OpenCode working folder.
+    pub allow_external_directories: bool,
     /// Exact OpenCode permission action names, not inferred from descriptions.
     pub read_tools: Vec<String>,
     pub quota_cooldown_secs: u64,
@@ -109,8 +119,8 @@ impl Default for HarnessConfig {
                 },
             ],
             required_mcp: vec!["browser".into(), "deepseek-search".into()],
+            native_actions: Vec::new(), native_execution_mode: "ask".into(), allow_external_directories: false,
             read_tools: vec![
-                "browser_browser_snapshot".into(),
                 "deepseek-search_search".into(),
                 "deepseek-search_deepseek_search".into(),
                 "deepseek-search_fetch".into(),
@@ -148,7 +158,8 @@ impl HarnessConfig {
         {
             return Err("opencode_config: timeout, output or step budget out of bounds".into());
         }
-        if self.routes.is_empty() || self.routes.len() > 8 || self.required_mcp.len() > 16 || self.read_tools.len() > 64 {
+        if self.routes.is_empty() || self.routes.len() > 8 || self.required_mcp.len() > 16 || self.read_tools.len() > 64
+            || self.native_actions.len() > NATIVE_ACTIONS.len() {
             return Err("opencode_config: route or tool list out of bounds".into());
         }
         let mut ids = std::collections::HashSet::new();
@@ -181,6 +192,18 @@ impl HarnessConfig {
         for name in &self.required_mcp {
             if !identifier(name) { return Err("opencode_config: MCP names must use letters, digits, _ or -".into()); }
         }
+        let mut native = std::collections::HashSet::new();
+        if self.native_execution_mode != "ask" && self.native_execution_mode != "autonomous" {
+            return Err("opencode_config: native_execution_mode must be ask or autonomous".into());
+        }
+        for action in &self.native_actions {
+            if !NATIVE_ACTIONS.contains(&action.as_str()) || !native.insert(action) {
+                return Err("opencode_config: unknown or duplicated native action".into());
+            }
+        }
+        if self.native_actions.iter().any(|action| action == "shell") && !self.allow_external_directories {
+            return Err("opencode_config: shell needs explicit host access; the working directory is not a sandbox".into());
+        }
         for tool in &self.read_tools {
             if !identifier(tool) || !self.allowed_mcp_action(tool) {
                 return Err("opencode_config: read_tools must be exact actions under required_mcp names".into());
@@ -200,11 +223,28 @@ impl HarnessConfig {
         self.required_mcp.iter().any(|name| action.starts_with(&format!("{name}_")))
     }
 
+    pub fn allowed_approval_action(&self, action: &str) -> bool {
+        self.allowed_mcp_action(action) || self.native_actions.iter().any(|name| name == action)
+            || (action == "external_directory" && self.allow_external_directories)
+    }
+
     pub fn permissions(&self) -> Value {
         let mut rules = vec![json!({"action":"*","resource":"*","effect":"deny"})];
+        // Questions are answered through the console form bridge, not as
+        // permission for any file, browser or system operation.
+        rules.push(json!({"action":"question","resource":"*","effect":"allow"}));
+        let effect = if self.native_execution_mode == "autonomous" { "allow" } else { "ask" };
+        for name in &self.native_actions {
+            rules.push(json!({"action":name,"resource":"*","effect":effect}));
+        }
+        // OpenCode checks this separately from read/edit and, where possible,
+        // shell. Never implicitly permit an outside directory.
+        if self.allow_external_directories {
+            rules.push(json!({"action":"external_directory","resource":"*","effect":effect}));
+        }
         // In official v2 core/src/tool.ts, disabling Code Mode exposes the
-        // remaining MCP tools directly. Keep arbitrary `execute` denied along
-        // with shell/file/subagent tools; no code evaluator is needed here.
+        // remaining MCP tools directly. Keep arbitrary `execute` and
+        // subagents denied until their host interaction is integrated.
         for name in &self.required_mcp {
             rules.push(json!({"action":format!("{name}_*"),"resource":"*","effect":"ask"}));
         }
@@ -217,13 +257,12 @@ impl HarnessConfig {
     }
 
     pub fn automatic_read(&self, action: &str, input: &Value) -> bool {
+        // A browser MCP may attach to the user's already logged-in Chrome.
+        // Even a snapshot can expose a private page, so every browser action
+        // needs a fresh approval, including legacy configured read_tools.
+        if action.starts_with("browser_") { return false; }
         if !self.read_tools.iter().any(|name| name == action) { return false; }
         let Some(input) = input.as_object() else { return false };
-        if action == "browser_browser_snapshot" {
-            // Playwright's optional filename writes a host artifact. Keep that
-            // form, and screenshots in general, behind explicit parent review.
-            return input.is_empty();
-        }
         !["filename", "file", "path", "output", "outputPath", "output_path"]
             .iter().any(|key| input.contains_key(*key))
     }
@@ -286,4 +325,57 @@ fn env_name(value: &str) -> bool {
     !value.is_empty() && value.len() <= 128
         && value.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
         && !value.as_bytes()[0].is_ascii_digit()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logged_in_browser_reads_require_approval_even_with_legacy_settings() {
+        let mut config = HarnessConfig::default();
+        config.read_tools.push("browser_browser_snapshot".into());
+        assert!(!config.automatic_read("browser_browser_snapshot", &json!({})));
+        assert!(!config.automatic_read("browser_browser_snapshot", &json!({"filename":"page.yml"})));
+        assert!(config.automatic_read("deepseek-search_search", &json!({"query":"weather"})));
+    }
+
+    #[test]
+    fn native_modes_do_not_change_browser_permissions() {
+        let mut config = HarnessConfig::default();
+        config.native_actions = vec!["read".into(), "edit".into(), "shell".into()];
+        config.allow_external_directories = true;
+        for (mode, expected) in [("ask", "ask"), ("autonomous", "allow")] {
+            config.native_execution_mode = mode.into();
+            assert!(config.validate().is_ok());
+            let rules = config.permissions();
+            let effect = |action: &str| rules.as_array().unwrap().iter()
+                .find(|rule| rule["action"] == action).unwrap()["effect"].as_str().unwrap().to_owned();
+            assert_eq!(effect("read"), expected);
+            assert_eq!(effect("edit"), expected);
+            assert_eq!(effect("shell"), expected);
+            assert_eq!(effect("external_directory"), expected);
+            assert_eq!(effect("browser_*"), "ask");
+            assert_eq!(effect("*"), "deny");
+            assert!(!config.allowed_approval_action("execute"));
+        }
+    }
+
+    #[test]
+    fn invalid_or_implicit_native_privileges_are_rejected() {
+        let mut config = HarnessConfig::default();
+        assert!(!config.allowed_approval_action("read"));
+        assert!(!config.allowed_approval_action("external_directory"));
+        config.native_actions = vec!["shell".into()];
+        assert!(config.validate().is_err());
+        config.allow_external_directories = true;
+        assert!(config.validate().is_ok());
+        config.native_actions.push("shell".into());
+        assert!(config.validate().is_err());
+        config.native_actions = vec!["execute".into()];
+        assert!(config.validate().is_err());
+        config.native_actions.clear();
+        config.native_execution_mode = "unexpected".into();
+        assert!(config.validate().is_err());
+    }
 }

@@ -116,10 +116,16 @@ def finite_number(value: Any) -> float | None:
 
 
 class Worker:
-    def __init__(self, model_dir: Path, default_voice: str, tts_rate: int):
+    def __init__(self, model_dir: Path, default_voice: str, tts_rate: int,
+                 asr_backend: str = "whisper", rma_python: str | None = None,
+                 rma_worker: str | None = None, rma_model: str | None = None):
         self.store = ModelStore(model_dir)
         self.default_voice = default_voice
         self.tts_rate = tts_rate
+        self.rma_asr = None
+        if asr_backend == "rma_qwen":
+            from rma_qwen import RmaQwen
+            self.rma_asr = RmaQwen(rma_python, rma_worker, rma_model)
         self.speaker = None
         self.detector = None
         self.recognizer = None
@@ -146,6 +152,8 @@ class Worker:
                 "available": supported and not missing and status["installed"],
             })
             models[kind] = status
+        if self.rma_asr is not None:
+            models["asr"] = self.rma_asr.health()
         tts_supported = sys.platform == "darwin" and Path("/usr/bin/say").is_file()
         models["tts"] = {
             "backend": "macos_say",
@@ -227,6 +235,25 @@ class Worker:
         fields(payload, {"wav_base64", "language"})
         if sys.platform != "darwin" or platform.machine() != "arm64":
             fail("unsupported_platform", "The selected ASR adapter requires native Apple Silicon Python.")
+        if self.rma_asr is not None:
+            language = payload.get("language", "zh")
+            if language not in (None, "auto", "zh"):
+                fail("unsupported_language", "RMA Qwen uses automatic language detection.")
+            audio, quality = self._audio(payload)
+            import numpy as np
+            pcm = (np.clip(audio, -1.0, 1.0 - 1.0 / 32768.0) * 32768.0).astype("<i2").tobytes()
+            result = self.rma_asr.transcribe(pcm)
+            text = result["text"].strip()
+            if not text:
+                fail("no_speech", "The ASR model returned no speech text.")
+            languages = {"english": "en", "chinese": "zh", "mandarin": "zh", "japanese": "ja",
+                         "korean": "ko", "french": "fr", "german": "de", "spanish": "es",
+                         "russian": "ru", "arabic": "ar", "portuguese": "pt", "italian": "it"}
+            detected = result.get("language")
+            detected = languages.get(detected.strip().lower(), detected.strip().lower()
+                                     if detected.strip().lower() in languages.values() else None) if isinstance(detected, str) else None
+            return {"text": text, "language": detected, "model_id": self.rma_asr.health()["model_id"],
+                    "segments": [], "quality": quality}
         directory = self.store.require("asr")
         audio, quality = self._audio(payload)
         import mlx_whisper
@@ -529,6 +556,8 @@ class Worker:
         }
 
     def unload(self) -> dict:
+        if self.rma_asr is not None:
+            self.rma_asr.stop()
         self.speaker = None
         self.detector = None
         self.recognizer = None
@@ -575,6 +604,10 @@ def main() -> int:
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--tts-voice", default="Tingting")
     parser.add_argument("--tts-rate", type=int, default=180)
+    parser.add_argument("--asr-backend", choices=("whisper", "rma_qwen"), default="whisper")
+    parser.add_argument("--rma-qwen-python")
+    parser.add_argument("--rma-qwen-worker")
+    parser.add_argument("--rma-qwen-model")
     args = parser.parse_args()
     if not 100 <= args.tts_rate <= 260:
         parser.error("--tts-rate must be between 100 and 260")
@@ -601,7 +634,8 @@ def main() -> int:
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     try:
-        worker = Worker(args.model_dir, args.tts_voice, args.tts_rate)
+        worker = Worker(args.model_dir, args.tts_voice, args.tts_rate, args.asr_backend,
+                        args.rma_qwen_python, args.rma_qwen_worker, args.rma_qwen_model)
     except Exception as exc:
         diagnostics.write(f"local-models startup_failed type={type(exc).__name__}\n")
         return 1

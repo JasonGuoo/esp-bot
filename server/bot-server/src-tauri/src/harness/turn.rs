@@ -1,7 +1,7 @@
 //! Native V2 session and event lifecycle. The event stream is connected before
 //! prompt admission, and any broken stream ends the turn without replay.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use reqwest::Method;
 use serde_json::{json, Value};
@@ -28,6 +28,66 @@ impl AttemptFailure {
         if error.status.is_none() { return Self::transport(error.detail); }
         Self { error: classify(&error.body, route, error.status), observed_output }
     }
+}
+
+/// Native permission metadata is emitted after tool hooks have run. Never
+/// present the earlier model call as the sole authority for a file edit or
+/// shell command: plugins can rewrite it before execution.
+fn reviewable_native_permission(action: &str, data: &Value, input: Option<&Value>, source_verified: bool) -> bool {
+    let Some(input) = input.filter(|value| value.is_object() && value.to_string().len() <= 16_384) else { return false };
+    if !source_verified { return false; }
+    let Some(resources) = data["resources"].as_array().filter(|items| !items.is_empty()
+        && items.iter().all(|value| value.as_str().is_some_and(|item| !item.is_empty()))) else { return false };
+    match action {
+        // The preview is computed from the actual file mutation after hooks.
+        "edit" => data.pointer("/metadata/files").and_then(Value::as_array).is_some_and(|files| !files.is_empty()),
+        // Shell permission resources can be individual parsed commands. In
+        // manual mode, reject compound/rewritten commands we cannot display
+        // faithfully; autonomous mode is explicitly a broader user choice.
+        "shell" => resources.len() == 1 && input["command"].as_str()
+            .is_some_and(|command| resources[0].as_str() == Some(command.trim())),
+        _ => true,
+    }
+}
+
+fn shell_environment() -> Value {
+    // OpenCode's own process has provider credentials for model/MCP calls.
+    // A session shell must not inherit that process environment. Retain only
+    // normal platform/session variables; this is not an OS sandbox.
+    let mut vars = serde_json::Map::new();
+    for name in ["HOME", "USER", "LOGNAME", "PATH", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM"] {
+        if let Ok(value) = std::env::var(name) { vars.insert(name.to_owned(), Value::String(value)); }
+    }
+    if !vars.contains_key("PATH") {
+        vars.insert("PATH".into(), Value::String("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()));
+    }
+    Value::Object(vars)
+}
+
+fn supported_question(form: &Value) -> bool {
+    if form.pointer("/metadata/kind").and_then(Value::as_str) != Some("question") || form.to_string().len() > 16_384 { return false; }
+    let Some(fields) = form["fields"].as_array().filter(|fields| !fields.is_empty() && fields.len() <= 8) else { return false };
+    fields.iter().enumerate().all(|(index, field)| {
+        field["key"].as_str() == Some(format!("q{index}").as_str())
+            && matches!(field["type"].as_str(), Some("string" | "multiselect"))
+            && field["options"].as_array().is_some_and(|options| options.len() <= 12 && options.iter().all(|option|
+                option["value"].as_str().is_some_and(|text| text.len() <= 512)
+                && option["label"].as_str().is_some_and(|text| text.len() <= 512)))
+    })
+}
+
+pub(super) fn valid_question_answer(fields: &Value, answer: &Value) -> bool {
+    let (Some(fields), Some(answer)) = (fields.as_array(), answer.as_object()) else { return false };
+    if answer.len() > fields.len() || answer.values().map(|value| value.to_string().len()).sum::<usize>() > 16_384 { return false; }
+    answer.iter().all(|(key, value)| {
+        let Some(field) = fields.iter().find(|field| field["key"].as_str() == Some(key)) else { return false };
+        match field["type"].as_str() {
+            Some("string") => value.as_str().is_some_and(|text| text.len() <= 4_000),
+            Some("multiselect") => value.as_array().is_some_and(|items| items.len() <= 20
+                && items.iter().all(|item| item.as_str().is_some_and(|text| text.len() <= 4_000))),
+            _ => false,
+        }
+    })
 }
 
 impl Harness {
@@ -72,6 +132,13 @@ impl Harness {
             api.json(Method::POST, &format!("/api/session/{session}/model"),
                 Some(&json!({"model":{"providerID":route.provider_id,"id":route.model_id}})))
                 .await.map_err(|e| e.public_message())?;
+            if self.config.native_actions.iter().any(|action| action == "shell") {
+                // V2 session environments are process-local; refresh before
+                // every prompt (including a reconnected or forked session).
+                api.json(Method::PUT, &format!("/api/session/{session}/environment"),
+                    Some(&json!({"variables":shell_environment()})))
+                    .await.map_err(|e| e.public_message())?;
+            }
             let instructions = json!({
                 "instruction":request.system_prompt,
                 "response_schema":request.response_schema,
@@ -145,7 +212,7 @@ impl Harness {
             // Generated definitions explicitly require this environment key.
             // Set base_url/api_key_env to null to use OpenCode's existing login.
             if self.config.mode == "managed" && route.base_url.is_some()
-                && route.api_key_env.as_ref().is_some_and(|key| std::env::var(key).map_or(true, |s| s.is_empty()))
+                && route.api_key_env.as_ref().is_some_and(|key| !self.credential_envs.read().is_ok_and(|keys| keys.contains(key)))
             {
                 self.emit(json!({"kind":"harness_route_skipped","route_id":route.id,"reason":"credential_env_missing"}));
                 continue;
@@ -194,18 +261,27 @@ impl Harness {
         let mut observed_output = false;
         let mut assistant: Option<String> = None;
         let mut text_chars = 0usize;
+        // Native OpenCode permission requests often carry the target but not
+        // the tool's full input. Keep the corresponding bounded call locally
+        // so the parent can review commands and edits before approving them.
+        let mut tool_inputs: HashMap<(String, String), Option<Value>> = HashMap::new();
+        let mut tool_names: HashMap<(String, String), String> = HashMap::new();
         loop {
             // Parent review can legitimately take longer than model streaming.
             // The outer whole-turn deadline still bounds the approval wait.
             let waiting_for_parent = self.pending_permissions.lock().ok()
-                .is_some_and(|pending| pending.values().any(|value| value["session_id"].as_str() == Some(session)));
+                .is_some_and(|pending| pending.values().any(|value| value["session_id"].as_str() == Some(session)))
+                || self.pending_questions.lock().ok()
+                    .is_some_and(|pending| pending.values().any(|value| value["session_id"].as_str() == Some(session)));
             let idle_ms = if waiting_for_parent { self.config.turn_timeout_ms } else { self.config.stream_idle_timeout_ms };
             let event = tokio::time::timeout(Duration::from_millis(idle_ms), events.next()).await
                 .map_err(|_| AttemptFailure::transport("event stream exceeded the idle budget"))?
                 .map_err(AttemptFailure::transport)?;
             let kind = event["type"].as_str().unwrap_or("");
             let data = &event["data"];
-            if data["sessionID"].as_str() != Some(session) { continue; }
+            let event_session = if kind == "form.created" { data.pointer("/form/sessionID").and_then(Value::as_str) }
+                else { data["sessionID"].as_str() };
+            if event_session != Some(session) { continue; }
             match kind {
                 "session.execution.started" => { started = true; }
                 "session.step.started" => {
@@ -228,15 +304,66 @@ impl Harness {
                     // Even a read-only tool is conservatively not replayed: its
                     // provider may meter calls or hide a side effect.
                     observed_output = true;
-                    self.emit(json!({"kind":"harness_tool_activity","turn_id":request.turn_id,"tool":data["name"],"phase":kind}));
+                    let call_key = data["assistantMessageID"].as_str().zip(data["id"].as_str())
+                        .map(|(message, call)| (message.to_owned(), call.to_owned()));
+                    if kind == "session.tool.input.started" {
+                        if let (Some(key), Some(name)) = (&call_key, data["name"].as_str()) {
+                            if tool_names.len() < 64 && name.len() <= 128 { tool_names.insert(key.clone(), name.to_owned()); }
+                        }
+                    }
+                    if kind == "session.tool.called" {
+                        if let (Some(message), Some(call), Some(input)) = (data["assistantMessageID"].as_str(), data["id"].as_str(), data.get("input")) {
+                            let key = (message.to_owned(), call.to_owned());
+                            if checked_id(message, "msg_").is_ok() && checked_id(call, "").is_ok()
+                                && input.is_object() && input.to_string().len() <= 16_384
+                                && (tool_inputs.len() < 64 || tool_inputs.contains_key(&key)) {
+                                let slot = tool_inputs.entry(key).or_insert_with(|| Some(input.clone()));
+                                // Re-delivery is harmless only when the recorded input is identical.
+                                if slot.as_ref().is_some_and(|old| old != input) { *slot = None; }
+                            }
+                        }
+                    }
+                    let tool = data["name"].as_str().or_else(|| call_key.as_ref().and_then(|key| tool_names.get(key).map(String::as_str)));
+                    self.emit(json!({"kind":"harness_tool_activity","turn_id":request.turn_id,"tool":tool,"phase":kind}));
                 }
                 "permission.asked" => {
-                    self.remember_permission(api, request, session, data).await
+                    let matched = data.pointer("/source/messageID").and_then(Value::as_str)
+                        .zip(data.pointer("/source/id").and_then(Value::as_str))
+                        .and_then(|(message, call)| tool_inputs.get(&(message.to_owned(), call.to_owned())))
+                        .and_then(Option::as_ref);
+                    // MCP's permission metadata contains the post-hook input
+                    // actually passed to the server. Do not substitute the
+                    // earlier model event if a plugin rewrites that input.
+                    let input = if self.config.allowed_mcp_action(data["action"].as_str().unwrap_or("")) {
+                        data.pointer("/metadata/input").filter(|value| value.is_object())
+                    } else { matched };
+                    self.remember_permission(api, request, session, data, input, matched.is_some()).await
                         .map_err(|_| AttemptFailure::transport("permission request could not be safely handled"))?;
                 }
                 "permission.replied" => {
                     if let Some(id) = data["requestID"].as_str() {
                         if let Ok(mut pending) = self.pending_permissions.lock() { pending.remove(id); }
+                    }
+                }
+                "form.created" => {
+                    let form = &data["form"];
+                    let id = form["id"].as_str().ok_or_else(|| AttemptFailure::transport("question has no form ID"))?;
+                    checked_id(id, "frm_").map_err(|_| AttemptFailure::transport("invalid question ID"))?;
+                    if !supported_question(form) {
+                        api.json(Method::DELETE, &format!("/api/session/{session}/form/{id}?message=This%20console%20cannot%20display%20that%20form"), None).await
+                            .map_err(|error| AttemptFailure::api(error, route, true))?;
+                        continue;
+                    }
+                    let pending = json!({"form_id":id,"session_id":session,"turn_id":request.turn_id,"fields":form["fields"]});
+                    let mut questions = self.pending_questions.lock().map_err(|_| AttemptFailure::transport("question lock"))?;
+                    if questions.len() >= 8 { return Err(AttemptFailure::transport("question queue full")); }
+                    questions.insert(id.to_owned(), pending);
+                    drop(questions);
+                    self.emit(json!({"kind":"harness_question_required","turn_id":request.turn_id,"form_id":id}));
+                }
+                "form.replied" | "form.cancelled" => {
+                    if let Some(id) = data["id"].as_str() {
+                        if let Ok(mut questions) = self.pending_questions.lock() { questions.remove(id); }
                     }
                 }
                 "session.retry.scheduled" | "session.step.failed" => {
@@ -288,17 +415,20 @@ impl Harness {
         }
     }
 
-    async fn remember_permission(&self, api: &Api, request: &TurnRequest, session: &str, data: &Value) -> Result<(), String> {
+    async fn remember_permission(&self, api: &Api, request: &TurnRequest, session: &str, data: &Value, input: Option<&Value>, source_verified: bool) -> Result<(), String> {
         let id = data["id"].as_str().ok_or("opencode_protocol: permission ID missing")?;
         checked_id(id, "per")?;
         let action = data["action"].as_str().unwrap_or("");
-        if !self.config.allowed_mcp_action(action) || data.to_string().len() > 16_384 {
+        let native = self.config.native_actions.iter().any(|name| name == action) || action == "external_directory";
+        if !self.config.allowed_approval_action(action) || data.to_string().len() > 16_384
+            || (native && !reviewable_native_permission(action, data, input, source_verified))
+            || (!native && input.is_none()) {
             api.json(Method::POST, &format!("/api/session/{session}/permission/{id}/reply"),
-                Some(&json!({"decision":"reject","message":"This companion only exposes the configured browser/search tools to its parent console."})))
+                Some(&json!({"decision":"reject","message":"This action is not enabled or cannot be fully reviewed in the companion console."})))
                 .await.map_err(|e| e.public_message())?;
             return Ok(());
         }
-        if data.pointer("/metadata/input").is_some_and(|input| self.config.automatic_read(action, input)) {
+        if input.is_some_and(|input| self.config.automatic_read(action, input)) {
             api.json(Method::POST, &format!("/api/session/{session}/permission/{id}/reply"),
                 Some(&json!({"decision":"once"}))).await.map_err(|e| e.public_message())?;
             self.emit(json!({"kind":"harness_read_tool_allowed","turn_id":request.turn_id,"permission":action}));
@@ -307,7 +437,7 @@ impl Harness {
         let pending = json!({
             "request_id":id,"session_id":session,"turn_id":request.turn_id,
             "permission":action,"action":action,"patterns":data["resources"],
-            "description":data["message"],"input":data.pointer("/metadata/input"),
+            "description":data["message"],"metadata":data["metadata"],"input":input,
             "created_at_ms":now_ms()
         });
         let mut requests = self.pending_permissions.lock().map_err(|_| "opencode_state: permission lock")?;
@@ -437,4 +567,57 @@ fn parse_structured(text: &str) -> Option<Value> {
         body.strip_suffix("```").unwrap_or(body).trim()
     } else { trimmed };
     serde_json::from_str::<Value>(candidate).ok().filter(Value::is_object)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_review_requires_a_matching_bounded_call() {
+        let read = json!({"resources":["/tmp/test.txt"]});
+        let input = json!({"path":"/tmp/test.txt"});
+        assert!(reviewable_native_permission("read", &read, Some(&input), true));
+        assert!(!reviewable_native_permission("read", &read, Some(&input), false));
+        assert!(!reviewable_native_permission("read", &read, None, true));
+        assert!(!reviewable_native_permission("read", &json!({"resources":[]}), Some(&input), true));
+        assert!(!reviewable_native_permission("read", &read, Some(&json!({"path":"x".repeat(17_000)})), true));
+    }
+
+    #[test]
+    fn native_edits_and_shell_require_post_hook_evidence() {
+        let edit_input = json!({"path":"note.txt", "content":"hello"});
+        assert!(!reviewable_native_permission("edit", &json!({"resources":["note.txt"]}), Some(&edit_input), true));
+        assert!(reviewable_native_permission("edit", &json!({"resources":["note.txt"], "metadata":{"files":[{"diff":"+hello"}]}}), Some(&edit_input), true));
+        let shell_input = json!({"command":"pwd"});
+        assert!(reviewable_native_permission("shell", &json!({"resources":["pwd"]}), Some(&shell_input), true));
+        assert!(!reviewable_native_permission("shell", &json!({"resources":["pwd", "rm -rf /tmp/x"]}), Some(&shell_input), true));
+        assert!(!reviewable_native_permission("shell", &json!({"resources":["something else"]}), Some(&shell_input), true));
+    }
+
+    #[test]
+    fn question_forms_accept_only_supported_fields_and_bounded_answers() {
+        let form = json!({"metadata":{"kind":"question"}, "fields":[
+            {"key":"q0","type":"string","options":[{"value":"A","label":"A"}]},
+            {"key":"q1","type":"multiselect","options":[{"value":"B","label":"B"}]}
+        ]});
+        assert!(supported_question(&form));
+        assert!(valid_question_answer(&form["fields"], &json!({"q0":"own answer","q1":["B","C"]})));
+        assert!(!valid_question_answer(&form["fields"], &json!({"q2":"unexpected"})));
+        assert!(!valid_question_answer(&form["fields"], &json!({"q0":["wrong type"]})));
+        assert!(!valid_question_answer(&form["fields"], &json!({"q0":"x".repeat(4_001)})));
+        assert!(!supported_question(&json!({"metadata":{"kind":"oauth"},"fields":form["fields"]})));
+    }
+
+    #[test]
+    fn shell_environment_has_no_provider_or_server_credentials() {
+        let env = shell_environment();
+        let names = env.as_object().unwrap();
+        assert!(names.contains_key("PATH"));
+        assert!(!names.contains_key("DEEPSEEK_API_KEY"));
+        assert!(!names.contains_key("QWEN_CODING_PLAN_API_KEY"));
+        assert!(!names.contains_key("GLM_CODING_PLAN_API_KEY"));
+        assert!(!names.contains_key("OPENCODE_PASSWORD"));
+        assert!(!names.contains_key("OPENCODE_CONFIG_CONTENT"));
+    }
 }

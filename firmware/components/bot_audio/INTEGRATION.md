@@ -1,6 +1,6 @@
 # Main composition contract
 
-Public API is `include/bot_audio.h`. Use `bot_audio_default_config()` → set callback/context → `bot_audio_create()` → `bot_audio_start()`. `bot_audio` alone creates one ES8389 IN_OUT codec. Main/platform may call the idempotent `bsp_i2c_init()` for the shared bus but **must not call either BSP codec helper or read/write I2S**. Audio must make the first `bsp_audio_init()` call so the BSP does not retain someone else's sample configuration.
+Public API is `include/bot_audio.h`. Use `bot_audio_default_config()` → set callback/context → `bot_audio_create()` → `bot_audio_start()`. `bot_audio` alone owns the I2S channels and ES8389 IN_OUT codec. Main/platform may call the idempotent `bsp_i2c_init()` for the shared bus but **must not call `bsp_audio_init()`, either BSP codec helper, or read/write that I2S peripheral**. The owner uses the official board DOA example's four-slot TDM input selection and frees its own I2S/data interface at stop.
 
 Callbacks post bus events; they must be short, nonblocking, thread-safe, and never call start/stop/destroy. Copy the audio token's epoch/session_id/turn_id/focus_generation explicitly to the runtime token. Copy borrowed reason/PCM before returning. All observed timestamps are `esp_timer_get_time()`; divide by 1000 for bus milliseconds. VAD events have `echo_safe=false`; automatic VAD barge-in must remain disabled. Wake events only contain the complete `小呆小呆` keyword. Wake `echo_safe=true` means the speaker/tail suppression gate was clear, not validated AEC. AFE has no calibrated confidence output; `confidence_available=false`, so do not invent a measured score in diagnostics.
 
@@ -14,6 +14,7 @@ Startup reports HEALTH unavailable until the first successful microphone read. M
 
 - BSP: `espressif/esp32_s31_korvo_1 =1.1.0`.
 - Codec: `espressif/esp_codec_dev =1.5.11`, compatible with BSP's `~1.5` range.
+- DOA: `espressif/esp_apa_doa =1.0.0`, licensed for use with Espressif products; see its component license.
 - Speech: `espressif/esp-sr =2.6.1`.
 - Project baseline: IDF >=6.1, target `esp32s31`; `CONFIG_CODEC_ES8389_SUPPORT=y`; `CONFIG_BSP_ERROR_CHECK=n` for recoverable BSP returns.
 - Real ESP-SR symbols: `CONFIG_MODEL_IN_FLASH=y`, `CONFIG_ESP_SR_EXTERNAL_MODEL_PATH="/actual/vendor/export/root"`, `CONFIG_SR_VADN_WEBRTC=y`.
@@ -22,6 +23,21 @@ Startup reports HEALTH unavailable until the first successful microphone read. M
 
 The custom Espressif-compatible ESP32-S31 WakeNet export must contain one complete `小呆小呆` keyword and matching metadata. No stock wake model is selected as a substitute. Blank, missing, malformed, or nonmatching model → `BOT_AUDIO_WAKE_MODEL_MISSING`; codec/manual interaction can still start. Install the actual vendor model, set the exact model name/external root, then use the official model packer; stop/start reloads it. See README for future-only commands and immutable upstream sources.
 
+First-board update: the selected one-mic path requires equal feed/fetch block
+sizes and executes official reset/feed/fetch calls in the single capture worker.
+Playback remains independent. AFE freshness comes from successful processing,
+not just microphone reads. ES8389 1.5.11's `set_mute` writes the ADC mute bits;
+normal speaker silence therefore uses PA GPIO 7 and TX zero flushing, preserving
+the microphone. Codec close may still mute ADC after capture has stopped.
+Keep the official AFE ring capacity. Its reserved onset history includes both
+`vad_min_speech_ms` and `vad_delay_ms` (256 ms with this configuration), plus
+room for incoming PCM. Four or eight 32 ms frames alone eventually leave no
+feed space. This history is not exported. A zero feed result still allows a
+bounded fetch so temporary backpressure cannot permanently stop draining work.
+
 **Flash integration:** ESP-SR 2.6.1's CMake hardcodes the partition name `model`, generates `build/srmodels/srmodels.bin`, and attaches it to the full `flash` target. A later complete flash with no correct external-model configuration can overwrite an earlier manually flashed custom model, even when no stock WakeNet is selected. Its explicit generation dependency is sdkconfig; changed external weights alone require regenerating the model image. Do not put the sole vendor export in the generated `build/srmodels` directory, which the official packer recreates.
 
-Hardware is unavailable; no compilation, tests, CI, or flashing have been run for this component.
+The first real S31 build and flash were explicitly requested and performed on
+2026-11-06. See [the board record](../../../docs/board-bringup-2026-11-06.md)
+for actual per-feature acceptance; do not infer acoustic validation from the
+build. No CI was used.

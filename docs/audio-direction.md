@@ -1,6 +1,6 @@
 # Two-microphone direction of arrival (DOA) — optional acoustic cue
 
-**Target board:** ESP32-S31-Korvo-1 V1.1, on-board 2-mic array and codec. **Status:** architecture/design only; no DOA/audio driver currently integrated in esp-bot main. **Hard requirement:** always-on local wake for full phrase 小呆小呆, specified in [wake-word.md](wake-word.md). DOA is optional and NEVER substitutes for wake recognition.
+**Target board:** ESP32-S31-Korvo-1 V1.1, on-board 2-mic array and codec. The firmware integrates Espressif's two-mic APA DOA with the existing single audio owner; board acceptance and physical left/right calibration are tracked separately in [board-bringup-2026-11-06.md](board-bringup-2026-11-06.md). The dedicated 小呆小呆 wake model is still missing: voice activity and DOA never start a conversation or replace wake recognition.
 
 ## Confirmed reference path
 
@@ -9,7 +9,9 @@ Espressif provides a live ESP32-S31-Korvo-1 example under [esp-apa DOA live_exam
 - Physical on-board mic spacing macro **0.043 m (43 mm)**.
 - Board codec capture via esp_codec_dev_read and spatial processing via esp_apa_doa_process.
 - A **0..180 degree** two-mic result convention in that example: **0 left / 90 front / 180 right**, with valid flag and quality.
-- Device front-facing signed yaw (positive robot-right) can be initialized by **yaw_deg = doa_azimuth_deg - 90**, but MUST additionally account for actual mic-channel order, package mounting, calibration offset and head rotation before use.
+- The result's mic order and physical display orientation must be checked before mapping it to screen coordinates. On the present assembled board, measured screen-left sounds produced angles above 90° and screen-right sounds below 90°; the eye mapping therefore uses the opposite sign from `azimuth_deg - 90`.
+
+The project uses the official four-slot, 16-bit TDM microphone selection (slots 0 and 2), a 43 mm array, and the APA `valid` flag plus quality >= 3. Screen-left/screen-right sign was checked using known-position speech on the current assembly; other mounting orientations or changed mic-slot orders need their own calibration. This does not calibrate absolute angle or remove room reflections. `esp_apa_doa` 1.0.0 is distributed under Espressif's modified MIT license for use with Espressif products; preserve its license when redistributing it.
 
 The example documents an ADC-only processing path; do not assume built-in VAD, wake detection, speaker separation or complete audio front end. On-board mic geometry is documented for that hardware example; do not copy 43 mm to a later custom PCB.
 
@@ -43,7 +45,9 @@ board audio codec (one BSP device owner)
 - During playback, own-speaker loopback can contaminate detection; incorporate AEC/echo gating or disable conflicting DOA measurements with explicit degraded status.
 - Do not initialize two independent I2S/codec consumers inside wake and DOA modules.
 
-## Events and proposed fields
+## Current passive reaction and proposed extensions
+
+The official WebRTC VAD detects speech; a lightweight adaptive energy threshold also detects distinct non-speech sounds. Microphone levels and APA direction/quality are logged without PCM. The audio owner emits a throttled, lossy `sound.activity` event. During daytime passive behavior, runtime requests a short curious expression, and attention maps a valid direction to rendered eye motion. No direction is invented when the estimate is unavailable. A large nearby face keeps its centered smile, settings/night/fault suppress the reaction, and speaker playback and its echo tail gate the detector. The energy threshold does not promise to detect every quiet sound or distinguish all background noise. No pre-wake audio is saved or uploaded, and the reaction does not open a session. The component has no validated AEC, person association or real head motion.
 
 **WAKE_DETECTED** (source: keyword engine):
 - event_id, capture_monotonic_ms, complete_keyword_model_id, confidence, recognized_phrase=小呆小呆.
@@ -56,7 +60,7 @@ board audio codec (one BSP device owner)
 **AUDIO_SESSION** (source: post-wake audio):
 - session_id, utterance_id, VAD state, optional speaker association, record/playback health.
 
-bot_runtime accepts WAKE_DETECTED for wake. attention_manager accepts AUDIO_DIRECTION as candidate target cue under runtime focus policy; vision_attention continues observing all visible people. Neither directly drives Face or head GPIO.
+The richer `AUDIO_DIRECTION`/`AUDIO_SESSION` fields and audio-visual speaker association below remain future work. The current event does not provide an identity, calibrated confidence, capture timestamp or 3D location.
 
 ## Future decision logic
 
@@ -74,4 +78,4 @@ bot_runtime accepts WAKE_DETECTED for wake. attention_manager accepts AUDIO_DIRE
 - Confirm full single-word 小呆 never wakes and the full four-syllable model is required.
 - Profile mic processing and wake performance while LCD and vision are active.
 
-**No CI or background testing is part of this project.** The document is an integration contract and does not imply DOA, wake or multi-speaker localization already works on real hardware.
+**No CI or background testing is part of this project.** This document does not by itself establish physical calibration, a working wake model or multi-speaker localization.

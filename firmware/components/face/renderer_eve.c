@@ -3,16 +3,20 @@
  * Both complete eyes translate with the same attention vector, without pupils.
  */
 #include "face_renderer.h"
+#include "eve_pose.h"
+#include "eve_gaze.h"
 #include <stdlib.h>
 
-#define CURVE_STEPS 12
+#define CURVE_STEPS 24
 #define CONTOUR_POINTS (4 * CURVE_STEPS + 1)
 
 typedef struct {
     lv_obj_t *root;
     lv_point_t contour[2][CONTOUR_POINTS];
     const face_theme_t *theme;
-    int eye_height;
+    int eye_height, eye_width, eye_cx[2], eye_cy;
+    uint16_t glint;
+    face_eve_pose_t pose;
 } eve_t;
 
 static int mini(int a, int b) { return a < b ? a : b; }
@@ -92,6 +96,27 @@ static void draw(lv_event_t *e) {
             }
         }
     }
+    if (r->glint) {
+        lv_draw_rect_dsc_t glint;
+        lv_draw_rect_dsc_init(&glint);
+        glint.bg_color = lv_color_white();
+        glint.bg_opa = (lv_opa_t)(225u * r->glint / FACE_EVE_MIX_FULL);
+        glint.radius = LV_RADIUS_CIRCLE;
+        for (int eye = 0; eye < 2; eye++) {
+            int x = area.x1 + r->eye_cx[eye] - r->eye_width * 19 / 100;
+            int y = area.y1 + r->eye_cy - r->eye_height * 21 / 100;
+            int w = clamp(r->eye_width * 8 / 100, 2, 100);
+            int h = clamp(r->eye_height * 16 / 100, 3, 100);
+            lv_area_t highlight = {x, y, x + w - 1, y + h - 1};
+            lv_draw_rect(layer, &glint, &highlight);
+            x += w + clamp(r->eye_width * 3 / 100, 1, 100);
+            y += h * 3 / 4;
+            w = clamp(r->eye_width * 3 / 100, 2, 100);
+            h = clamp(r->eye_height * 5 / 100, 2, 100);
+            highlight = (lv_area_t){x, y, x + w - 1, y + h - 1};
+            lv_draw_rect(layer, &glint, &highlight);
+        }
+    }
 }
 
 static void *create(lv_obj_t *parent) {
@@ -116,16 +141,26 @@ static void render(void *instance, const face_theme_t *theme,
     lv_obj_set_style_bg_color(r->root, lv_color_hex(theme->background), 0);
     int w = mini(width * 29 / 100, height * 50 / 100);
     int h = mini(height * 34 / 100, width * 26 / 100);
-    const int dx = clamp(state->gaze_x, -100, 100) * width / 2400;
+    /* Keep both large silhouettes inside the display while making a sideways
+     * look clearly visible at normal viewing distance. */
+    const int dx = face_eve_gaze_offset_x(width, state->gaze_x);
     const int dy = clamp(state->gaze_y, -100, 100) * height / 2800;
     face_expression_t ex = state->expression;
     if (ex < 0 || ex >= FACE_EX_COUNT) ex = FACE_EX_IDLE;
-    if (state->blinking) ex = FACE_EX_BLINK;
+    const uint16_t blink = state->blinking && !state->blink_progress ?
+        FACE_EVE_MIX_FULL : state->blink_progress;
+    int16_t shapes[2][FACE_EVE_SHAPE_POINTS];
+    face_eve_pose_step(&r->pose, ex, state->transition_active,
+                       state->transition_progress, blink, shapes);
     r->eye_height = h;
+    r->eye_width = w;
+    r->eye_cy = height * 44 / 100 + dy;
+    r->glint = face_eve_glint_strength(ex, state->transition_active,
+                                       state->transition_progress, blink);
     for (int i = 0; i < 2; i++) {
         const int cx = width * (i ? 71 : 29) / 100 + dx;
-        contour(r, i, k_face_eve_shapes[k_face_eve_eyes[ex][i]],
-                cx, height * 44 / 100 + dy, w, h);
+        r->eye_cx[i] = cx;
+        contour(r, i, shapes[i], cx, r->eye_cy, w, h);
     }
     lv_obj_invalidate(r->root);
 }

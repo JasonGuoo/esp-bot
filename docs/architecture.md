@@ -25,7 +25,7 @@ The existing behavioral/sensor ownership rules below remain canonical. The deplo
 ## 1. Product / hardware decisions
 
 - Name: **小呆**; ONLY full spoken keyword **小呆小呆** wakes from passive behavior. Single 小呆, mere face presence, eye contact and arbitrary human chatter do not initiate interaction. [wake-word.md](wake-word.md); [identity manifest](../shared/bot-identity.json).
-- Personality: quiet passive companion. IDLE → BORED → DROWSY → SLEEPING, NIGHT_DARK when appropriate. Never give unsolicited greetings. Local wake audio must remain available with display/camera off.
+- Personality: lively but non-intrusive companion. During the day IDLE includes autonomous screen-eye glances; a nearby large face pauses glances for a silent smile and blinking. Occasional brief DROWSY periods return to IDLE on their own. NIGHT_DARK applies in the configured night window. Never give unsolicited greetings. Local wake audio remains available with display/camera off.
 - Initial V1 target configuration: **ESP32-S31-Korvo-1 V1.1; stationary non-actuated head** with board camera, two microphones, touch LCD, speaker; user may move or rotate entire Bot. No installed IMU, motor, absolute compass or pose feedback.
 - **Vision-first:** when engaged, perceive multiple faces, retain one officially selected human, align **both displayed eyes** with human eye midpoint using the current camera-relative observation. No physical re-aiming of camera is possible in V1.
 - Next physical design target: off-the-shelf pan/tilt hardware with enclosed speakers; optional 6-axis IMU via adapters. One gaze controller and one target selector remain owners. This is planned, not installed. No promise of arbitrary-orientation stabilization by an unactuated camera.
@@ -96,7 +96,7 @@ In a running implementation bot_runtime manages lifecycle and priorities, **not 
 
 ## 4. Interaction state and autonomy
 
-- bot_runtime has passive mode IDLE, BORED, DROWSY, SLEEPING, NIGHT_DARK, WAKING, ENGAGED. LISTENING/THINKING/SPEAKING are separate conversation substates; visual focus may be TRACKING, TEMPORARILY_LOST or REACQUIRING independently.
+- bot_runtime retains IDLE, BORED, DROWSY, SLEEPING, NIGHT_DARK, WAKING and ENGAGED identifiers for compatibility. The daytime passive policy uses IDLE ↔ brief DROWSY; it does not automatically enter BORED or indefinite SLEEPING. LISTENING/THINKING/SPEAKING and visual focus remain separate substates.
 - *No engagement merely because a person is visible or looking toward Bot*. Human gaze is perception, not permission to initiate conversation.
 - Full **小呆小呆** locally recognized or a deliberate user touch/manual action authorizes engagement. During an active session the name need not be repeated each sentence.
 - Night screen-off is application-level low-activity mode: keyword/audio path stays alive, camera/inference stops, display sleep requested. Actual full physical blackout on current board is not yet proven.

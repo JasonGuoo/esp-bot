@@ -22,9 +22,10 @@ Header: include/bot_lan.h. The API is asynchronous except for snapshot reads.
 Both send paths bind queued frames to the current connection generation; old
 queued output is dropped across reconnect. Enqueue failure is returned explicitly.
 
-Automatic mode connects only when **exactly one** compatible server is found.
-When multiple exist, it emits SELECTION_REQUIRED and waits for the settings UI
-to let the user choose. Wi-Fi loss triggers recovery; after a failed handshake,
+When `preferred_server_id` is configured, automatic mode selects only that
+server. Otherwise, it connects when **exactly one** compatible server is found;
+when multiple exist, it emits SELECTION_REQUIRED and waits for manual selection.
+The current Face settings do not yet implement a server picker. Wi-Fi loss triggers recovery; after a failed handshake,
 the worker retries discovery on its configured interval.
 
 ### Example integration (the current app's adapter is in brain_link)

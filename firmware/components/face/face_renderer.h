@@ -20,6 +20,9 @@ typedef struct {
     int gaze_x;
     int gaze_y;
     bool blinking;
+    bool transition_active;
+    uint16_t transition_progress; /* 0..256, eased by LVGL */
+    uint16_t blink_progress;      /* 0..256, eased by LVGL */
 } face_render_state_t;
 
 typedef struct face_renderer face_renderer_t;

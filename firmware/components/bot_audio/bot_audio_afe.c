@@ -9,6 +9,7 @@
 #include "esp_afe_config.h"
 #include "esp_afe_sr_models.h"
 #include "esp_partition.h"
+#include "esp_log.h"
 
 /* ESP-SR's public model_path.c loader trusts its binary directory. Check the
  * directory before passing it an erased/partially provisioned flash partition.
@@ -108,8 +109,8 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
         }
     }
 
-    /* A single selected ADC lane; board routing awaits hardware validation. The physical second slot is NOT advertised as
-     * a second microphone or a synchronized playback reference. */
+    /* The AFE sees only the selected primary mic. The second mic is reserved
+     * for local direction estimation; neither input is an AEC reference. */
     afe_config_t *cfg = afe_config_init("M", afe->models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
     if (!cfg) {
         afe->wake_status = BOT_AUDIO_WAKE_UNAVAILABLE;
@@ -132,7 +133,11 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
     cfg->wakenet_model_name = selected;
     cfg->wakenet_model_name_2 = NULL;
     cfg->agc_init = false;
-    cfg->afe_ringbuf_size = 4;
+    /* Keep the official ring capacity. ESP-SR reserves both min_speech and
+     * delay history in this same ring, in addition to incoming PCM. Shrinking
+     * it to four or eight 32 ms frames leaves no room beyond our 256 ms
+     * history and eventually rejects every new feed. That history remains
+     * local to ESP-SR and is never exported by the owner. */
     cfg->debug_init = false;
     cfg->fixed_first_channel = true;
     cfg->fixed_output_channel = true;
@@ -150,6 +155,8 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
         return ESP_ERR_INVALID_STATE;
     }
     afe->iface = esp_afe_handle_from_config(checked);
+    ESP_LOGI("bot_audio", "AFE ring=%d frames, VAD onset history=%d+%d ms",
+             checked->afe_ringbuf_size, checked->vad_min_speech_ms, checked->vad_delay_ms);
     if (afe->iface) afe->data = afe->iface->create_from_config(checked);
     afe_config_free(cfg);
     if (!afe->iface || !afe->data) {
@@ -159,13 +166,17 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
     }
     int samples = afe->iface->get_feed_chunksize(afe->data);
     if (samples <= 0 || samples > 4096 ||
+        afe->iface->get_fetch_chunksize(afe->data) != samples ||
         afe->iface->get_feed_channel_num(afe->data) != 1 ||
+        afe->iface->get_fetch_channel_num(afe->data) != 1 ||
         afe->iface->get_samp_rate(afe->data) != BOT_AUDIO_SAMPLE_RATE) {
         afe->wake_status = BOT_AUDIO_WAKE_UNAVAILABLE;
         reason(afe, "AFE format does not match the 16 kHz mono owner contract");
         return ESP_ERR_INVALID_SIZE;
     }
     afe->feed_samples = (size_t)samples;
+    ESP_LOGI("bot_audio", "AFE frame samples: feed=%d fetch=%d, 16 kHz mono",
+             samples, afe->iface->get_fetch_chunksize(afe->data));
     if (selected) {
         afe->wake_status = BOT_AUDIO_WAKE_READY;
         reason(afe, "Full 小呆小呆 model ready; AEC/reference unverified, auto barge-in disabled");

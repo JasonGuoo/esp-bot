@@ -10,11 +10,12 @@ mod config;
 mod http;
 mod routing;
 mod turn;
+pub(crate) mod secrets;
 
 pub use config::{HarnessConfig, ModelRoute, SOURCE_VERSION};
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -34,6 +35,47 @@ use http::Api;
 use routing::RoutingState;
 
 pub type HarnessEventSink = Arc<dyn Fn(Value) + Send + Sync>;
+
+// A Keychain request may remain blocked in macOS after its async caller times
+// out. Serialize reads across reloads so retries cannot create more prompts.
+static CREDENTIAL_READ_GATE: StdMutex<()> = StdMutex::new(());
+type LoadedCredentials = (BTreeMap<String, zeroize::Zeroizing<String>>, BTreeSet<String>);
+
+struct CredentialReadGuard(Arc<AtomicBool>);
+impl Drop for CredentialReadGuard {
+    fn drop(&mut self) { self.0.store(true, Ordering::Release); }
+}
+
+fn load_credentials_with(
+    routes: &[ModelRoute],
+    uses_deepseek_search: bool,
+    gate: &StdMutex<()>,
+    cancelled: &AtomicBool,
+    mut read: impl FnMut(&str) -> Result<Option<zeroize::Zeroizing<String>>, String>,
+) -> Result<LoadedCredentials, String> {
+    let _guard = gate.lock().map_err(|_| "api_key_keychain_lock_failed")?;
+    let mut saved = BTreeMap::new();
+    let mut present = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    for route in routes.iter().filter(|route| route.base_url.is_some() &&
+        (route.enabled || (uses_deepseek_search && route.api_key_env.as_deref() == Some("DEEPSEEK_API_KEY")))) {
+        if cancelled.load(Ordering::Acquire) { return Err("api_key_keychain_read_cancelled".into()); }
+        if let Some(account) = &route.api_key_env {
+            if !seen.insert(account.clone()) { continue; }
+            let key = read(account)?;
+            // A timed-out OS request can finish later. Drop its secret and do
+            // not start another item's prompt once the caller has gone away.
+            if cancelled.load(Ordering::Acquire) { return Err("api_key_keychain_read_cancelled".into()); }
+            if let Some(key) = key {
+                saved.insert(account.clone(), key);
+                present.insert(account.clone());
+            } else if secrets::environment_present(account) {
+                present.insert(account.clone());
+            }
+        }
+    }
+    Ok((saved, present))
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnRequest {
@@ -125,6 +167,7 @@ pub struct Harness {
     client: Client,
     process: Mutex<Option<ManagedProcess>>,
     ready: AtomicBool,
+    credential_envs: RwLock<BTreeSet<String>>,
     password: RwLock<String>,
     version: RwLock<Option<String>>,
     last_error: RwLock<Option<String>>,
@@ -132,6 +175,7 @@ pub struct Harness {
     turn_gate: Mutex<()>,
     active: StdMutex<HashMap<String, Arc<ActiveTurn>>>,
     pending_permissions: StdMutex<BTreeMap<String, Value>>,
+    pending_questions: StdMutex<BTreeMap<String, Value>>,
     sessions: StdMutex<SessionLedger>,
     routing: StdMutex<RoutingState>,
     sink: HarnessEventSink,
@@ -150,6 +194,9 @@ impl TurnGuard<'_> {
     fn clear(&self) {
         if let Ok(mut turns) = self.harness.active.lock() { turns.remove(&self.turn_id); }
         if let Ok(mut requests) = self.harness.pending_permissions.lock() {
+            requests.retain(|_, value| value["turn_id"] != self.turn_id);
+        }
+        if let Ok(mut requests) = self.harness.pending_questions.lock() {
             requests.retain(|_, value| value["turn_id"] != self.turn_id);
         }
     }
@@ -172,6 +219,9 @@ impl TurnGuard<'_> {
             turns.remove(&self.turn_id);
         }
         if let Ok(mut requests) = self.harness.pending_permissions.lock() {
+            requests.retain(|_, value| value["turn_id"] != self.turn_id);
+        }
+        if let Ok(mut requests) = self.harness.pending_questions.lock() {
             requests.retain(|_, value| value["turn_id"] != self.turn_id);
         }
         self.armed = false;
@@ -230,9 +280,11 @@ impl Harness {
         Ok(Arc::new(Self {
             config, data_dir, workspace, client,
             process: Mutex::new(None), ready: AtomicBool::new(false),
+            credential_envs: RwLock::new(BTreeSet::new()),
             password: RwLock::new(String::new()), version: RwLock::new(None), last_error: RwLock::new(None),
             turn_gate: Mutex::new(()), active: StdMutex::new(HashMap::new()),
             pending_permissions: StdMutex::new(BTreeMap::new()),
+            pending_questions: StdMutex::new(BTreeMap::new()),
             sessions: StdMutex::new(sessions), routing: StdMutex::new(routing), sink,
         }))
     }
@@ -285,6 +337,19 @@ impl Harness {
             if !effective.is_object() { return Err("opencode_config: inline configuration must be an object".into()); }
             merge(&mut effective, overlay);
             let mut command = Command::new(&self.config.executable);
+            let routes = self.config.routes.clone();
+            let uses_deepseek_search = self.config.required_mcp.iter().any(|name| name == "deepseek-search");
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let _cancel_on_drop = CredentialReadGuard(Arc::clone(&cancelled));
+            // A rebuilt, locally signed App can require fresh Keychain consent.
+            // Bound the wait so an unattended system prompt cannot hold the
+            // lifecycle gate forever. A timed-out read never launches a child;
+            // its Zeroizing values are dropped when the OS request finishes.
+            let credentials = tokio::time::timeout(Duration::from_secs(60), tokio::task::spawn_blocking(move || {
+                load_credentials_with(&routes, uses_deepseek_search, &CREDENTIAL_READ_GATE, &cancelled, secrets::load)
+            })).await.map_err(|_| "api_key_keychain_authorization_timeout: complete the macOS Keychain prompt, then retry startup")?
+                .map_err(|_| "api_key_keychain_task_failed")??;
+            for (account, key) in &credentials.0 { command.env(account, key.as_str()); }
             command.args(["serve", "--hostname", host, "--port", &port.to_string()])
                 .current_dir(&self.workspace)
                 .env("OPENCODE_PASSWORD", password)
@@ -306,6 +371,9 @@ impl Harness {
             let child = command.spawn().map_err(|_| {
                 "opencode_process: cannot launch OpenCode; install v2.2.5+ or configure an absolute executable path"
             })?;
+            *self.credential_envs.write().map_err(|_| "opencode_state: credential lock")? = credentials.1;
+            drop(command);
+            drop(credentials.0);
             let group = child.id();
             *process = Some(ManagedProcess { child, group });
         }
@@ -366,13 +434,25 @@ impl Harness {
         let health = if running { self.info().await } else { Err("not started".into()) };
         let routing = self.routing.lock().ok().map(|r| r.clone()).unwrap_or_default();
         let now = now_ms();
+        let configured_routes = self.config.routes.clone();
+        let key_status = tokio::task::spawn_blocking(move || configured_routes.iter().filter_map(|route| {
+            route.api_key_env.as_ref().map(|account| (account.clone(), secrets::exists(account)))
+        }).collect::<BTreeMap<_, _>>()).await.unwrap_or_default();
         let routes = self.config.routes.iter().map(|route| {
             let state = routing.routes.get(&route.id);
+            let saved = route.api_key_env.as_ref().and_then(|key| key_status.get(key));
+            let keychain_saved = saved.is_some_and(|result| matches!(result, Ok(true)));
+            let environment_present = route.api_key_env.as_ref().is_some_and(|key| secrets::environment_present(key));
             json!({
                 "id":route.id,"label":route.label,"enabled":route.enabled,
                 "provider_id":route.provider_id,"model_id":route.model_id,
                 "credential_env":route.api_key_env,
-                "credential_env_present":route.api_key_env.as_ref().map(|key| std::env::var(key).is_ok_and(|s| !s.is_empty())),
+                "credential_env_present":route.api_key_env.as_ref().map(|_| environment_present),
+                "credential_present":keychain_saved || environment_present,
+                "keychain_saved":keychain_saved,
+                "credential_source":if keychain_saved {"keychain"} else if environment_present {"environment"} else {"none"},
+                "credential_error":saved.and_then(|result| result.as_ref().err()),
+                "credential_editable":cfg!(target_os = "macos") && self.config.mode == "managed" && route.base_url.is_some() && route.api_key_env.is_some(),
                 "inherited_provider":route.base_url.is_none(),
                 "last_failure":state.map(|s| s.last_failure),
                 "retry_at_ms":state.map(|s| s.retry_at_ms),
@@ -403,6 +483,12 @@ impl Harness {
             "retained_conversations":self.sessions.lock().map(|m| m.conversations.len()).unwrap_or(0),
             "pending_permissions":self.pending_permissions.lock().map(|m| m.len()).unwrap_or(0)
         })
+    }
+
+    pub fn api_key_account(&self, route_id: &str) -> Result<String, String> {
+        if self.config.mode != "managed" { return Err("api_key_attach_mode: configure credentials in the external OpenCode service".into()); }
+        self.config.routes.iter().find(|route| route.id == route_id && route.base_url.is_some())
+            .and_then(|route| route.api_key_env.clone()).ok_or_else(|| "api_key_route_not_configurable".into())
     }
 
     pub async fn run(&self, request: TurnRequest) -> Result<HarnessReply, String> {
@@ -475,6 +561,35 @@ impl Harness {
         Ok(json!(pending.values().cloned().collect::<Vec<_>>()))
     }
 
+    pub async fn questions(&self) -> Result<Value, String> {
+        let pending = self.pending_questions.lock().map_err(|_| "opencode_state: question lock")?;
+        Ok(json!(pending.values().cloned().collect::<Vec<_>>()))
+    }
+
+    pub async fn reply_question(&self, session_id: &str, form_id: &str, answer: Option<Value>) -> Result<(), String> {
+        checked_id(session_id, "ses")?;
+        checked_id(form_id, "frm_")?;
+        let pending = self.pending_questions.lock().map_err(|_| "opencode_state: question lock")?
+            .get(form_id).cloned().ok_or("question_expired")?;
+        if pending["session_id"].as_str() != Some(session_id) { return Err("question_mismatch".into()); }
+        let turn_id = pending["turn_id"].as_str().ok_or("question_mismatch")?;
+        let active = self.active.lock().map_err(|_| "opencode_state: active lock")?
+            .get(turn_id).cloned().ok_or("question_expired")?;
+        if *active.cancel.borrow() { return Err("question_expired".into()); }
+        let path = format!("/api/session/{session_id}/form/{form_id}");
+        if let Some(answer) = answer {
+            if !turn::valid_question_answer(&pending["fields"], &answer) { return Err("question_invalid_answer".into()); }
+            self.api()?.json(Method::POST, &format!("{path}/reply"), Some(&json!({"answer":answer}))).await
+                .map_err(|error| error.public_message())?;
+        } else {
+            self.api()?.json(Method::DELETE, &format!("{path}?message=User%20chose%20not%20to%20answer"), None).await
+                .map_err(|error| error.public_message())?;
+        }
+        self.pending_questions.lock().map_err(|_| "opencode_state: question lock")?.remove(form_id);
+        self.emit(json!({"kind":"harness_question_replied","turn_id":turn_id,"form_id":form_id}));
+        Ok(())
+    }
+
     /// Called only from the local parent console. A child utterance, face or
     /// voice match is never a permission credential. No persistent `always`.
     pub async fn reply_permission(&self, session_id: &str, request_id: &str, allow: bool) -> Result<(), String> {
@@ -490,8 +605,8 @@ impl Harness {
             .get(turn_id).cloned().ok_or("permission_expired: turn has ended")?;
         if *active.cancel.borrow() { return Err("permission_expired: turn was cancelled".into()); }
         let action = pending["action"].as_str().unwrap_or("");
-        if allow && !self.config.allowed_mcp_action(action) {
-            return Err("permission_denied: only configured browser/search MCP actions can be approved here".into());
+        if allow && !self.config.allowed_approval_action(action) {
+            return Err("permission_denied: this action is not enabled in the console".into());
         }
         self.api()?.json(Method::POST, &format!("/api/session/{session_id}/permission/{request_id}/reply"),
             Some(&json!({"decision":if allow { "once" } else { "reject" }}))).await
@@ -665,4 +780,72 @@ fn merge(target: &mut Value, overlay: Value) {
 
 pub(super) fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64
+}
+
+#[cfg(test)]
+mod credential_read_tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    #[test]
+    fn cancelled_read_does_not_request_the_next_key() {
+        let routes = HarnessConfig::default().routes;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let gate = StdMutex::new(());
+            let mut requests = 0;
+            let result = load_credentials_with(&routes, true, &gate, &worker_cancelled, |_account| {
+                requests += 1;
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(Some(zeroize::Zeroizing::new("test-key".to_owned())))
+            });
+            (result, requests)
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        cancelled.store(true, Ordering::Release);
+        release_tx.send(()).unwrap();
+        drop(release_tx);
+        let (result, requests) = worker.join().unwrap();
+        assert!(result.is_err());
+        assert_eq!(requests, 1);
+    }
+
+    #[test]
+    fn cancelled_waiter_does_not_start_a_keychain_request() {
+        let gate = Arc::new(StdMutex::new(()));
+        let held = gate.lock().unwrap();
+        let worker_gate = Arc::clone(&gate);
+        let worker = std::thread::spawn(move || {
+            let cancelled = AtomicBool::new(true);
+            let mut requests = 0;
+            let result = load_credentials_with(&HarnessConfig::default().routes, true, &worker_gate, &cancelled, |_account| {
+                requests += 1;
+                Ok(None)
+            });
+            (result, requests)
+        });
+        drop(held);
+        let (result, requests) = worker.join().unwrap();
+        assert!(result.is_err());
+        assert_eq!(requests, 0);
+    }
+
+    #[test]
+    fn search_can_use_the_deepseek_key_when_its_model_route_is_disabled() {
+        let mut routes = HarnessConfig::default().routes;
+        for route in &mut routes { route.enabled = false; }
+        let gate = StdMutex::new(());
+        let cancelled = AtomicBool::new(false);
+        let mut requested = Vec::new();
+        let (saved, _) = load_credentials_with(&routes, true, &gate, &cancelled, |account| {
+            requested.push(account.to_owned());
+            Ok(Some(zeroize::Zeroizing::new("test-key".to_owned())))
+        }).unwrap();
+        assert_eq!(requested, ["DEEPSEEK_API_KEY"]);
+        assert!(saved.contains_key("DEEPSEEK_API_KEY"));
+    }
 }

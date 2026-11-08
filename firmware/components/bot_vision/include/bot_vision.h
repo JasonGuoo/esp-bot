@@ -40,6 +40,9 @@ typedef enum {
     BOT_VISION_TIME_DEQUEUE_ESTIMATE,
 } bot_vision_time_source_t;
 
+typedef enum { BOT_VISION_RGB565_LE, BOT_VISION_RGB565_BE, BOT_VISION_RGB888,
+               BOT_VISION_UYVY, BOT_VISION_YUYV } bot_vision_pixels_t;
+
 typedef struct {
     bot_vision_state_t state;
     bot_vision_frame_quality_t quality;
@@ -64,6 +67,9 @@ typedef struct {
     uint16_t width;
     uint16_t height;
     uint8_t mean_luma;            /* coarse image darkness gate, never identity */
+    uint8_t faces_detected;       /* latest usable frame; zero when unavailable */
+    uint8_t model_faces;          /* two-stage model output before adapter checks */
+    uint8_t rejected_faces;       /* malformed model results on this frame */
 } bot_vision_status_t;
 
 typedef struct {
@@ -81,10 +87,17 @@ typedef struct {
     void (*on_snapshot)(void *context, const vatt_snapshot_t *snapshot);
     /** Status callback precedes a corresponding snapshot callback. */
     void (*on_status)(void *context, const bot_vision_status_t *status);
+    /** Optional explicit development preview. Called only while capture was
+     * authorized; pixels are the owned inference input. The callback
+     * must consume/copy before returning and must never retain this pointer. */
+    void (*on_preview)(void *context, const void *pixels, uint16_t width, uint16_t height,
+                       bot_vision_pixels_t format, uint32_t captured_ms,
+                       const vatt_observation_t *observations, size_t count);
     void *context;
     const char *device_path;      /* copied at start; default /dev/video2 */
     bool start_enabled;
-    bool rotate_180;              /* true for stock OV3660 installation */
+    bool rotate_180;              /* fixed mounting setting, not IMU orientation */
+    uint8_t sensor_orientation;   /* bit 0 horizontal mirror, bit 1 vertical flip */
     bool calibration_valid;       /* false until actual board orientation checked */
     uint16_t max_frame_width;
     uint16_t max_frame_height;
@@ -108,6 +121,8 @@ esp_err_t bot_vision_start(const bot_vision_config_t *config, bot_vision_t **out
  * BSP XCLK remains initialized; this does not claim camera rail power-off.
  * Pause takes effect after any already-running synchronous model invocation. */
 esp_err_t bot_vision_set_enabled(bot_vision_t *vision, bool enabled);
+/** Request official sensor flips. Stream and old face tracks restart on change. */
+esp_err_t bot_vision_set_sensor_orientation(bot_vision_t *vision, uint8_t orientation);
 /** Request shutdown and wait up to timeout_ms. On timeout, keep the handle and
  * retry stop later; never free resources while the worker is using them.
  * ESP_OK destroys the handle. Serialize stop with all other lifecycle/status

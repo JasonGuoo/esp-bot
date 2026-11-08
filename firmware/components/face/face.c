@@ -6,6 +6,7 @@
 #include "face.h"
 #include "face_renderer.h"
 #include "face_settings.h"
+#include "gaze_smoothing.h"
 #include "fonts/xiaodai_font.h"
 
 #include <stdint.h>
@@ -23,7 +24,7 @@ struct face_view {
     const face_theme_t *theme;
     face_render_state_t state;
     lv_timer_t *timer;
-    uint32_t blink_start, blink_end, gear_expire;
+    uint32_t blink_start, gear_expire;
     int last_layout_w, last_layout_h;
     int requested_gaze_x, requested_gaze_y;
     face_theme_applied_cb_t on_applied;
@@ -32,6 +33,7 @@ struct face_view {
     void *event_context;
     bool settings_was_open;
     bool animation_active;
+    bool blink_anim_running;
 };
 
 static void emit(face_view_t *f, face_event_t event) {
@@ -100,6 +102,53 @@ static void draw_face(face_view_t *f) {
     }
 }
 
+/* Use LVGL's animation engine for easing; the EVE renderer interpolates its
+ * existing eye contours and can continue smoothly if a new pose interrupts. */
+static void expression_anim_step(void *context, int32_t value) {
+    face_view_t *f = context;
+    f->state.transition_progress = (uint16_t)clamp(value, 0, 256);
+    f->state.transition_active = value < 256;
+    draw_face(f);
+}
+
+static void blink_anim_step(void *context, int32_t value) {
+    face_view_t *f = context;
+    f->state.blink_progress = (uint16_t)clamp(value, 0, 256);
+    f->state.blinking = value > 0;
+    draw_face(f);
+}
+
+static void blink_anim_completed(lv_anim_t *animation) {
+    face_view_t *f = animation->var;
+    const bool redraw = f->state.blinking || f->state.blink_progress != 0;
+    f->blink_anim_running = false;
+    f->state.blinking = false;
+    f->state.blink_progress = 0;
+    if (redraw) draw_face(f);
+}
+
+static bool expression_can_blink(face_expression_t expression) {
+    return expression != FACE_EX_SLEEPING && expression != FACE_EX_SLEEPY &&
+           expression != FACE_EX_DROWSY && expression != FACE_EX_BLINK &&
+           expression != FACE_EX_WINK;
+}
+
+static void start_blink(face_view_t *f, uint32_t now) {
+    lv_anim_t animation;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, f);
+    lv_anim_set_values(&animation, 0, 256);
+    lv_anim_set_duration(&animation, f->theme->blink_duration_ms * 2 / 5);
+    lv_anim_set_reverse_duration(&animation, f->theme->blink_duration_ms * 3 / 5);
+    lv_anim_set_reverse_delay(&animation, 20);
+    lv_anim_set_path_cb(&animation, lv_anim_path_ease_in_out);
+    lv_anim_set_exec_cb(&animation, blink_anim_step);
+    lv_anim_set_completed_cb(&animation, blink_anim_completed);
+    f->blink_start = now;
+    f->blink_anim_running = true;
+    if (!lv_anim_start(&animation)) f->blink_anim_running = false;
+}
+
 static bool applied_from_settings(const char *id, void *context) {
     face_view_t *f = context;
     if (!f || !face_set_theme(f, id)) return false;
@@ -134,33 +183,21 @@ static void animation_tick(lv_timer_t *timer) {
     bool redraw = false;
     sync_settings_event(f);
 
-    const bool auto_blink = f->state.expression == FACE_EX_IDLE ||
-                            f->state.expression == FACE_EX_LISTENING ||
-                            f->state.expression == FACE_EX_BORED ||
-                            f->state.expression == FACE_EX_SPEAKING;
-    if (auto_blink && !f->state.blinking &&
+    const bool auto_blink = expression_can_blink(f->state.expression);
+    if (auto_blink && !f->blink_anim_running &&
         (uint32_t)(now - f->blink_start) >= f->theme->blink_interval_ms) {
-        f->state.blinking = true;
-        f->blink_end = now + f->theme->blink_duration_ms;
-        f->blink_start = now;
-        redraw = true;
-    }
-    if (f->state.blinking && (int32_t)(now - f->blink_end) >= 0) {
-        f->state.blinking = false;
-        redraw = true;
+        start_blink(f, now);
     }
 
     const int factor = clamp(f->theme->gaze_smoothing, 1, 20);
     int dx = f->requested_gaze_x - f->state.gaze_x;
     int dy = f->requested_gaze_y - f->state.gaze_y;
     if (dx) {
-        f->state.gaze_x += (dx > 0 ? (dx + factor - 1) / factor :
-                           (dx - factor + 1) / factor);
+        f->state.gaze_x = face_gaze_approach(f->state.gaze_x, f->requested_gaze_x, factor);
         redraw = true;
     }
     if (dy) {
-        f->state.gaze_y += (dy > 0 ? (dy + factor - 1) / factor :
-                           (dy - factor + 1) / factor);
+        f->state.gaze_y = face_gaze_approach(f->state.gaze_y, f->requested_gaze_y, factor);
         redraw = true;
     }
     if (redraw) draw_face(f);
@@ -256,6 +293,8 @@ face_view_t *face_create(lv_obj_t *parent) {
 
 void face_destroy(face_view_t *f) {
     if (!f) return;
+    lv_anim_delete(f, expression_anim_step);
+    lv_anim_delete(f, blink_anim_step);
     if (f->timer) lv_timer_delete(f->timer);
     if (f->settings) face_settings_destroy(f->settings);
     if (f->eyes) face_renderer_destroy(f->eyes);
@@ -288,10 +327,39 @@ bool face_set_expression(face_view_t *f, const char *name) {
     for (size_t i = 0; i < FACE_EX_COUNT; i++) {
         if (strcmp(k_face_expression_ids[i], name) == 0) {
             if (f->state.expression == (face_expression_t)i) return true;
+            lv_anim_delete(f, expression_anim_step);
             f->state.expression = (face_expression_t)i;
-            f->state.blinking = false;
-            f->blink_start = lv_tick_get();
+            if (!expression_can_blink(f->state.expression)) {
+                lv_anim_delete(f, blink_anim_step);
+                f->blink_anim_running = false;
+                f->state.blinking = false;
+                f->state.blink_progress = 0;
+            }
+            f->state.transition_progress = 0;
+            f->state.transition_active = f->animation_active &&
+                strcmp(face_renderer_id(f->eyes), "eve") == 0;
+            /* Capture the renderer's current intermediate contour before the
+             * LVGL animation advances, including interrupted transitions. */
             draw_face(f);
+            if (f->state.transition_active) {
+                lv_anim_t animation;
+                lv_anim_init(&animation);
+                lv_anim_set_var(&animation, f);
+                lv_anim_set_values(&animation, 0, 256);
+                const bool quick = f->state.expression == FACE_EX_SURPRISED ||
+                                   f->state.expression == FACE_EX_DISCOVERY ||
+                                   f->state.expression == FACE_EX_WINK;
+                const bool sleepy = f->state.expression == FACE_EX_DROWSY ||
+                                    f->state.expression == FACE_EX_SLEEPING ||
+                                    f->state.expression == FACE_EX_SLEEPY;
+                lv_anim_set_duration(&animation, sleepy ? 420 : quick ? 180 : 280);
+                lv_anim_set_path_cb(&animation, lv_anim_path_ease_in_out);
+                lv_anim_set_exec_cb(&animation, expression_anim_step);
+                if (!lv_anim_start(&animation)) {
+                    f->state.transition_active = false;
+                    draw_face(f);
+                }
+            }
             return true;
         }
     }
@@ -302,6 +370,12 @@ void face_set_gaze(face_view_t *f, int x, int y) {
     if (!f) return;
     f->requested_gaze_x = clamp(x, -100, 100);
     f->requested_gaze_y = clamp(y, -100, 100);
+}
+
+void face_get_gaze(const face_view_t *f, int *x, int *y) {
+    if (!f) return;
+    if (x) *x = f->state.gaze_x;
+    if (y) *y = f->state.gaze_y;
 }
 
 void face_set_subtitle(face_view_t *f, const char *text) {
@@ -351,7 +425,17 @@ void face_set_animation_active(face_view_t *f, bool active) {
         f->blink_start = lv_tick_get();
         lv_timer_resume(f->timer);
         lv_timer_reset(f->timer);
-    } else lv_timer_pause(f->timer);
+        draw_face(f);
+    } else {
+        lv_anim_delete(f, expression_anim_step);
+        lv_anim_delete(f, blink_anim_step);
+        f->state.transition_active = false;
+        f->state.transition_progress = 256;
+        f->state.blinking = false;
+        f->state.blink_progress = 0;
+        f->blink_anim_running = false;
+        lv_timer_pause(f->timer);
+    }
 }
 
 const char *face_theme_id(const face_view_t *f) {

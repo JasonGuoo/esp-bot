@@ -38,6 +38,10 @@ typedef struct {
     bool audio_session_requested; /* local post-wake permission, never opens a second mic */
     bool audio_uplink_permitted;  /* session + current secure link + capture availability */
     bool visual_tracking_permitted;
+    bool near_face;              /* large nearby face, not a gaze/consent claim */
+    uint16_t near_face_area_permille; /* largest fresh face box / full image */
+    bool sound_reaction, sound_direction_valid;
+    float sound_azimuth_deg;     /* two-microphone direction; no elevation or identity */
     bool link_connected, link_authenticated, link_encrypted;
     bool audio_available, camera_available;
     bool display_awake, display_sleep_supported, display_full_blackout_verified;
@@ -52,7 +56,7 @@ typedef struct {
 } bot_runtime_snapshot_t;
 
 typedef struct {
-    uint32_t idle_to_bored_ms, idle_to_drowsy_ms, idle_to_sleep_ms;
+    uint32_t daytime_awake_ms, daytime_drowsy_ms;
     uint32_t waking_ms;
     /* Maximum time between meaningful local conversation transitions, including
      * an ongoing utterance/playback. This is a hard progress bound, not silence
@@ -60,7 +64,6 @@ typedef struct {
     uint32_t session_timeout_ms, wake_debounce_ms;
     uint32_t event_max_age_ms, command_max_age_ms;
     uint16_t max_events_per_step, max_commands_per_step;
-    bool sleep_display;
     bool allow_audio_uplink;
     bool allow_barge_in;
     attention_manager_config_t focus;

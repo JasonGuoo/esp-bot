@@ -5,7 +5,10 @@ use serde::de::DeserializeOwned;
 impl BrainHost {
     pub async fn dispatch(&self, method: &str, payload: Value) -> Result<Value, String> {
         if method == "service.status" {
-            return Ok(match self.get() {Ok(brain)=>brain.status().await,Err(error)=>json!({"ready":false,"error":error,"config_path":self.config_dir.join("brain.json")})});
+            let mut status = match self.get() {Ok(brain)=>brain.status().await,Err(error)=>json!({"ready":false,"error":error,"config_path":self.config_dir.join("brain.json")})};
+            status["device_diagnostics"] = self.diagnostics.as_ref().map(|snapshot| snapshot())
+                .unwrap_or_else(|| json!({"running":false,"bots":[],"error":"diagnostics_not_built"}));
+            return Ok(status);
         }
         if method == "config.read" {
             return std::fs::read(self.config_dir.join("brain.json")).map_err(|e|e.to_string())
@@ -17,6 +20,29 @@ impl BrainHost {
             return Ok(json!({"saved":true,"reload_required":true}));
         }
         if method == "service.reload" { return self.reload().await; }
+        if method == "api_key.save" || method == "api_key.delete" {
+            let _lock = self.lifecycle.lock().await;
+            let brain = self.get()?;
+            let route_id = required(&payload, "route_id")?.to_owned();
+            let account = brain.harness.api_key_account(&route_id)?;
+            let key = if method == "api_key.save" {
+                let mut payload = payload;
+                let key = payload.get_mut("api_key").ok_or("api_key_required")?.take();
+                let Value::String(key) = key else { return Err("api_key_required".into()); };
+                let key = zeroize::Zeroizing::new(key);
+                crate::harness::secrets::validate_key(key.trim())?;
+                Some(key)
+            } else { None };
+            // Stop before mutation so the old child cannot keep using an outdated key.
+            // The lifecycle gate serializes this with start/reload/shutdown.
+            brain.stop().await?;
+            tokio::task::spawn_blocking(move || match key {
+                Some(key) => crate::harness::secrets::save(&account, key.trim()),
+                None => crate::harness::secrets::delete(&account),
+            }).await.map_err(|_| "api_key_keychain_task_failed")??;
+            brain.harness.reset_route(&route_id).await?;
+            return Ok(json!({"saved":method == "api_key.save","restart_required":true}));
+        }
         if method == "service.start" || method == "service.stop" {
             let _lock = self.lifecycle.lock().await;
             let brain = self.get()?;
@@ -44,6 +70,12 @@ impl BrainHost {
                 brain.identify_media(kind,media).await
             },
             "harness.permissions" => brain.harness.permissions().await,
+            "harness.questions" => brain.harness.questions().await,
+            "harness.question.reply" => {
+                let answer = payload.get("answer").cloned().filter(|value| !value.is_null());
+                brain.harness.reply_question(required(&payload,"session_id")?,required(&payload,"form_id")?,answer).await?;
+                Ok(json!({"replied":true}))
+            },
             "harness.permission.reply" => {
                 brain.harness.reply_permission(required(&payload,"session_id")?,required(&payload,"request_id")?,payload.get("allow").and_then(Value::as_bool).unwrap_or(false)).await?;
                 Ok(json!({"replied":true}))

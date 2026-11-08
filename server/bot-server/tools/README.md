@@ -13,12 +13,16 @@
 ## 官方 browser
 
 复用 [Microsoft Playwright MCP](https://github.com/microsoft/playwright-mcp/tree/v0.0.84)，
-固定当前查阅版本 **0.0.84**。示例用 `--isolated --headless --no-webmcp`：
-浏览器状态保存在内存，不借用日常浏览器登录，也不自动导入页面注册的工具。
-浏览器程序和 Node 环境需要在 Mac 上安装；`npx` 首次运行需要下载包。
-这次没有安装或启动它。
+示例固定版本 **0.0.84** 并使用 `--cdp-endpoint=chrome --no-webmcp`，连接用户选择的
+当前 Chrome，会共用已登录会话。Chrome 需要用户先在
+`chrome://inspect/#remote-debugging` 开启本实例的远程调试，并在连接请求时亲自批准。
+小呆每次读取页面或执行浏览器操作均需在控制台逐次批准。
 
-隔离 profile 不是操作系统沙箱。网站仍可能重定向、下载、提交表单；
+本机当前复用已缓存的 Microsoft Playwright MCP **0.0.83**，复制到项目的
+`runtime/tooling/`；配置位于 `runtime/opencode-local-tools.json`，不含密钥。
+它依赖本机 Node 和 Chrome。若项目运行目录被清理，需要重新准备依赖及配置。
+
+当前 Chrome 中的页面和登录状态可能包含敏感信息。网站仍可能重定向、下载、提交表单；
 这些能力由 OpenCode 小呆 agent 的动作权限与家长一次性批准管理。
 不要添加 `--no-sandbox`，不要把文件系统 / shell 权限放给孩子侧 agent。
 官方 profile 说明：[Playwright user profile](https://playwright.dev/mcp/configuration/user-profile)。
@@ -36,8 +40,10 @@ python3.11 -m venv .venv-tools
 .venv-tools/bin/python -m pip install -r tools/requirements.txt
 ```
 
-启动 bot-server 的进程环境中设置 `DEEPSEEK_SEARCH_API_KEY`，也可以复用
-`DEEPSEEK_API_KEY`。适配器不接受模型指定 API 地址，不跟随 API 重定向，
+托管模式启动时，服务会把控制台保存的 DeepSeek Key 作为 `DEEPSEEK_API_KEY`
+传给 OpenCode 及其本地工具；DeepSeek 模型路线关闭时也可用于搜索。
+适配器也接受显式的 `DEEPSEEK_SEARCH_API_KEY`。密钥不写入 MCP 配置。
+适配器不接受模型指定 API 地址，不跟随 API 重定向，
 不传 Cookie、不读取家庭数据库、不自动重试付费请求。查询和目标 URL 会发给
 DeepSeek，因此系统提示要求排除孩子姓名、家庭记忆和身份信息。
 
@@ -55,4 +61,4 @@ DeepSeek，因此系统提示要求排除孩子姓名、家庭记忆和身份信
 [Fetch 请求规范](https://api-docs.deepseek.com/api/fetch/)、
 [MCP v2 官方最小示例](https://py.sdk.modelcontextprotocol.io/)。
 
-**源码已写，未安装依赖、运行工具、发起付费 API 请求或测试。**
+本机检查和授权状态见 [Mac OpenCode 说明](../../../docs/mac-opencode.md)。

@@ -70,6 +70,10 @@ static void eye(outline_t *r, int i, int cx, int cy, int w, int h,
             w + 4, h / 2 + stroke);
     } else {
         const int radius = clamp(stroke / 2, 2, 12);
+        const int max_dx = (w - 2 * stroke) / 2 - radius;
+        const int max_dy = (h - 2 * stroke) / 2 - radius;
+        dx = clamp(dx, -clamp(max_dx, 0, w), clamp(max_dx, 0, w));
+        dy = clamp(dy, -clamp(max_dy, 0, h), clamp(max_dy, 0, h));
         pos(r->pupil[i], cx + dx - radius, cy + dy - radius,
             radius * 2, radius * 2);
     }
@@ -114,12 +118,10 @@ static void render(void *instance, const face_theme_t *theme,
             break;
         default: break;
     }
-    if (state->blinking &&
-        (state->expression == FACE_EX_IDLE || state->expression == FACE_EX_LISTENING ||
-         state->expression == FACE_EX_BORED || state->expression == FACE_EX_SPEAKING)) {
+    if (state->blinking) {
         left = right = MODE_SLIT;
     }
-    const int dx = state->gaze_x * ew / 630;
+    const int dx = state->gaze_x * ew / 400;
     const int dy = state->gaze_y * eh / 630;
     eye(r, 0, cx1, cy, lw, lh, left, dx, dy, stroke);
     eye(r, 1, cx2, ry, rw, rh, right, dx, dy, stroke);

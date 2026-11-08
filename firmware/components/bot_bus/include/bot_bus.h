@@ -46,6 +46,7 @@ typedef enum {
     BOT_EVENT_NIGHT_POLICY,
     BOT_EVENT_SESSION_END,
     BOT_EVENT_FAULT,
+    BOT_EVENT_SOUND_ACTIVITY,
     BOT_EVENT_COUNT
 } bot_event_kind_t;
 
@@ -74,6 +75,7 @@ typedef struct {
         struct { bot_wake_status_t status; } wake_status;
         struct { bool clock_valid; bool night; } night;
         struct { uint32_t code; } fault;
+        struct { bool direction_valid; float azimuth_deg, quality; } sound;
     } data;
 } bot_event_t;
 

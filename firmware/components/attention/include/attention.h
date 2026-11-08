@@ -71,6 +71,10 @@ attention_output_t attention_controller_step(attention_controller_t *controller,
                                              const attention_pose_t *measured_head,
                                              uint32_t now_ms,
                                              bool has_head_motors);
+/* Official linear two-mic azimuth: 0 = mic 0, 90 = front, 180 = mic 1.
+ * Converts to the current S31 board's screen-view axis; measured left/right
+ * are inverted relative to that raw convention. No motor or elevation output. */
+int attention_sound_eye_x(float azimuth_deg);
 #ifdef __cplusplus
 }
 #endif

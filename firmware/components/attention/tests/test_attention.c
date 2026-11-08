@@ -1,5 +1,6 @@
 #include "attention.h"
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 
 static attention_observation_t sight(uint32_t ms, float yaw, float pitch, bool looking) {
@@ -99,6 +100,12 @@ static void test_unreachable_or_uncertain_person(void) {
     assert(!out.person_looking_at_robot && !out.mutual_eye_contact);
 }
 int main(void) {
+    assert(attention_sound_eye_x(0) > 0);
+    assert(attention_sound_eye_x(90) == 0);
+    assert(attention_sound_eye_x(180) < 0);
+    assert(attention_sound_eye_x(115) < 0); /* measured physical screen-left */
+    assert(attention_sound_eye_x(66) > 0);  /* measured physical screen-right */
+    assert(attention_sound_eye_x(NAN) == 0);
     test_presence_is_not_contact();
     test_contact_requires_alignment_and_dwell();
     test_lost_target_and_no_head_motors();

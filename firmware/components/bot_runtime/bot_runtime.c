@@ -1,4 +1,7 @@
 #include "bot_runtime.h"
+#include "idle_expression.h"
+#include "near_face.h"
+#include "passive_cycle.h"
 #include "sdkconfig.h"
 #include <math.h>
 #include <stdlib.h>
@@ -13,8 +16,12 @@ struct bot_runtime {
     attention_manager_t attention;
     vatt_snapshot_t vision;
     bool has_vision, has_published, has_wake, wake_barrier_valid;
-    bool revoking, identity_exhausted, passive_sleep_latched;
+    bool revoking, identity_exhausted;
+    bot_passive_cycle_t passive_cycle;
+    bot_idle_expression_t idle_expression;
+    bot_near_face_t near_face;
     uint32_t waking_since_ms, last_wake_ms, wake_barrier_ms, next_session_id;
+    uint32_t last_sound_ms;
     uint32_t event_times[BOT_EVENT_COUNT];
     bool event_seen[BOT_EVENT_COUNT];
 };
@@ -70,10 +77,13 @@ static void derive_permissions(bot_runtime_t *runtime)
     bot_runtime_snapshot_t *state = &runtime->state;
     bool engaged = is_active(runtime) && !state->settings_open && !state->critical_fault &&
                    state->token.session_id != 0;
-    state->display_awake_requested = state->settings_open ||
-        (state->behavior != BOT_BEHAVIOR_NIGHT_DARK &&
-         (state->behavior != BOT_BEHAVIOR_SLEEPING || !runtime->config.sleep_display));
-    state->camera_requested = engaged;
+    state->display_awake_requested = state->settings_open || state->behavior != BOT_BEHAVIOR_NIGHT_DARK;
+    /* Local daytime perception supports the requested close-face expression.
+     * Face presence never creates a session or enables audio/network uplink. */
+    const bool passive_camera = !is_active(runtime) && !state->settings_open &&
+        !state->critical_fault && (state->behavior == BOT_BEHAVIOR_IDLE ||
+        state->behavior == BOT_BEHAVIOR_BORED || state->behavior == BOT_BEHAVIOR_DROWSY);
+    state->camera_requested = engaged || passive_camera;
     state->audio_session_requested = engaged && !runtime->revoking;
     state->audio_uplink_permitted = state->audio_session_requested && runtime->config.allow_audio_uplink &&
                                    state->audio_available && secure_link(runtime);
@@ -120,17 +130,11 @@ static bool advance_epoch(bot_runtime_t *runtime)
 static void set_passive(bot_runtime_t *runtime, uint32_t now_ms)
 {
     bot_runtime_snapshot_t *state = &runtime->state;
-    bot_behavior_t next = BOT_BEHAVIOR_IDLE;
-    if (state->clock_valid && state->night_policy) {
-        next = BOT_BEHAVIOR_NIGHT_DARK;
-    } else {
-        int32_t signed_elapsed = (int32_t)(now_ms - state->last_interaction_ms);
-        uint32_t elapsed = signed_elapsed >= 0 ? (uint32_t)signed_elapsed : 0;
-        if (elapsed >= runtime->config.idle_to_sleep_ms) runtime->passive_sleep_latched = true;
-        if (runtime->passive_sleep_latched) next = BOT_BEHAVIOR_SLEEPING;
-        else if (elapsed >= runtime->config.idle_to_drowsy_ms) next = BOT_BEHAVIOR_DROWSY;
-        else if (elapsed >= runtime->config.idle_to_bored_ms) next = BOT_BEHAVIOR_BORED;
-    }
+    const bot_passive_phase_t phase = bot_passive_cycle_step(&runtime->passive_cycle, now_ms,
+        state->clock_valid && state->night_policy,
+        runtime->config.daytime_awake_ms, runtime->config.daytime_drowsy_ms);
+    bot_behavior_t next = phase == BOT_PASSIVE_NIGHT ? BOT_BEHAVIOR_NIGHT_DARK :
+                          phase == BOT_PASSIVE_DROWSY ? BOT_BEHAVIOR_DROWSY : BOT_BEHAVIOR_IDLE;
     if (state->behavior != next || state->conversation != BOT_CONVERSATION_NONE) {
         state->behavior = next;
         state->conversation = BOT_CONVERSATION_NONE;
@@ -162,7 +166,7 @@ static void end_session(bot_runtime_t *runtime, uint32_t now_ms, bool fault)
     runtime->state.utterance_active = false;
     runtime->state.playback_id = 0;
     runtime->state.last_interaction_ms = now_ms;
-    runtime->passive_sleep_latched = false;
+    bot_passive_cycle_reset(&runtime->passive_cycle, now_ms);
     runtime->state.caption[0] = '\0';
     runtime->wake_barrier_valid = true;
     runtime->wake_barrier_ms = now_ms;
@@ -209,7 +213,7 @@ static bool begin_session(bot_runtime_t *runtime, uint32_t now_ms)
     runtime->state.utterance_active = false;
     runtime->state.playback_id = 0;
     runtime->state.last_interaction_ms = now_ms;
-    runtime->passive_sleep_latched = false;
+    bot_passive_cycle_reset(&runtime->passive_cycle, now_ms);
     runtime->state.caption[0] = '\0';
     runtime->waking_since_ms = now_ms;
     /* A new authorization starts with a new visual focus as well. */
@@ -249,6 +253,7 @@ static bool source_allowed(const bot_event_t *event)
     case BOT_EVENT_PLAYBACK_DONE:
     case BOT_EVENT_PLAYBACK_FAILED:
     case BOT_EVENT_WAKE_STATUS:
+    case BOT_EVENT_SOUND_ACTIVITY:
         return event->source == BOT_SOURCE_AUDIO;
     case BOT_EVENT_AUDIO_HEALTH:
         return event->source == BOT_SOURCE_AUDIO || event->source == BOT_SOURCE_PLATFORM;
@@ -322,6 +327,23 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         return;
     }
     switch (event->kind) {
+    case BOT_EVENT_SOUND_ACTIVITY:
+        if (event->data.sound.direction_valid &&
+            (!isfinite(event->data.sound.azimuth_deg) || event->data.sound.azimuth_deg < 0 ||
+             event->data.sound.azimuth_deg > 180 || !isfinite(event->data.sound.quality) ||
+             event->data.sound.quality < 3 || event->data.sound.quality > 10)) {
+            state->rejected_events++;
+            break;
+        }
+        if (!stopped_this_step && !is_active(runtime) && !state->settings_open &&
+            !state->critical_fault && !(state->clock_valid && state->night_policy) &&
+            state->behavior != BOT_BEHAVIOR_NIGHT_DARK) {
+            state->sound_reaction = true;
+            state->sound_direction_valid = event->data.sound.direction_valid;
+            state->sound_azimuth_deg = event->data.sound.azimuth_deg;
+            runtime->last_sound_ms = event->observed_ms;
+        }
+        break;
     case BOT_EVENT_WAKE_DETECTED:
         if (stopped_this_step || !may_wake(runtime, event, now_ms) ||
             state->wake_status != BOT_WAKE_READY ||
@@ -352,7 +374,7 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
     case BOT_EVENT_SETTINGS_CLOSE:
         state->settings_open = false;
         state->last_interaction_ms = now_ms;
-        runtime->passive_sleep_latched = false;
+        bot_passive_cycle_reset(&runtime->passive_cycle, now_ms);
         runtime->wake_barrier_valid = true;
         runtime->wake_barrier_ms = now_ms;
         set_passive(runtime, now_ms);
@@ -384,7 +406,10 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         }
         state->conversation = BOT_CONVERSATION_LISTENING;
         state->utterance_active = true;
-        state->last_interaction_ms = now_ms;
+        /* Ambient sound without a usable media link is not conversation
+         * progress and must not hold an offline session open indefinitely. */
+        if (runtime->config.allow_audio_uplink && secure_link(runtime))
+            state->last_interaction_ms = now_ms;
         reset_expression(runtime);
         break;
     case BOT_EVENT_UTTERANCE_ENDED:
@@ -394,8 +419,11 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
             break;
         }
         state->utterance_active = false;
-        state->conversation = BOT_CONVERSATION_THINKING;
-        state->last_interaction_ms = now_ms;
+        /* Local VAD only indicates sound ended. The authenticated server must
+         * explicitly acknowledge processing before showing "thinking". */
+        state->conversation = BOT_CONVERSATION_LISTENING;
+        if (runtime->config.allow_audio_uplink && secure_link(runtime))
+            state->last_interaction_ms = now_ms;
         reset_expression(runtime);
         break;
     case BOT_EVENT_PLAYBACK_STARTED:
@@ -516,7 +544,7 @@ static bool known_expression(const char *name)
     static const char *const names[] = { "idle", "listening", "happy", "curious", "thinking",
         "surprised", "sleepy", "shy", "blink", "bored", "drowsy", "sleeping", "speaking",
         "gentle", "confused", "discovery", "laughing", "excited", "wink", "smug", "skeptical",
-        "determined", "annoyed", "worried" };
+        "determined", "annoyed", "worried", "sad", "affection", "relieved", "overjoyed" };
     if (!memchr(name, '\0', BOT_EXPRESSION_MAX_BYTES + 1)) return false;
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++)
         if (strcmp(names[i], name) == 0) return true;
@@ -579,20 +607,13 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
 bot_runtime_config_t bot_runtime_default_config(void)
 {
     return (bot_runtime_config_t){
-        .idle_to_bored_ms = CONFIG_BOT_RUNTIME_BORED_AFTER_MS,
-        .idle_to_drowsy_ms = CONFIG_BOT_RUNTIME_DROWSY_AFTER_MS,
-        .idle_to_sleep_ms = CONFIG_BOT_RUNTIME_SLEEP_AFTER_MS,
+        .daytime_awake_ms = CONFIG_BOT_RUNTIME_DAY_AWAKE_MS,
+        .daytime_drowsy_ms = CONFIG_BOT_RUNTIME_DAY_DROWSY_MS,
         .waking_ms = CONFIG_BOT_RUNTIME_WAKING_MS,
         .session_timeout_ms = CONFIG_BOT_RUNTIME_PROGRESS_TIMEOUT_MS,
         .wake_debounce_ms = CONFIG_BOT_RUNTIME_WAKE_DEBOUNCE_MS,
         .event_max_age_ms = 2000, .command_max_age_ms = 5000,
         .max_events_per_step = 32, .max_commands_per_step = 8,
-        .sleep_display =
-#ifdef CONFIG_BOT_RUNTIME_SLEEP_DISPLAY
-            true,
-#else
-            false,
-#endif
         .allow_audio_uplink = false, .allow_barge_in = false,
         .focus = attention_manager_default_config()
     };
@@ -600,10 +621,9 @@ bot_runtime_config_t bot_runtime_default_config(void)
 
 static bool valid_config(const bot_runtime_config_t *config)
 {
-    return config->idle_to_bored_ms > 0 &&
-        config->idle_to_bored_ms < config->idle_to_drowsy_ms &&
-        config->idle_to_drowsy_ms < config->idle_to_sleep_ms &&
-        config->idle_to_sleep_ms < INT32_MAX && config->waking_ms < INT32_MAX &&
+    return config->daytime_awake_ms > 0 && config->daytime_awake_ms < INT32_MAX &&
+        config->daytime_drowsy_ms > 0 && config->daytime_drowsy_ms < INT32_MAX &&
+        config->waking_ms < INT32_MAX &&
         config->session_timeout_ms > config->waking_ms && config->session_timeout_ms < INT32_MAX &&
         config->wake_debounce_ms < INT32_MAX && config->event_max_age_ms > 0 &&
         config->event_max_age_ms < INT32_MAX && config->command_max_age_ms > 0 &&
@@ -632,7 +652,9 @@ esp_err_t bot_runtime_create(bot_bus_t *bus, const bot_runtime_config_t *config,
     }
     runtime->state.token.epoch = 1;
     runtime->state.last_interaction_ms = now_ms;
+    bot_passive_cycle_reset(&runtime->passive_cycle, now_ms);
     runtime->state.wake_status = BOT_WAKE_MODEL_MISSING;
+    bot_idle_expression_init(&runtime->idle_expression, now_ms ^ 0xa3c59ac3U);
     runtime->state.behavior = BOT_BEHAVIOR_IDLE;
     reset_expression(runtime);
     derive_permissions(runtime);
@@ -676,7 +698,8 @@ void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
         publish_state(runtime);
     }
     stopped_this_step |= consume_signals(runtime, &now_ms);
-    if (!is_active(runtime)) {
+    derive_permissions(runtime);
+    if (!runtime->state.camera_requested) {
         /* Retire stopped-camera timestamps as well as pixel-free snapshots; an
          * old frame must not block publishing after a long sleep/timer wrap. */
         bot_bus_clear_vision(runtime->bus);
@@ -689,7 +712,7 @@ void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
     now_ms = read_now_ms(runtime, now_ms);
     derive_permissions(runtime);
     /* Frames predating the explicit wake cannot become this session's focus. */
-    const vatt_snapshot_t *vision = runtime->has_vision &&
+    const vatt_snapshot_t *vision = is_active(runtime) && runtime->has_vision &&
         (int32_t)(runtime->vision.timestamp_ms - runtime->waking_since_ms) >= 0 ?
         &runtime->vision : NULL;
     attention_manager_step(&runtime->attention, vision, now_ms, &runtime->state.focus);
@@ -717,6 +740,33 @@ void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
         set_passive(runtime, now_ms);
     }
     derive_permissions(runtime);
+    runtime->state.near_face = bot_near_face_step(&runtime->near_face,
+        runtime->has_vision && runtime->state.camera_available ? &runtime->vision : NULL, now_ms,
+        runtime->config.focus.observation_max_age_ms,
+        runtime->config.focus.min_face_confidence,
+        runtime->state.camera_requested && !runtime->state.settings_open && !runtime->state.critical_fault,
+        &runtime->state.near_face_area_permille);
+    if (is_active(runtime) || runtime->state.settings_open || runtime->state.critical_fault ||
+        runtime->state.behavior == BOT_BEHAVIOR_NIGHT_DARK ||
+        !within_age(now_ms, runtime->last_sound_ms, 1800)) {
+        runtime->state.sound_reaction = false;
+        runtime->state.sound_direction_valid = false;
+    }
+    const bool expressive_idle = runtime->state.behavior == BOT_BEHAVIOR_IDLE &&
+        !runtime->state.near_face && !runtime->state.settings_open && !runtime->state.critical_fault;
+    const char *idle_expression = bot_idle_expression_step(&runtime->idle_expression, now_ms, expressive_idle);
+    if (idle_expression) {
+        memcpy(runtime->state.expression, idle_expression, strlen(idle_expression) + 1);
+    } else if (runtime->state.behavior == BOT_BEHAVIOR_IDLE) {
+        /* A nearby face owns the visible smile; leave no stale idle pose behind. */
+        reset_expression(runtime);
+    }
+    if (runtime->state.sound_reaction && !runtime->state.near_face) {
+        memcpy(runtime->state.expression, "curious", sizeof("curious"));
+    } else if (runtime->state.behavior == BOT_BEHAVIOR_DROWSY &&
+               strcmp(runtime->state.expression, "curious") == 0) {
+        reset_expression(runtime);
+    }
     publish_state(runtime);
 }
 

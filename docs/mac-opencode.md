@@ -1,12 +1,12 @@
 # Mac OpenCode harness
 
-> 状态：源码与配置流程已写入，尚未编译、运行、调用模型或做硬件联调。遵照本轮要求，没有新增或执行测试，也没有运行 lint / CI。本文中的安装和启动命令是交付后的操作说明，本次没有执行。
+> 2026-11-06 后续本机状态：Rust release 与 Mac App 打包通过，官方 v2.2.5 已校验安装并从真实控制台完成启动、健康检查和停止。控制台已接入 macOS 钥匙串。没有请求真实模型或进行硬件联调，也未使用 CI。
 
 本模块让 Mac 的 `bot-server` 管理官方 OpenCode 服务，把已获授权的一轮文字输入交给模型和 MCP 工具，再把结果交回宿主验证。声音转写、说话人 / 人脸匹配、家长确认的记忆、语音合成与设备连接属于相邻模块，见 [Mac 本地模型](mac-local-models.md)、[Mac 记忆](mac-memory.md) 和 [本地优先混合大脑](local-first-hybrid-brain.md)。机器人本体仍然负责唤醒、行为、安全与身体执行。
 
 ## 1. 基于哪个官方版本
 
-截至 **2026-11-06**，本次核对的最新 OpenCode 应用版本是 **v2.2.5**，官方发布时间为 **2026-10-30**。代码以该 tag 的服务器协议、配置 schema 和实现源码为准。发布列表中另有 `process-daemon-*` 组件版本，不能把它当成 OpenCode 应用版本；GitHub 的 `releases/latest` 当时仍可能指向 1.x，不能据此选择这套原生 V2 API 的服务端。
+本实现固定参考的 OpenCode 应用版本是 **v2.2.5**，官方发布时间为 **2026-10-30**。代码以该 tag 的服务器协议、配置 schema 和实现源码为准。发布列表中另有 `process-daemon-*` 组件版本，不能把它当成 OpenCode 应用版本；GitHub 的 `releases/latest` 当时仍可能指向 1.x，不能据此选择这套原生 V2 API 的服务端。
 
 - [官方 v2.2.5 release](https://github.com/anomalyco/opencode/releases/tag/v2.2.5)
 - [官方发布列表](https://github.com/anomalyco/opencode/releases)
@@ -57,7 +57,7 @@ Mac M4 Pro 使用 release 中的 [opencode-darwin-arm64.zip](https://github.com/
 
 按官方发布说明安装，并把 `brain.json` 中的 `harness.executable` 指向实际二进制。通过 Finder 启动的应用不一定继承终端的 `PATH`，因此 Mac 上推荐配置绝对路径，例如 `/Users/你的用户名/.local/bin/opencode`。不要把带参数的 shell 命令填入 `executable`；实现会直接创建子进程，参数固定为 `serve --hostname ... --port ...`。
 
-安装、模型下载、账号登录与第一次真实请求均留待在 Mac 上操作。本轮没有执行这些步骤。
+当前 Mac 已从该官方发布包安装 v2.2.5 并通过 SHA-256 校验；独立 App 已配置其绝对路径。模型下载、账号登录与第一次真实模型请求仍需按实际环境处理。
 
 ### 3.2 管理模式：默认选择
 
@@ -76,7 +76,7 @@ macOS / Unix 的进程组清理用于正常停止与对象析构；它不承诺�
 
 ### 3.3 `brain.json` 设置示例
 
-`brain.json` 与原有的 `config.json` 是不同配置。下面是 `brain.json` 中的 `harness` 对象示例；其他顶层设置保留已有值。路径改成自己的 Mac 路径，key 通过启动应用的进程环境提供。
+当前设置统一在 `brain.json` 中，已移除原型 `config.json` 加载器。下面是 `harness` 对象示例，其他顶层设置保留已有值。路径改成自己的 Mac 路径；Mac managed 模式可在控制台保存 Key 到钥匙串，也支持启动环境变量。
 
 ```json
 {
@@ -127,6 +127,29 @@ macOS / Unix 的进程组清理用于正常停止与对象析构；它不承诺�
 `working_directory = null` 会创建专用工作目录。若手动配置工作目录，它必须已经存在；程序不会修改那个现有目录的权限。对话 ID 和轮次 ID 使用 1–128 个英文字母、数字、下划线或连字符。
 
 ### 3.4 凭据与现有 provider
+
+Mac 控制台的 **模型与密钥 → API Key** 可直接保存、替换和移除三条路线的密钥。
+密钥使用 macOS 登录钥匙串，账户名为路线的 `api_key_env`，服务标识为
+`ai.reasonia.espbot.server.provider-api-keys`。JSON、日志、状态与浏览器存储不包含实际 Key。
+状态轮询只查元数据，不读取密钥正文。
+
+保存 / 移除会先停止 managed 服务，防止旧进程继续使用旧值；再次启动时仅向这个子进程
+注入钥匙串密钥，不修改宿主的全局环境。钥匙串优先于同名环境变量，移除钥匙串项后
+环境变量仍可能生效。attach 服务和继承的 provider 由外部 OpenCode 负责凭据。
+
+三个服务商分别是钥匙串中的独立条目。macOS 的授权按条目生效，即使对话框显示同一
+服务名称，也可能分别请求授权。选择“Allow”只允许本次读取；“Always Allow”记住
+当前签名身份对该条目的访问。临时签名绑定具体构建的代码哈希，重新构建后系统可能再次
+询问；使用稳定的开发者签名可减少更新导致的重复授权。
+
+2026-11-07 用户已同意使用本机 Apple Development 证书签名 Bot Server。构建入口
+`npm run tauri build` 从本地忽略的 `runtime/macos-signing-identity` 读取证书公开指纹，
+并交给 Tauri 的 `APPLE_SIGNING_IDENTITY`；私钥不离开钥匙串。已构建的 App 的指定要求
+使用应用标识及证书链，而非某次构建的代码哈希。切换到该身份时，已有条目可能仍需逐项
+选择一次“Always Allow”。
+
+读取超时不能强行关闭一个已经由 macOS 显示的授权请求；宿主会停止后续条目的读取，
+并串行化重新尝试，避免超时后的旧任务继续触发更多提示。它不会更改或删除已保存密钥。
 
 默认生成的三个 provider 分别读取以下环境变量的值：
 
@@ -232,28 +255,42 @@ OpenCode 原生 V2 的 MCP 结构是：
 }
 ```
 
-已有服务就继续使用；没有时可按仓库的 [opencode-tools.example.jsonc](../server/bot-server/examples/opencode-tools.example.jsonc) 补上缺失定义。该示例使用官方 Microsoft Playwright MCP 的独立浏览器会话，并提供本仓库对官方 DeepSeek Search / Fetch API 的 MCP 适配器。相关实现和依赖说明见 `server/bot-server/tools/`。不要把整个示例覆盖到已有配置上。
+已有服务就继续使用；没有时可按仓库的 [opencode-tools.example.jsonc](../server/bot-server/examples/opencode-tools.example.jsonc) 补上缺失定义。当前用户选择连接已运行且已登录的 Chrome：示例使用官方 Microsoft Playwright MCP 的 Chrome 连接，并提供本仓库对官方 DeepSeek Search / Fetch API 的 MCP 适配器。相关实现和依赖说明见 `server/bot-server/tools/`。不要把整个示例覆盖到已有配置上。
 
 默认期待的服务名是 `browser` 与 `deepseek-search`。服务名不同，就同时调整 `required_mcp` 和 `read_tools`。工具 action 由 OpenCode 用 `服务名_工具名` 生成，并把不支持的字符替换成 `_`；本应用配置的服务名限于字母、数字、连字符、下划线，以免出现模糊匹配。实现来源见 [官方 MCP 工具实现](https://github.com/anomalyco/opencode/blob/v2.2.5/packages/core/src/tool/mcp.ts)。
+
+2026-11-07 本机设置：已将不含密钥的 `server/bot-server/runtime/opencode-local-tools.json`
+保存到控制台的继承配置入口，指向本机安装的 MCP Python SDK 2.3.0、DeepSeek 适配器和
+已缓存的 Playwright MCP 0.0.83。DeepSeek 复用钥匙串中的 `DEEPSEEK_API_KEY`；即使
+DeepSeek 模型路线被关闭，启用该搜索工具时也会为子进程提供同一 Key。
+搜索 MCP 的初始化和 `search` / `fetch` 工具发现已在本机检查，不代表已调用付费 API。
+Chrome 连接需要用户在 `chrome://inspect/#remote-debugging` 开启本实例远程调试，
+并在 Chrome 连接弹窗中亲自批准；当前会话可能包含私人数据。
+用户完成本机授权后，最终 App 已启动，控制台显示 `browser` 与 `deepseek-search`
+均为 connected；OpenCode 按本地 stdio 配置成功发现两项工具。此状态不等于已经读取
+Chrome 页面或验证 Search / Fetch 真实 API 响应，本次没有运行真实网页操作或付费搜索。
 
 状态会真实区分未配置、连接中、已连接、关闭、失败或需要授权。配置里写着 `required_mcp` 并不会凭空安装或启动一个不存在的服务。工具连接失败也不会被报告为“已继承成功”。
 
 ### 只读调用与家长操作
 
-权限从全拒绝开始，只允许配置中的 MCP 前缀进入受控的询问流程。OpenCode V2 在 `execute` 被禁用时，会把剩余 MCP 工具直接提供给模型，因此这里**不开放任意代码执行**；shell、文件读写、子 agent、skill 执行等原生工具也保持拒绝。依据见 [官方工具过滤实现](https://github.com/anomalyco/opencode/blob/v2.2.5/packages/core/src/tool.ts) 和 [权限实现](https://github.com/anomalyco/opencode/blob/v2.2.5/packages/core/src/permission.ts)。
+权限从全拒绝开始。控制台可以选择启用原生 `read`、`glob`、`grep`、`edit`（含 write / patch）、`shell`、`webfetch` 和 `skill`，再选择逐次确认或自主执行。还可以允许工作区外目录：自主模式下该选项覆盖当前账户有权访问的目录；终端使用的是账户的真实文件、进程和网络权限，不是工作区沙箱。新配置默认不开启这些工具，以免静默扩大已有安装的权限。
+
+原生工具的逐次确认展示 OpenCode 在权限检查时提供的目标和元数据；文件更改要求显示实际差异预览。由于 OpenCode 插件可能改写模型的工具输入，逐次确认模式只接受可以和实际命令核对的单条 Shell 命令；无法完整展示的请求会拒绝。自主执行是更广的用户选择，已开启的工具不再逐次询问。OpenCode `question` 表单通过控制台对话页呈现。`execute` 和子代理仍保持拒绝；完整能力清单见 [OpenCode 能力清单](opencode-capabilities.md)。
+
+启用 Shell 后，宿主在每轮执行前通过 V2 的会话环境接口，只传入基本用户、路径和区域设置，不把模型密钥和 OpenCode 服务密码作为终端环境变量直接继承。终端仍拥有当前用户的系统权限，并不是安全隔离；自定义环境变量如有需要必须由任务显式配置。
 
 默认自动通过一次的精确 action 为：
 
-- `browser_browser_snapshot`：仅没有写文件参数的空输入形式。
 - `deepseek-search_search`。
 - `deepseek-search_deepseek_search`：兼容已有服务的另一种工具名；不存在的工具不会因此出现。
 - `deepseek-search_fetch`。
 
-这些调用也先收到官方权限事件，再由宿主检查实际参数后回复 `once`。出现 `filename`、`file`、`path`、`output` 等输出位置参数不会自动通过；浏览器截图、导航、点击、输入、提交以及其他 MCP 操作进入家长控制台，展示实际工具名与输入供决定“允许一次”或“拒绝”。服务端不接受模型自己声明“家长同意”，也不把孩子声音 / 人脸识别结果作为工具批准凭据。
+这些调用也先收到官方权限事件，再由宿主检查实际参数后回复 `once`。出现 `filename`、`file`、`path`、`output` 等输出位置参数不会自动通过；浏览器页面快照、截图、导航、点击、输入、提交以及其他 browser MCP 操作均进入家长控制台，展示实际工具名与输入供决定“允许一次”或“拒绝”。即使旧设置将 browser 快照列入自动通过，也仍需确认。服务端不接受模型自己声明“家长同意”，也不把孩子声音 / 人脸识别结果作为工具批准凭据。
 
-控制台不提供 `always`，不会新增永久授权。审批等待仍受整轮时限限制，过期请求不会影响下一轮。家长操作本身是否符合具体场景，由宿主控制台和家长决定；本层不会根据工具描述里的 `readOnlyHint` 自动放大权限。
+浏览器操作的单次批准不新增永久授权；原生工具则可由用户在设置中明确切换为自主执行。审批或回答等待仍受整轮时限限制，过期请求不会影响下一轮。本层不会根据工具描述里的 `readOnlyHint` 自动放大权限。
 
-**边界**：这是模型工具入口的权限约束，不是操作系统沙箱。用户继承的 MCP 可执行程序、OpenCode 插件及其已有持久权限属于可信的 Mac 配置；恶意或配置错误的插件本身能使用其宿主账户权限。运行机器人时应使用专用目录和独立浏览器会话，避免把日常登录浏览器的广泛权限顺手授予工具。本应用不会把 MCP 的原始报错、配置命令、凭据或工具输出作为状态日志外发。
+**边界**：这是模型工具入口的权限约束，不是操作系统沙箱。用户继承的 MCP 可执行程序、OpenCode 插件及其已有持久权限属于可信的 Mac 配置；恶意或配置错误的插件本身能使用其宿主账户权限。按本次用户选择，连接已登录 Chrome 可接触其现有页面与登录会话；Chrome 自身连接授权和控制台的逐次工具批准共同作为操作入口。本应用不会把 MCP 的原始报错、配置命令、凭据或工具输出作为状态日志外发。
 
 ## 7. 多轮上下文、取消与记忆删除
 
@@ -347,7 +384,7 @@ opencode serve --hostname 127.0.0.1 --port 4097
 
 ## 10. 当前交付边界
 
-已落地的是能接入官方原生 V2 长驻服务的 Rust 代码、默认三路线、明确的降级规则、MCP 继承、一次性家长权限、取消清理与隐私删除流程。它仍需在真实 Mac 上完成首轮安装、账号配置和运行联调；本轮没有声称这些已经通过。
+已落地的是能接入官方原生 V2 长驻服务的 Rust 代码、默认三路线、明确的降级规则、MCP 继承、一次性家长权限、取消清理与隐私删除流程。官方 CLI 安装、真实 Mac App 启停及钥匙串读取已完成；账号模型请求、工具和设备联调仍需分别验证。
 
 没有实现套餐余额查询 UI、供应商计费管理、自动下载 OpenCode、自动安装第三方 MCP、自动获得浏览器账号授权或通用 OS 沙箱。没有新增 wake word 路径：唯一唤醒词仍是“小呆小呆”，设备 / 本地 runtime 保持各自的权限和行为边界。
 

@@ -19,7 +19,7 @@ typedef struct {
     uint8_t gaze_smoothing;
 } face_theme_t;
 static const face_theme_t k_face_themes[] = {
-    {"eve", "EVE", "EVE", "eve", 0x000000, 0x35D7FF, 0x35D7FF, 0x10222D, 0xDAF7FF, 0x35D7FF, 0xDDF9FF, 4200, 140, 5},
+    {"eve", "EVE", "EVE", "eve", 0x000000, 0x35D7FF, 0x35D7FF, 0x10222D, 0xDAF7FF, 0x35D7FF, 0xDDF9FF, 4200, 220, 5},
     {"mint", "Classic Mint", "经典线条 · 薄荷绿", "outline", 0x142423, 0xA8E8D6, 0xA8E8D6, 0x23413D, 0xEDFFF8, 0x84C9B6, 0xE8FFF8, 3600, 130, 4},
     {"sakura", "Classic Sakura", "经典线条 · 樱花粉", "outline", 0x281D28, 0xF5B7CE, 0xF5B7CE, 0x44303D, 0xFFF1F6, 0xE8A5C0, 0xFFF1F6, 3600, 130, 4},
     {"lavender", "Classic Lavender", "经典线条 · 香芋紫", "outline", 0x211D32, 0xD4C2FB, 0xD4C2FB, 0x39334F, 0xF8F1FF, 0xB9A6E7, 0xF8F1FF, 3600, 130, 4},

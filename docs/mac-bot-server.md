@@ -1,9 +1,12 @@
 # 小呆 Mac bot-server：OpenCode、多模型、本地声音与记忆
 
-**2026-11-06 源码交付。** 本轮直接在现有 Rust/Tauri `server/bot-server`
-上增加 Mac 大脑、家长控制台、本地模型服务和安全设备网关。没有运行测试、构建、
-CI、模型、付费接口或真实设备；硬件尚未到货。这里的“已实现”指源码和调用链已经写入，
-不代表完成了 Mac 安装或 S31 联调。
+**2026-11-06 后续本机构建。** 初次交付只包含源码；之后按用户明确要求，已在
+Apple Silicon Mac 完成 TypeScript / Vite、Rust release、依赖锁文件解析与 App 打包，
+并实际打开控制台、读取用户保存的钥匙串密钥、启动和停止官方 OpenCode v2.2.5。
+2026-11-08 的本机测试已尝试真实 Qwen 对话请求，但该端点 TLS 握手超时，未得到模型回复；
+GLM 和 DeepSeek 仅完成无凭据的网络连通性检查。Mac 控制台现可复用 RMA 的 Qwen3-ASR
+优化 worker，合成中文样本已识别成功；实板私密语音链路仍未打通。当前控制台只保留小呆功能，API Key 可在
+“模型与密钥”中配置；详细范围见 [Mac 控制台](mac-console.md)。实板状态以 [接入记录](board-bringup-2026-11-06.md) 为准，本轮已观察到诊断在线。
 
 ## 1. 现在的组成
 
@@ -15,7 +18,7 @@ CI、模型、付费接口或真实设备；硬件尚未到货。这里的“已
 | `src-tauri/src/memory` | SQLite 档案、确认后的记忆、声纹/人脸模板、匹配和遗忘 |
 | `src/companion.ts` / `capture.ts` | 无设备也可使用的中文控制台、明确点击的录音/拍照、家长管理、回复卡片 |
 | `tools/deepseek_search.py` | 可选 DeepSeek 官方 Search / Fetch MCP 适配器；有现有配置时直接继承 |
-| 原有 `lan` / `provider` | 原 LAN 诊断、软配对、OpenAI-compatible / S2S 文字适配保留，独立于新链路 |
+| `lan-diagnostics` | 默认启用当前固件需要的发现与诊断通道；只读状态由设备页呈现 |
 
 ```mermaid
 flowchart TB
@@ -65,7 +68,7 @@ DeepSeek 当前正式 Flash 名称以 [官方 API 文档](https://api-docs.deeps
 
 ## 3. 第一次在 Mac 上准备
 
-以下是给之后的 Mac 环境执行的安装步骤，本轮没有执行。文本对话不需要 ESP 板；
+以下是新 Mac 的准备步骤。当前 Mac 已安装 OpenCode 并完成桌面构建；文本对话不需要 ESP 板；
 本地语音和身份功能需要准备模型环境。Mac 目标是原生 Apple Silicon / M4 Pro 48 GB。
 
 ### 3.1 OpenCode 与依赖
@@ -74,10 +77,8 @@ DeepSeek 当前正式 Flash 名称以 [官方 API 文档](https://api-docs.deeps
 不要仅凭旧安装器的 `latest` 名字认定主版本。准备 Node.js、Rust/Tauri 所需的 Mac
 开发依赖。原有前端仍使用 `npm ci`，没有增加前端依赖。
 
-本轮新增 `rusqlite` 等 Rust 直接依赖，并启用已有 Tokio/Reqwest 功能。
-仓库保留原有 `Cargo.lock`，**这次没有重解 Rust 依赖图**；第一次在 Mac 进行 Cargo
-构建时需正常解析并更新锁文件，不要把现有锁文件当成本次已解析环境或用 `--locked`
-强行启动。Python requirements 同样注明了直接版本与未解析的兼容范围。
+`rusqlite`、macOS `security-framework` 与 Tokio/Reqwest 的依赖图已解析进 `Cargo.lock`，
+当前 Mac 已实际 release 构建。其他机器可使用锁文件复现；Python requirements 仍需独立准备。
 
 ### 3.2 本地模型
 
@@ -107,26 +108,29 @@ python3 scripts/configure_mac.py --inherit-config /absolute/path/opencode.jsonc
 
 ### 3.3 凭据与工具
 
-将 `server/bot-server/.env.example` 复制为本地 `.env`，填写账户自己的 key，
-从加载这些环境变量的终端启动 Tauri。该文件已经被 git 忽略。Finder 启动的 App
-不会自动获得另一个终端里的 export；需要使用配置过环境的启动方式。
-控制台只显示环境变量名和是否存在，不回显实际 key。
+推荐直接在 **模型与密钥 → API Key** 中选择路线并保存密钥。Mac 登录钥匙串
+持久保存密钥，控制台只显示配置状态；启动 managed OpenCode 时注入子进程环境。
+保存 / 移除会停止服务，再次启动后生效。钥匙串优先于同名启动环境变量，JSON 不存实际 Key。
+也可从配置过环境变量的终端启动；Finder App 不会自动继承其他终端的 export。
 
 `browser` 和 `deepseek-search` 由 OpenCode 的配置加载器继承。缺少时界面显示缺少，
 不会虚构可用工具。可选安装方法与 v2 配置示例在
 [`tools/README.md`](../server/bot-server/tools/README.md)。DeepSeek Search / Fetch
 使用自己的服务计费，与 Coding Plan 模型额度分开。
 
-启动入口仍是：
+构建独立 App：
 
 ```bash
 npm ci
-npm run tauri dev
+npm run tauri build
+open "src-tauri/target/release/bundle/macos/ESP Bot Server.app"
 ```
 
+开发时使用 `npm run tauri dev`。
+
 App 默认不会自动启动 harness；进入“小呆”页后点启动。
-`brain.json.auto_start` 可以在配置后开启。原有 `config.json` 只控制历史文字 provider，
-新主链路读取独立 `brain.json`，避免修改旧配置时误换主 harness。
+`brain.json.auto_start` 可以在配置后开启。当前只读取 `brain.json`；旧 Chat / Provider、
+`config.json` 加载器、Events 及 Mock 界面已经移除，不再有第二套聊天入口。
 
 ## 4. 一次互动怎样流动
 
@@ -208,7 +212,6 @@ Mac 新增独立 **WSS v3** 入口，使用 rustls、每台设备的随机 beare
 | 路径 | 内容 |
 | --- | --- |
 | `brain.json` | 新主链路设置；只存 key 环境变量名，不存模型 API key |
-| `config.json` | 原有文字 provider 设置 |
 | `models/` | 显式下载的公开模型、来源和安装收据 |
 | `runtime/memory/memory.sqlite3` | 本地档案、记忆与登记特征 |
 | `runtime/opencode/` | 路由退避、会话 ledger、生成的 OpenCode 配置与专用工作目录 |
@@ -220,10 +223,10 @@ OpenCode 配置不会被项目复制进 git。私密运行目录、模型、venv
 ## 9. 后续接硬件前的实际缺口
 
 - 配置账户允许的 provider、安装依赖与固定模型、确认本机声音存在。
-- 首次解析新增 Rust 依赖和对应锁文件；真正编译后的问题再按实际编译器反馈处理。
+- Rust 依赖、锁文件和本机打包已完成；仍需在其他目标机器上确认环境兼容性。
 - 在 Mac 上实际确认权限弹窗、模型加载、中文 ASR、TTS、取消和 MCP 接线。
 - 在到货的 S31 上接通 WSS v3 客户端与本地 runtime 的现有 token/PCM/stop 合约。
 - 训练/提供完整 **小呆小呆** 的唤醒模型，完成摄像头方向、音量、AEC 和身份阈值校准。
 - 后续的 BLE 安全配网、真正流式 TTS、设备网页/动图播放器与电机适配分别开发。
 
-本次没有增加测试基础设施或 CI，也没有把这些未运行的功能描述成经过验证。
+上述条目保留初次交付的后续计划；最近的实际验证以本文开头和本地模型说明为准。没有运行 CI。

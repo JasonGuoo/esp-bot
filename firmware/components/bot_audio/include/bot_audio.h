@@ -39,6 +39,7 @@ typedef enum {
     BOT_AUDIO_EVENT_PLAYBACK_DONE,
     BOT_AUDIO_EVENT_PLAYBACK_CANCELLED,
     BOT_AUDIO_EVENT_PLAYBACK_FAILED,
+    BOT_AUDIO_EVENT_AMBIENT_SOUND,
 } bot_audio_event_kind_t;
 
 typedef struct {
@@ -53,6 +54,9 @@ typedef struct {
     float confidence;
     uint32_t playback_id;
     int wake_word_index;
+    bool direction_valid;         /* official DOA quality gate passed; orientation uncalibrated */
+    bool speech;                  /* ESP-SR VAD; false may be a non-speech sound */
+    float azimuth_deg, direction_quality;
     const char *wake_phrase;      /* static BOT_AUDIO_WAKE_PHRASE, wake events only */
     const char *reason;           /* borrowed for this callback only */
 } bot_audio_event_t;
@@ -105,6 +109,12 @@ typedef struct {
     int64_t last_capture_us, last_afe_result_us, last_playback_us;
     uint64_t capture_frames, afe_frames, delivered_pcm_frames;
     uint64_t gated_pcm_frames, capture_errors, afe_errors, playback_errors;
+    uint16_t microphone_peak; /* latest capture block's absolute PCM peak, 0..32768; no PCM retained */
+    uint16_t microphone_peak_2;
+    uint16_t microphone_mean, microphone_mean_2, ambient_noise_mean;
+    bool ambient_activity, ambient_speech, direction_available, direction_valid;
+    float azimuth_deg, direction_quality;
+    uint64_t ambient_events, direction_estimates;
     uint64_t wake_detections, suppressed_wakes, playback_underruns;
     uint32_t rx_discard_frames;       /* remaining DMA FIFO fence before PCM release */
     uint32_t playback_id;
@@ -116,7 +126,7 @@ bot_audio_config_t bot_audio_default_config(void);
 /** One instance per board. Only the application's audio owner calls lifecycle
  * methods; bsp_i2c_init is idempotent and shares the bus with display/camera. */
 esp_err_t bot_audio_create(const bot_audio_config_t *config, bot_audio_t **out);
-/** Opens one ES8389 IN_OUT device; starts capture, AFE fetch, and playback tasks.
+/** Opens one ES8389 IN_OUT device; starts a capture/AFE worker and a playback worker.
  * Missing/blank/wrong wake model is a reported degraded state, not a boot error.
  * Start does NOT open a conversation or enable PCM delivery. */
 esp_err_t bot_audio_start(bot_audio_t *audio);

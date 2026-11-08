@@ -68,11 +68,15 @@ face_expression_t face_renderer_legacy_expression(face_expression_t ex) {
         case FACE_EX_CONFUSED: return FACE_EX_CURIOUS;
         case FACE_EX_DISCOVERY: return FACE_EX_SURPRISED;
         case FACE_EX_LAUGHING:
+        case FACE_EX_AFFECTION:
+        case FACE_EX_RELIEVED:
+        case FACE_EX_OVERJOYED:
         case FACE_EX_EXCITED: return FACE_EX_HAPPY;
         case FACE_EX_WINK:
         case FACE_EX_SKEPTICAL: return FACE_EX_THINKING;
         case FACE_EX_SMUG:
         case FACE_EX_WORRIED: return FACE_EX_SHY;
+        case FACE_EX_SAD: return FACE_EX_SLEEPY;
         case FACE_EX_ANNOYED: return FACE_EX_BORED;
         default: return ex;
     }

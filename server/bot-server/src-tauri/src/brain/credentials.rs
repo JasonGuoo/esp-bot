@@ -34,7 +34,7 @@ impl Credentials {
     pub fn issue(&self, device_id: &str) -> Result<Value, String> {
         if !valid_id(device_id) { return Err("device_id_invalid".into()); }
         let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-        let record = DeviceCredential { token_sha256: digest(&token), created_at_ms: crate::lan::now_ms() };
+        let record = DeviceCredential { token_sha256: digest(&token), created_at_ms: crate::time::now_ms() };
         let mut records = self.records.write().map_err(|_|"device_credentials_poisoned")?;
         if records.len() >= 64 && !records.contains_key(device_id) { return Err("device_credentials_capacity".into()); }
         let mut next = records.clone();

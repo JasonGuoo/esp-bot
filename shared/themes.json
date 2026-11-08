@@ -17,7 +17,7 @@
       "chrome_text": "#DDF9FF",
       "motion": {
         "blink_interval_ms": 4200,
-        "blink_duration_ms": 140,
+        "blink_duration_ms": 220,
         "gaze_smoothing": 5
       }
     },

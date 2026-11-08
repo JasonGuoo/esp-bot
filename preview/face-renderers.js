@@ -10,12 +10,13 @@ const color = theme => theme.eye;
 const legacyExpression = expression => ({
   gentle:"listening", confused:"curious", discovery:"surprised", laughing:"happy",
   excited:"happy", wink:"thinking", smug:"shy", skeptical:"thinking",
-  determined:"listening", annoyed:"bored", worried:"shy"
+  determined:"listening", annoyed:"bored", worried:"shy", sad:"sleepy",
+  affection:"happy", relieved:"happy", overjoyed:"happy"
 }[expression] ?? expression);
 
 function outlineEyes(theme, expression, gaze) {
   expression = legacyExpression(expression);
-  const fg = color(theme), dx = gaze.x * .23, dy = gaze.y * .18;
+  const fg = color(theme), dx = gaze.x * .42, dy = gaze.y * .18;
   let left = "open", right = "open";
   let lw = 148, rw = 148, lh = 136, rh = 136, ly = 212, ry = 212;
   if (expression === "happy" || expression === "shy") left = right = "arch";
@@ -64,7 +65,7 @@ function pillEyes(theme, expression, gaze) {
   if (expression === "curious") { rh = 76; ry += 11; }
   if (expression === "thinking") rh = 25;
   if (expression === "surprised") { lw = rw = 140; lh = rh = 142; }
-  const dx=gaze.x*.21, dy=gaze.y*.17;
+  const dx=gaze.x*(800/1100), dy=gaze.y*.17;
   const eye=(cx,y,w,h)=>'<rect x="'+(cx-w/2+dx)+'" y="'+(y-h/2+dy)+
     '" width="'+w+'" height="'+h+'" rx="'+Math.min(w/2,h/2)+'" fill="'+fg+'"/>';
   const mouth=expression==="surprised"?'<circle cx="400" cy="306" r="8" fill="'+fg+'"/>':
@@ -75,7 +76,8 @@ function pillEyes(theme, expression, gaze) {
 function eveEyes(theme, expression, gaze) {
   const pose = EVE.expressions.find(e => e.id === expression) ?? EVE.expressions[0];
   // Match native 800x480 dimensions and common attention displacement.
-  const w = 232, h = 163, dx = Math.max(-100,Math.min(100,gaze.x)) / 3;
+  const w = 232, h = 163, gx = Math.max(-100,Math.min(100,gaze.x));
+  const dx = Math.trunc(gx * 800 * 115 / 100000);
   const dy = Math.max(-100,Math.min(100,gaze.y)) * 480 / 2800;
   function path(shape, i) {
     const points = EVE.shapes[shape];
@@ -88,13 +90,17 @@ function eveEyes(theme, expression, gaze) {
     return `<path d="${d} Z"/>`;
   }
   const eyes = pose.eyes.map(path).join("");
+  const glints = expression === "overjoyed" ? [0,1].map(i => {
+    const ew=w, x=800*(i ? .71 : .29)+dx-ew*.19, y=480*.44+dy-h*.21;
+    return `<g data-highlight="joy" fill="#fff" opacity=".88"><rect x="${x}" y="${y}" width="${ew*.08}" height="${h*.16}" rx="${ew*.04}"/><rect x="${x+ew*.11}" y="${y+h*.12}" width="${ew*.03}" height="${h*.05}" rx="${ew*.015}"/></g>`;
+  }).join("") : "";
   // Inline masks/patterns have unique IDs because every settings tile is SVG.
   const key = `eve-${++eveInstance}`;
   return `<defs>
     <filter id="${key}-glow" x="-20%" y="-25%" width="140%" height="150%"><feGaussianBlur stdDeviation="7"/></filter>
     <pattern id="${key}-scan" width="1" height="5" patternUnits="userSpaceOnUse"><rect width="1" height="2" fill="#E3FAFF" fill-opacity=".65"/></pattern>
   </defs><g fill="${theme.eye}" opacity=".65" filter="url(#${key}-glow)">${eyes}</g>
-  <g fill="${theme.eye}">${eyes}</g><g fill="url(#${key}-scan)">${eyes}</g>`;
+  <g fill="${theme.eye}">${eyes}</g><g fill="url(#${key}-scan)">${eyes}</g>${glints}`;
 }
 let eveInstance = 0;
 

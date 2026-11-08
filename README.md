@@ -2,19 +2,21 @@
 
 **小呆 (Xiao Dai)** — a quiet, passive desktop companion built around ESP32-S31-Korvo-1. Local gaze, wake and behavior stay independent of Mac availability; the Rust/Tauri Mac Brain coordinates OpenCode, local speech, identity and memory. The only production voice wake phrase is **小呆小呆**, a single continuous four-syllable keyword. A standalone **小呆** must never wake the device.
 
+**First actual board session, 2026-11-06:** see [the hardware bring-up record](docs/board-bringup-2026-11-06.md) for what was built, flashed, observed and remains unresolved. The delivered board has an **SC101IOT** camera. Older source-only and “awaiting hardware” statements below describe their original deliveries, not the current validation record.
+
 > Hardware target is **ESP32-S31-Korvo-1 V1.1** (ESP32-S31), **not** ESP32-S3-Korvo-1. The S31 board has an 800×480 RGB display and GT1151 touch panel. Use ESP-IDF 6.1 / `esp32s31`, not `esp32s3`.
 
-## Mac bot-server source delivered — 2026-11-06
+## Mac bot-server local build — 2026-11-06
 
 **[Mac 端完整接入与准备指南](docs/mac-bot-server.md)** is the current server implementation record. The existing Tauri app now has a Chinese companion console, native **OpenCode 2.2.5** harness, ordered **Qwen Coding Plan → GLM Coding Plan → DeepSeek Flash** routes, inherited browser/search MCP, local Whisper ASR/system TTS, enrolled face/speaker recognition and SQLite memory.
 
-The Mac WSS v3 endpoint and credential management are written. **The firmware WSS client is still pending; the old LAN link remains diagnostic.** No tests, compilation, dependency installation, model inference, paid API calls or CI were run. Hardware has not arrived. Start with the Mac guide; it distinguishes source integration from remaining setup and device work.
+The standalone Mac App now builds locally: TypeScript/Vite, Rust release and packaging passed, and official OpenCode v2.2.5 start/stop was exercised in the real console. Configure provider API keys in **模型与密钥 → API Key**; they persist in macOS Keychain. The current UI has one companion flow, with the prototype Chat/Provider/Events removed. **The firmware WSS client is still pending; LAN discovery/diagnostics support the current firmware and appear in the device page.** No real model inference, paid API calls or CI were performed for this console update. Hardware bring-up is now active; see [the board record](docs/board-bringup-2026-11-06.md). The console has observed the real diagnostic connection; private media remains separate. See the Mac guide for model and device setup.
 
 ## Local runtime source delivered — 2026-11-06
 
 **[本地 Runtime 实现与接入指南](docs/local-runtime.md)** is the current implementation record. `app_main` now composes the local behavior runtime, bounded bus, official ESP-SR audio adapter, official esp_video/ESP-DL camera adapter, one focus manager, stationary gaze, Face/touch/stop UI, and an optional LAN diagnostic boundary. The legacy HTTP poller is no longer started or built by main.
 
-**Hardware has not arrived. This delivery was not compiled, tested, flashed, or run; no CI was added.** The dedicated **小呆小呆** acoustic model remains unprovisioned. On-device face detection/landmarks do not identify family members or estimate human gaze. Mac speech/harness/identity source is now integrated separately; secure firmware media and BLE provisioning remain subsequent work.
+**The initial runtime delivery was source-only; current board build, flash and run results are tracked in [the bring-up record](docs/board-bringup-2026-11-06.md). No CI was added.** The dedicated **小呆小呆** acoustic model remains unprovisioned. On-device face detection/landmarks do not identify family members or estimate human gaze. Mac speech/harness/identity source is now integrated separately; secure firmware media and BLE provisioning remain subsequent work.
 
 ## New project direction: reuse-first + Mac-first (2026-10-30)
 

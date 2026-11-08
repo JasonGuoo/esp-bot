@@ -1,5 +1,5 @@
 /* Mac companion UI. All remote data is rendered by companion.ts as text or
-   bounded, parent-approved media. These eyes are only the local console avatar. */
+   bounded, parent-approved media. */
 [hidden] { display: none !important; }
 #view-companion { overflow: hidden; }
 .cc-shell { display: flex; flex-direction: column; flex: 1; min-height: 0; color: var(--text); }
@@ -42,28 +42,13 @@
 .cc-button.danger { color: #eaa698; background: #2d2221; border-color: #543933; }
 .cc-button.danger:not(:disabled):hover { background: #432d28; border-color: #8e584a; }
 .cc-pet {
-  position: relative; flex: none; width: 65px; height: 59px; border-radius: 22px 22px 25px 25px;
-  background: #c4f0d8; border: 2px solid #daffe9; box-shadow: 0 7px 0 -3px #315040, 0 10px 24px #0003;
-  display: flex; justify-content: center; align-items: center; gap: 12px; transform: rotate(-3deg);
+  position: relative; flex: none; width: 65px; height: 65px;
 }
-.cc-pet::before, .cc-pet::after { content: ""; position: absolute; width: 10px; height: 5px; border-radius: 50%; bottom: 15px; background: #f69d9277; }
-.cc-pet::before { left: 7px; } .cc-pet::after { right: 7px; }
-.cc-pet i { display: block; width: 8px; height: 17px; border-radius: 5px; background: #234936; transform-origin: center; animation: cc-blink 6.4s infinite; }
-.cc-pet b { position: absolute; width: 9px; height: 4px; border-bottom: 2px solid #426950; border-radius: 0 0 7px 7px; bottom: 12px; }
-.cc-pet[data-expression="happy"] i { height: 9px; background: transparent; border-top: 3px solid #234936; border-radius: 50%; }
+.cc-pet img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .cc-pet[data-expression="curious"] { transform: rotate(8deg); }
-.cc-pet[data-expression="curious"] i:first-child { height: 11px; }
-.cc-pet[data-expression="surprised"] i { width: 12px; height: 18px; border-radius: 50%; }
-.cc-pet[data-expression="surprised"] b { height: 7px; width: 6px; border: 2px solid #426950; border-radius: 50%; bottom: 9px; }
 .cc-pet[data-expression="thinking"] { animation: cc-think 2.8s ease-in-out infinite; }
-.cc-pet[data-expression="thinking"] i:last-of-type { height: 9px; transform: rotate(-12deg); }
-.cc-pet[data-expression="listening"] { box-shadow: 0 7px 0 -3px #315040, 0 0 0 7px #78e7b222; }
-.cc-pet[data-expression="sleepy"] i { height: 4px; animation: none; }
-.cc-pet[data-expression="shy"]::before, .cc-pet[data-expression="shy"]::after { background: #f19086bb; height: 8px; }
-.cc-pet[data-expression="speaking"] b { background: #426950; animation: cc-talk .32s ease-in-out infinite alternate; }
-@keyframes cc-blink { 0%, 44%, 48%, 100% { scale: 1 1; } 46% { scale: 1 .1; } }
+.cc-pet[data-expression="listening"] { filter: drop-shadow(0 0 6px #36e8ee77); }
 @keyframes cc-think { 0%, 100% { transform: rotate(-3deg) translateY(0); } 50% { transform: rotate(3deg) translateY(-3px); } }
-@keyframes cc-talk { from { height: 3px; width: 8px; } to { height: 8px; width: 6px; } }
 .cc-tabs { display: flex; flex: none; gap: 5px; padding: 0 20px; border-bottom: 1px solid var(--border); }
 .cc-tabs button { padding: 10px 13px; border: 0; border-bottom: 2px solid transparent; color: #95a59c; background: none; font-size: 12px; }
 .cc-tabs button.selected { border-bottom-color: #89dfb7; color: #d0f0df; font-weight: 650; }
@@ -184,7 +169,7 @@
 }
 @media (max-width: 850px) {
   .cc-head { gap: 10px; }
-  .cc-pet { width: 54px; height: 52px; gap: 10px; }
+  .cc-pet { width: 54px; height: 54px; }
   .cc-heading h1 { font-size: 22px; }
   .cc-heading p { font-size: 10px; }
   .cc-routes { grid-template-columns: 1fr; }
@@ -196,7 +181,7 @@
   .cc-conversation-bar label { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .cc-pet, .cc-pet i, .cc-pet b { animation: none !important; }
+  .cc-pet { animation: none !important; }
   .cc-messages { scroll-behavior: auto; }
   .cc-button { transition: none; }
 }

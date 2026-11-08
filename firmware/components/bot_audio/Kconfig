@@ -26,9 +26,9 @@ config BOT_AUDIO_OUTPUT_VOLUME
         validation before child use.
 
 config BOT_AUDIO_MIC_GAIN_DB
-    int "Primary microphone codec gain (dB)"
+    int "Microphone codec gain (dB)"
     range 0 42
-    default 24
+    default 36
 
 config BOT_AUDIO_WAKE_DEBOUNCE_MS
     int "Minimum gap between accepted full-phrase wake events (ms)"

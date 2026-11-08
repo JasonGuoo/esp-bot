@@ -5,29 +5,37 @@
   "identifier": "ai.reasonia.espbot.server",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://127.0.0.1:1421",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [{
       "label": "main",
-      "title": "ESP Bot Server",
+      "title": "小呆 · Bot Server",
       "width": 1180,
       "height": 800,
       "minWidth": 760,
-      "minHeight": 540,
-      "titleBarStyle": "Overlay",
-      "hiddenTitle": true
+      "minHeight": 540
     }],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420; img-src 'self' data: blob: https:; media-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src https:; object-src 'none'; base-uri 'none'"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:1421 ws://127.0.0.1:1421; img-src 'self' data: blob: https:; media-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src https:; object-src 'none'; base-uri 'none'"
     }
   },
   "bundle": {
-    "active": false,
-    "icon": [],
-    "resources": { "../local-models/": "local-models/", "../tools/": "tools/", "../examples/": "examples/" },
+    "active": true,
+    "targets": ["app"],
+    "icon": ["icons/xiaodai.png", "icons/xiaodai.icns"],
+    "resources": {
+      "../local-models/worker.py": "local-models/worker.py",
+      "../local-models/model_store.py": "local-models/model_store.py",
+      "../local-models/models.json": "local-models/models.json",
+      "../local-models/rma_qwen.py": "local-models/rma_qwen.py",
+      "../local-models/say_guard.py": "local-models/say_guard.py",
+      "../local-models/NOTICE.md": "local-models/NOTICE.md",
+      "../tools/": "tools/",
+      "../examples/": "examples/"
+    },
     "macOS": { "minimumSystemVersion": "13.0", "entitlements": "Entitlements.plist" }
   }
 }

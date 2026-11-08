@@ -1,16 +1,16 @@
-# Passive companion behavior, sleep and night mode — 小呆
+# Lively companion behavior, daytime naps and night mode — 小呆
 
-**V1 product personality:** quiet, passive, slightly drowsy desktop companion. It **never** starts a conversation because a face is seen, a person stares at it, or a random sound is heard. It reacts to its full **小呆小呆** local wake phrase and deliberate touch/manual input; once engaged it can listen/respond without requiring the name every utterance.
+**Updated user direction, 2026-11-07:** lively during the day, looking around on its own, occasionally drowsy and then awake again; rest at night. It never starts a conversation merely because a face, gaze or sound is detected. Full **小呆小呆** and deliberate touch/manual input remain the interaction triggers.
 
 **Authority:** bot_runtime/behavior_policy owns transitions. audio owns continuous keyword recognition; face owns animation; bot_platform owns display sleep and camera power; attention_manager may choose a target only under runtime policy. Full wake phrase requirements: [wake-word.md](wake-word.md).
 
 ## 1. Orthogonal states — avoid a giant Cartesian state machine
 
 **Passive/engagement mode (one current mode):**
-- IDLE: awake eyes, quiet rare blink, slight low-amplitude idle movement; no speech.
-- BORED: fewer movements, heavy/slow occasional blink, subdued eyes; no speech.
-- DROWSY: eyelids droop, eyes periodically close; no speech.
-- SLEEPING: static closed eyes or panel sleep depending configured display policy; wake engine still runs.
+- IDLE: awake eyes, blinking and occasional self-directed screen-eye glances. Daytime local face detection can request a silent close-face smile; it does not start speech or a conversation.
+- BORED: legacy expression/state identifier; no automatic daytime transition to it.
+- DROWSY: a short daytime doze; automatically returns to IDLE without opening a conversation.
+- SLEEPING: retained state identifier; ordinary daytime idle does not enter indefinite sleep.
 - NIGHT_DARK: display sleep requested, camera stream/inference paused, local keyword recognition remains active.
 - WAKING: local wake accepted; restore display, eyes open naturally; camera may spin up if visual conditions allow.
 - ENGAGED: active interaction after explicit wake/touch. Human focus, listening, thinking and speaking are handled as additional conversation/focus substates.
@@ -40,19 +40,18 @@
 - If wake model fails, report degraded state visibly when display is awake / in console; do not falsely claim sleeping device can be awakened by voice.
 - Waking does **not** require camera or ASR to find a face; in darkness it may listen and answer without human gaze tracking.
 
-## 3. Passive timeline — suggested starting defaults, not committed performance
+## 3. Passive timeline — current starting defaults
 
-The elapsed clock is **time since last valid explicit interaction or completion of a session**, never since the last face was seen.
+The cycle restarts after an explicit interaction/session or at the end of night. Its time source is monotonic, never the last face observation.
 
 | Idle elapsed | Policy | Typical visual behavior |
 |---|---|---|
-| 0–60 s | IDLE | Quiet open eyes, occasional natural blink |
-| 60–180 s | BORED | Less eye movement, slow half-blinks, slightly distracted |
-| 180–300 s | DROWSY | Slow eyelid droop and short doze |
-| >300 s | SLEEPING | Eyes closed; optionally sleep panel |
+| First 20 min | IDLE | Open eyes blink and glance in different directions every 3.5–7 s |
+| Next 1 min | DROWSY | Brief subdued eyes; display remains requested awake |
+| Afterwards | IDLE again | Automatically begin another awake interval |
 | Valid night policy while not engaged | NIGHT_DARK immediately | Display sleep, camera paused; keyword engine still available |
 
-These thresholds should be configurable in behavior_policy and receive small bounded timing jitter in animations (not in wake logic). No unsolicited greeting, spoken yawn, or attention-grabbing movements. Visual theme pack controls how boredom/sleep is drawn but not who can wake the Bot.
+The two intervals are configurable. Glance targets and intervals vary locally; the fixed V1 device moves only the drawn eyes. No face observation, unsolicited speech or physical head motion is implied.
 
 ### User interaction end
 
@@ -69,15 +68,15 @@ Primary night decision: user-configured local time window (illustrative 22:30–
 - On full wake phrase, leave NIGHT_DARK, show waking eyes if hardware display allows, attempt camera acquisition only when light/quality is adequate; if camera remains unusable, enter ENGAGED_AUDIO_ONLY.
 - After the interaction, return to NIGHT_DARK if the night window still applies.
 - When LCD/camera are asleep, **they cannot continuously measure ambient light**. A scheduled sample/wake, explicit wake, or later external light sensor may reassess darkness. Don't promise autonomous daylight detection from a powered-off camera.
-- If wall clock has never synchronized, use known time if available; otherwise choose conservative passive/quiet policy and do not assume a valid sunset. Clock/timezone validity and schedule are separate fields.
+- The initial configured window is 22:30–07:00 in POSIX `CST-8` (China time). ESP-IDF SNTP starts after Wi-Fi obtains an address and may contact the configurable `pool.ntp.org` server. This wall clock is used only for the night schedule, not authorization or session deadlines.
+- If wall clock has never synchronized, do not guess that it is night: continue the daytime awake/doze cycle and report `clock_valid=0`. After power loss without network there is no battery-backed clock guarantee.
 - This board's LCD sleep API availability does **not** guarantee complete physical backlight blackout until checked on hardware. Product-grade full darkness may require additional backlight power gating.
 
 ## 5. Device resource policy
 
 | Mode | Audio capture + wake recognizer | Camera + face/eye inference | LCD/Face | Link/server |
 |---|---|---|---|---|
-| IDLE / BORED / DROWSY | ON if model ready | OFF by default (optional low-rate diagnostics only, never a wake trigger) | Animated eyes | Background connection optional |
-| SLEEPING | ON | OFF | Closed eyes or panel sleep | Optional |
+| IDLE / brief DROWSY | ON if model ready | ON locally for close-face reaction | Animated eyes / short doze; close face pauses glances and smiles with blinks | Background connection optional |
 | NIGHT_DARK | ON | OFF | Sleep requested (full-black conditional on hardware) | Optional |
 | WAKING | ON; accepted wake debounced | START if allowed | Eye-opening animation | Connect/reuse if needed |
 | ENGAGED | ON for speech and interrupt policy | ON when usable | Tracking, subtitles, expressions | Conversation offloaded when available |
@@ -104,4 +103,4 @@ Wake detection and DOA may share the same microphone owner but do not both need 
 
 ## 8. Current implementation status
 
-Updated 2026-11-06: bot_runtime, bot_bus, official audio/camera adapters, selected focus, stationary gaze and Face are now wired in app_main. Passive timeouts, touch/stop/settings, night policy and logical blackout are source-implemented. **No compilation, tests or hardware execution were performed.** The dedicated 小呆小呆 model is still missing. BSP 1.1.0 does not support backlight brightness control; night uses a black overlay with active touch, and camera pause means STREAMOFF/no inference rather than rail power-off. See [local-runtime.md](local-runtime.md) for exact implementation and limitations.
+The lively daytime policy and network clock have been built and flashed; on-board idle glances and time synchronization have been observed. The full real-time 20-minute/one-minute cycle and an actual overnight transition remain unverified; simulated boundary tests passed. See the latest board bring-up record for evidence. The dedicated 小呆小呆 model is still missing. BSP 1.1.0 does not support backlight brightness control; night uses a black overlay with active touch, and camera pause means STREAMOFF/no inference rather than rail power-off.

@@ -17,11 +17,16 @@ pub struct ModelWorkerConfig {
     pub model_dir: Option<PathBuf>,
     pub request_timeout_seconds: u64,
     pub voice: Option<String>,
+    pub asr_backend: String,
+    pub rma_qwen_python: Option<PathBuf>,
+    pub rma_qwen_worker: Option<PathBuf>,
+    pub rma_qwen_model: Option<PathBuf>,
 }
 
 impl Default for ModelWorkerConfig {
     fn default() -> Self {
-        Self { python: "python3".into(), script: None, model_dir: None, request_timeout_seconds: 120, voice: None }
+        Self { python: "python3".into(), script: None, model_dir: None, request_timeout_seconds: 120, voice: None,
+            asr_backend: "whisper".into(), rma_qwen_python: None, rma_qwen_worker: None, rma_qwen_model: None }
     }
 }
 
@@ -63,11 +68,18 @@ impl ModelWorker {
             .ok_or("local_worker_not_configured: set models.script to local-models/worker.py")?;
         let model_dir = self.config.model_dir.as_ref().ok_or("local_worker_model_dir_missing")?;
         let mut command = Command::new(&self.config.python);
-        command.arg("-u").arg(script).arg("--model-dir").arg(model_dir)
+        // The worker may live inside the signed app bundle. Python must not
+        // create __pycache__ there and invalidate the app's sealed resources.
+        command.arg("-B").arg("-u").arg(script).arg("--model-dir").arg(model_dir)
+            .arg("--asr-backend").arg(&self.config.asr_backend)
             .env("HF_HUB_OFFLINE", "1").env("TRANSFORMERS_OFFLINE", "1")
             .env("TOKENIZERS_PARALLELISM", "false")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
             .kill_on_drop(true);
+        for (flag, path) in [("--rma-qwen-python", &self.config.rma_qwen_python),
+            ("--rma-qwen-worker", &self.config.rma_qwen_worker), ("--rma-qwen-model", &self.config.rma_qwen_model)] {
+            if let Some(path) = path { command.arg(flag).arg(path); }
+        }
         // Cancellation kills say/ffmpeg descendants too, never a shell command.
         #[cfg(unix)]
         command.process_group(0);

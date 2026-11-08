@@ -1,6 +1,26 @@
 menu "ESP Bot"
+    config ESPBOT_USB_DEBUG_PREVIEW
+        bool "Enable supervised USB screen/camera preview"
+        default n
+        depends on ESPBOT_USB_MANUAL_CONTROL
+        select LV_USE_SNAPSHOT
+        help
+            Explicit preview on/off and a 15-second keepalive lease enable
+            two bounded JPEG previews and pixel-free runtime events over USB.
+            Camera requires an explicit local wake or supervised USB camera
+            command; night dark, settings and critical faults suppress it.
+
+    config ESPBOT_USB_MANUAL_CONTROL
+        bool "Enable local USB console wake/stop for board bring-up"
+        default n
+        help
+            Accept exact wake and stop lines on the physical console UART.
+            Wake posts the same intentional local event as a screen touch.
+            No remote commands, media access or automatic wake is enabled.
+            Disabled by default; intended for supervised board diagnosis.
+
     config ESPBOT_WIFI_SSID
-        string "Wi-Fi SSID (blank keeps the complete local runtime offline)"
+        string "Wi-Fi SSID (blank reuses saved Wi-Fi, otherwise stays offline)"
         default ""
 
     config ESPBOT_WIFI_PASSWORD
@@ -11,13 +31,27 @@ menu "ESP Bot"
         string "Device ID (ASCII URL-safe)"
         default "korvo-01"
 
+    config ESPBOT_SERVER_ID
+        string "Preferred diagnostic bot-server ID (blank selects a sole server)"
+        default ""
+        help
+            Discover the configured server again after each boot or connection
+            loss, including when its DHCP address or listening port changes.
+            Other servers are not selected automatically when this is set.
+            This public ID selects a diagnostic endpoint; it is not authentication.
+
     config ESPBOT_NIGHT_SCHEDULE
         bool "Apply local night schedule when wall clock is valid"
-        default n
+        default y
         help
-            No network time source is started by this runtime. A future trusted
-            time service or manual setup must initialize the wall clock first.
-            Without a valid clock, ordinary passive timers continue to work.
+            After Wi-Fi connects, ESP-IDF SNTP synchronizes a local wall clock.
+            When no valid clock is available the device does not guess night.
+            SNTP is for the sleep schedule, not authentication or session time.
+
+    config ESPBOT_NTP_SERVER
+        string "SNTP server used by the night schedule"
+        default "pool.ntp.org"
+        depends on ESPBOT_NIGHT_SCHEDULE
 
     config ESPBOT_TIMEZONE
         string "POSIX timezone for night schedule"
@@ -43,6 +77,15 @@ menu "ESP Bot"
             Keep disabled until real hardware calibration. Approximate visual
             following remains allowed, but mutual gaze is never claimed without
             calibration AND an independent human-gaze estimator.
+
+    config ESPBOT_CAMERA_ROTATE_180
+        bool "Rotate camera input 180 degrees"
+        default n
+        help
+            The SC101IOT unit observed during board bring-up produced an
+            upside-down preview with the old 180-degree rotation enabled.
+            Leave disabled for that mounting. Other camera modules or mountings
+            must be checked in the live preview; this is not an IMU measurement.
 
     config ESPBOT_GAZE_MIRROR_X
         bool "Mirror camera eye midpoint for display gaze"

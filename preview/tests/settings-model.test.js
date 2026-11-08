@@ -71,9 +71,9 @@ test("EVE is the default and original saved theme IDs stay selectable",()=>{
  }
 });
 
-test("all 20 EVE reference poses are distinct, have no pupils, and keep shared gaze",()=>{
+test("all EVE poses are distinct, have no pupils, and keep shared gaze",()=>{
  const t={renderer:"eve",eye:"#35D7FF",background:"#000000"};
- assert.equal(PREVIEW_EXPRESSIONS.length,20);
+ assert.equal(PREVIEW_EXPRESSIONS.length,24);
  const shapes=new Set();
  for(const {id} of PREVIEW_EXPRESSIONS){
   const svg=renderFace(t,id,{x:0,y:0});
@@ -82,12 +82,53 @@ test("all 20 EVE reference poses are distinct, have no pupils, and keep shared g
   const path=s=>[...s.matchAll(/<path d="([^"]+)"/g)].slice(0,2).map(m=>m[1].match(/-?\d+(?:\.\d+)?/g).map(Number));
   const neutral=path(svg), moved=path(renderFace(t,id,{x:75,y:-70}));
   for(let eye=0;eye<2;eye++)for(let p=0;p<neutral[eye].length;p+=2){
-   assert.ok(Math.abs(moved[eye][p]-neutral[eye][p]-25)<.02);
+   assert.ok(Math.abs(moved[eye][p]-(neutral[eye][p]+69))<.03);
    assert.ok(Math.abs(moved[eye][p+1]-neutral[eye][p+1]+12)<.02);
   }
  }
- assert.equal(shapes.size,20);
- assert.equal(FACE_EXPRESSIONS.length,24,"includes the four lifecycle/animation compatibility poses");
+ assert.equal(shapes.size,24);
+ assert.equal(FACE_EXPRESSIONS.length,28,"includes the four lifecycle/animation compatibility poses");
  const first=renderFace(t), second=renderFace(t);
  assert.notEqual(first.match(/id="([^"]+)-glow/)[1],second.match(/id="([^"]+)-glow/)[1]);
+});
+
+test("side looks move both eyes together without changing their shapes",()=>{
+ const t={renderer:"eve",eye:"#35D7FF",background:"#000000"};
+ const paths=x=>[...renderFace(t,"idle",{x,y:0}).matchAll(/<path d="([^"]+)"/g)].slice(0,2)
+  .map(m=>m[1].match(/-?\d+(?:\.\d+)?/g).map(Number).filter((_,i)=>i%2===0));
+ const width=points=>Math.max(...points)-Math.min(...points);
+ const left=paths(-100), right=paths(100), center=paths(0);
+ for(let eye=0;eye<2;eye++) {
+  assert.ok(Math.abs(width(left[eye])-width(center[eye]))<.01);
+  assert.ok(Math.abs(width(right[eye])-width(center[eye]))<.01);
+ }
+ assert.ok(Math.abs(width(center[0])-width(center[1]))<.01);
+ assert.ok(Math.min(...right[0])-Math.min(...left[0])>180);
+ assert.ok(Math.min(...right[1])-Math.min(...left[1])>180);
+});
+
+test("eye reflections are reserved for exceptional joy",()=>{
+ const t={renderer:"eve",eye:"#35D7FF",background:"#000000"};
+ for(const {id} of FACE_EXPRESSIONS) {
+  const glints=[...renderFace(t,id).matchAll(/data-highlight="joy"/g)];
+  assert.equal(glints.length,id==="overjoyed" ? 2 : 0,id);
+ }
+});
+
+test("both EVE eyes remain within the screen at the full gaze limits",()=>{
+ const t={renderer:"eve",eye:"#35D7FF",background:"#000000"};
+ for(const {id} of PREVIEW_EXPRESSIONS){
+  for(const x of [-100,100]) for(const y of [-100,100]){
+   const svg=renderFace(t,id,{x,y});
+   const paths=[...svg.matchAll(/<path d="([^"]+)"/g)].slice(0,2);
+   assert.equal(paths.length,2);
+   for(const match of paths){
+    const points=match[1].match(/-?\d+(?:\.\d+)?/g).map(Number);
+    for(let i=0;i<points.length;i+=2){
+     assert.ok(points[i]>=8 && points[i]<=792,`${id}: x=${points[i]}`);
+     assert.ok(points[i+1]>=8 && points[i+1]<=380,`${id}: y=${points[i+1]}`);
+    }
+   }
+  }
+ }
 });
