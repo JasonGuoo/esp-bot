@@ -54,6 +54,7 @@ struct bot_vision {
     bot_vision_config_t config{};
     char device_path[DEVICE_PATH_CAP]{};
     std::atomic<bool> enabled{false};
+    std::atomic<bool> light_only{false};
     std::atomic<bool> stopping{false};
     std::atomic<uint8_t> sensor_orientation{0};
     uint8_t applied_orientation = UINT8_MAX; /* worker only */
@@ -512,6 +513,11 @@ static esp_err_t capture_and_infer(bot_vision_t *v)
         unavailable(v, BOT_VISION_STARTING, BOT_VISION_FRAME_NONE, ESP_OK);
         return ESP_OK;
     }
+    if (v->light_only.load()) {
+        // Valid luma, but deliberately no preview, face inference, or tracks.
+        unavailable(v, BOT_VISION_CAPTURING, BOT_VISION_FRAME_OK, ESP_OK);
+        return ESP_OK;
+    }
     if (v->working.mean_luma < v->config.min_mean_luma) {
         preview_frame(v, nullptr, 0);
         ++v->working.dropped_dark;
@@ -779,6 +785,15 @@ extern "C" esp_err_t bot_vision_set_enabled(bot_vision_t *v, bool enabled)
     if (!v) return ESP_ERR_INVALID_ARG;
     if (v->stopping.load()) return ESP_ERR_INVALID_STATE;
     v->enabled.store(enabled);
+    xTaskNotifyGive(v->task);
+    return ESP_OK;
+}
+
+extern "C" esp_err_t bot_vision_set_light_only(bot_vision_t *v, bool light_only)
+{
+    if (!v) return ESP_ERR_INVALID_ARG;
+    if (v->stopping.load()) return ESP_ERR_INVALID_STATE;
+    v->light_only.store(light_only);
     xTaskNotifyGive(v->task);
     return ESP_OK;
 }

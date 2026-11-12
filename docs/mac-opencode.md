@@ -186,6 +186,14 @@ Mac 控制台的 **模型与密钥 → API Key** 可直接保存、替换和移�
 | 2 | `glm-5.3` | `https://api.z.ai/api/coding/paas/v4` | Z.AI Coding Plan 专用端点 |
 | 3 | `deepseek-flash` | `https://api.deepseek.com/v1` | 独立 DeepSeek API 账户，按其账户余额 / 计费规则使用 |
 
+### 模型连接与 Mac 网卡
+
+Bot Server 启动托管 OpenCode 时，按已启用路线的实际 `base_url`，将主机名与继承的 `no_proxy` 或 `NO_PROXY` 合并，只传给该子进程。重启托管服务后新配置生效。外部托管的 OpenCode 由其启动方设置代理。详见 [Bun fetch 的代理环境变量](https://bun.com/docs/runtime/networking/fetch)。
+
+物理出口由 macOS 路由及 VPN 的分流规则决定。验证时用当前 DNS 解析出的对端，检查 `route -n get <对端 IP>` 的接口，再用 `lsof -nP -a -p <OpenCode PID> -iTCP` 核对真实模型连接的本地和对端地址。分别记录 TCP、TLS、首字节与含推理/工具的回合耗时。WireGuard 环境按 VPN 客户端支持的目标地址规则分流，注意共享 CDN 和地址轮换。详见 [Astrill 的站点分流说明](https://www.astrill.com/features/website-and-app-filter)。
+
+11 月 12 日在这台 Mac 上实测，应用内的 OpenCode 所带 Bun 1.4.4 在本机对照端点上能遵循上述代理例外。Astrill WireGuard 在线时，三个云端点的普通 IPv4 连接最初都经 `utun6`。同一轮读表任务中，Qwen 等待 30.0 秒后中断，GLM 调用工具并在 25.7 秒后完成；设备从提交语音到图文绘制回执共约 56 秒。前者另有独立的 TLS 握手超时记录。切换物理出口后的时延需要用该出口另测。
+
 ### Qwen
 
 Coding Plan 使用专用的 `sk-sp-...` key；普通百炼 `sk-...` key 与这个专用端点不是同一类凭据。国际站使用 `https://coding-intl.dashscope.aliyuncs.com/v1`，需要对应站点的套餐、key 和可用模型，不能拿中国站地址或 key 想当然互换。官方资料见 [中国站 Coding Plan](https://help.aliyun.com/zh/model-studio/coding-plan)、[国际站 Coding Plan](https://www.alibabacloud.com/help/en/model-studio/coding-plan) 和 [官方 OpenCode 配置指南](https://www.alibabacloud.com/help/en/model-studio/opencode)。
@@ -276,7 +284,7 @@ Chrome 页面或验证 Search / Fetch 真实 API 响应，本次没有运行真�
 
 权限从全拒绝开始。控制台可以选择启用原生 `read`、`glob`、`grep`、`edit`（含 write / patch）、`shell`、`webfetch` 和 `skill`，再选择逐次确认或自主执行。还可以允许工作区外目录：自主模式下该选项覆盖当前账户有权访问的目录；终端使用的是账户的真实文件、进程和网络权限，不是工作区沙箱。新配置默认不开启这些工具，以免静默扩大已有安装的权限。
 
-原生工具的逐次确认展示 OpenCode 在权限检查时提供的目标和元数据；文件更改要求显示实际差异预览。由于 OpenCode 插件可能改写模型的工具输入，逐次确认模式只接受可以和实际命令核对的单条 Shell 命令；无法完整展示的请求会拒绝。自主执行是更广的用户选择，已开启的工具不再逐次询问。OpenCode `question` 表单通过控制台对话页呈现。`execute` 和子代理仍保持拒绝；完整能力清单见 [OpenCode 能力清单](opencode-capabilities.md)。
+原生工具的逐次确认展示 OpenCode 在权限检查时提供的目标和元数据。文件更改要求显示实际差异预览。由于 OpenCode 插件可能改写模型的工具输入，逐次确认模式只接受可以和实际命令核对的单条 Shell 命令，无法完整展示的请求会拒绝。自主执行按用户启用的工具范围生效。Mac 发起的对话通过控制台呈现 `question` 表单。支持图文回复的小呆会话单独禁用这个表单工具，模型把澄清问题放在回复里，用户可以直接口头选择。文件、浏览器与其他工具执行权限保持各自配置。`execute` 和子代理仍保持拒绝。完整能力清单见 [OpenCode 能力清单](opencode-capabilities.md)。
 
 启用 Shell 后，宿主在每轮执行前通过 V2 的会话环境接口，只传入基本用户、路径和区域设置，不把模型密钥和 OpenCode 服务密码作为终端环境变量直接继承。终端仍拥有当前用户的系统权限，并不是安全隔离；自定义环境变量如有需要必须由任务显式配置。
 

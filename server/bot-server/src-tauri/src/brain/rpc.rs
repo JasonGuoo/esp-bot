@@ -97,13 +97,19 @@ impl BrainHost {
             "memory.save" | "memory.delete" | "profile.delete" | "profile.update" | "memory.purge" => {
                 brain.cancel(None).await?;
                 let _gate = brain.turn_gate.lock().await;
-                brain.forget_all_locked().await?;
+                brain.forget_all_locked(false).await?;
                 // Finish the short mutation while the turn gate is held.
                 // A cancelled IPC future must not leave a detached writer.
                 memory_dispatch_now(&brain.memory,method,payload)
             },
             "profile.create" => memory_dispatch_now(&brain.memory,method,payload),
-            "profile.list"|"memory.list"|"memory.status"|"identity.list" =>
+            "memory.unattributed.assign" => {
+                let _gate=brain.turn_gate.lock().await;
+                brain.memory.assign_unattributed(required(&payload,"id")?,required(&payload,"profile_id")?)?;
+                Ok(json!({"assigned":true}))
+            },
+            "memory.unattributed.delete" => {brain.memory.delete_unattributed(required(&payload,"id")?)?;Ok(json!({"deleted":true}))},
+            "profile.list"|"memory.list"|"memory.status"|"identity.list"|"memory.unattributed.list" =>
                 memory_dispatch(Arc::clone(&brain.memory),method.to_owned(),payload).await,
             _ => Err("unsupported_parent_console_method".into()),
         }
@@ -114,14 +120,14 @@ impl Brain {
     async fn forget_all(&self) -> Result<(), String> {
         self.cancel(None).await?;
         let _gate = self.turn_gate.lock().await;
-        self.forget_all_locked().await
+        self.forget_all_locked(true).await
     }
 
-    async fn forget_all_locked(&self) -> Result<(), String> {
+    async fn forget_all_locked(&self, delete_observations:bool) -> Result<(), String> {
         let ids = self.memory.conversation_ids()?;
         // Fail honestly and retain the ledger if an external session could not be deleted.
         for id in ids { self.harness.forget_conversation(&id).await?; }
-        self.memory.forget_all_conversations()?;
+        self.memory.forget_all_conversations(delete_observations)?;
         Ok(())
     }
 }
@@ -138,6 +144,7 @@ fn memory_dispatch_now(store: &Store, method: &str, payload: Value) -> Result<Va
             "profile.update" => value(store.update_profile(required(&payload,"profile_id")?,parse(payload.get("profile").cloned().ok_or("profile_required")?)?)?),
             "profile.delete" => {store.delete_profile(required(&payload,"profile_id")?)?;Ok(json!({"deleted":true}))},
             "memory.list" => value(store.list_memories(payload.get("profile_id").and_then(Value::as_str))?),
+            "memory.unattributed.list" => store.list_unattributed(),
             "memory.save" => value(store.save_memory(parse(payload)?)?),
             "memory.delete" => {store.delete_memory(required(&payload,"id")?)?;Ok(json!({"deleted":true}))},
             "memory.status" => store.status(),

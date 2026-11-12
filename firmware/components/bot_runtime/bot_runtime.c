@@ -1,4 +1,5 @@
 #include "bot_runtime.h"
+#include "ambient_light.h"
 #include "idle_expression.h"
 #include "near_face.h"
 #include "passive_cycle.h"
@@ -16,10 +17,11 @@ struct bot_runtime {
     attention_manager_t attention;
     vatt_snapshot_t vision;
     bool has_vision, has_published, has_wake, wake_barrier_valid;
-    bool revoking, identity_exhausted;
+    bool revoking, identity_exhausted, waiting_for_approval;
     bot_passive_cycle_t passive_cycle;
     bot_idle_expression_t idle_expression;
     bot_near_face_t near_face;
+    bot_ambient_light_t ambient;
     uint32_t waking_since_ms, last_wake_ms, wake_barrier_ms, next_session_id;
     uint32_t last_sound_ms;
     uint32_t event_times[BOT_EVENT_COUNT];
@@ -77,13 +79,17 @@ static void derive_permissions(bot_runtime_t *runtime)
     bot_runtime_snapshot_t *state = &runtime->state;
     bool engaged = is_active(runtime) && !state->settings_open && !state->critical_fault &&
                    state->token.session_id != 0;
-    state->display_awake_requested = state->settings_open || state->behavior != BOT_BEHAVIOR_NIGHT_DARK;
+    state->display_awake_requested = state->settings_open ||
+        (state->reading_token.session_id && !state->night_policy && !state->ambient_dark) ||
+        (state->behavior != BOT_BEHAVIOR_NIGHT_DARK && state->behavior != BOT_BEHAVIOR_SLEEPING);
     /* Local daytime perception supports the requested close-face expression.
      * Face presence never creates a session or enables audio/network uplink. */
     const bool passive_camera = !is_active(runtime) && !state->settings_open &&
         !state->critical_fault && (state->behavior == BOT_BEHAVIOR_IDLE ||
         state->behavior == BOT_BEHAVIOR_BORED || state->behavior == BOT_BEHAVIOR_DROWSY);
-    state->camera_requested = engaged || passive_camera;
+    state->camera_requested = engaged || passive_camera ||
+        (state->behavior == BOT_BEHAVIOR_SLEEPING && state->ambient_probe &&
+         !state->settings_open && !state->critical_fault);
     state->audio_session_requested = engaged && !runtime->revoking;
     state->audio_uplink_permitted = state->audio_session_requested && runtime->config.allow_audio_uplink &&
                                    state->audio_available && secure_link(runtime);
@@ -134,6 +140,7 @@ static void set_passive(bot_runtime_t *runtime, uint32_t now_ms)
         state->clock_valid && state->night_policy,
         runtime->config.daytime_awake_ms, runtime->config.daytime_drowsy_ms);
     bot_behavior_t next = phase == BOT_PASSIVE_NIGHT ? BOT_BEHAVIOR_NIGHT_DARK :
+                          runtime->ambient.dark ? BOT_BEHAVIOR_SLEEPING :
                           phase == BOT_PASSIVE_DROWSY ? BOT_BEHAVIOR_DROWSY : BOT_BEHAVIOR_IDLE;
     if (state->behavior != next || state->conversation != BOT_CONVERSATION_NONE) {
         state->behavior = next;
@@ -155,14 +162,25 @@ static void invalidate_output(bot_runtime_t *runtime, const bot_session_token_t 
     runtime->revoking = false;
 }
 
-static void end_session(bot_runtime_t *runtime, uint32_t now_ms, bool fault)
+typedef enum { SESSION_DISMISSED, SESSION_INACTIVE, SESSION_FAULT } session_end_reason_t;
+
+static void dismiss_result(bot_runtime_snapshot_t *state)
+{
+    state->reading_token = (bot_session_token_t){0};
+    state->reading_text[0] = 0;
+}
+
+static void end_session(bot_runtime_t *runtime, uint32_t now_ms, session_end_reason_t reason)
 {
     bot_session_token_t old = runtime->state.token;
-    runtime->state.critical_fault |= fault;
+    runtime->state.critical_fault |= reason == SESSION_FAULT;
+    if (reason != SESSION_INACTIVE) dismiss_result(&runtime->state);
+    runtime->waiting_for_approval = false;
     advance_epoch(runtime);
     runtime->state.token.session_id = 0;
     runtime->state.token.turn_id = 0;
     runtime->state.token.focus_generation = 0;
+    runtime->state.activation = BOT_ACTIVATION_NONE;
     runtime->state.utterance_active = false;
     runtime->state.playback_id = 0;
     runtime->state.last_interaction_ms = now_ms;
@@ -179,9 +197,10 @@ static void end_session(bot_runtime_t *runtime, uint32_t now_ms, bool fault)
 static bool begin_turn(bot_runtime_t *runtime, uint32_t now_ms)
 {
     bot_session_token_t old = runtime->state.token;
+    runtime->waiting_for_approval = false;
     if (runtime->state.token.turn_id == UINT32_MAX || !advance_epoch(runtime)) {
         runtime->identity_exhausted = true;
-        end_session(runtime, now_ms, true);
+        end_session(runtime, now_ms, SESSION_FAULT);
         return false;
     }
     runtime->state.token.turn_id++;
@@ -199,9 +218,10 @@ static bool begin_turn(bot_runtime_t *runtime, uint32_t now_ms)
 
 static bool begin_session(bot_runtime_t *runtime, uint32_t now_ms)
 {
+    runtime->waiting_for_approval = false;
     if (runtime->next_session_id == UINT32_MAX || !advance_epoch(runtime)) {
         runtime->identity_exhausted = true;
-        end_session(runtime, now_ms, true);
+        end_session(runtime, now_ms, SESSION_FAULT);
         return false;
     }
     runtime->next_session_id++;
@@ -233,7 +253,7 @@ static bool consume_signals(bot_runtime_t *runtime, uint32_t *now_ms)
      * time from event data: within_age still rejects truly future observations. */
     *now_ms = read_now_ms(runtime, *now_ms);
     if (!signals.local_stop && !signals.critical_overflow) return false;
-    end_session(runtime, *now_ms, signals.critical_overflow);
+    end_session(runtime, *now_ms, signals.critical_overflow ? SESSION_FAULT : SESSION_DISMISSED);
     publish_state(runtime);
     return true;
 }
@@ -259,6 +279,7 @@ static bool source_allowed(const bot_event_t *event)
         return event->source == BOT_SOURCE_AUDIO || event->source == BOT_SOURCE_PLATFORM;
     case BOT_EVENT_TOUCH_WAKE:
     case BOT_EVENT_LOCAL_STOP:
+    case BOT_EVENT_RESULT_DISMISSED:
     case BOT_EVENT_SETTINGS_OPEN:
     case BOT_EVENT_SETTINGS_CLOSE:
     case BOT_EVENT_NIGHT_POLICY:
@@ -294,7 +315,10 @@ static void mark_wake(bot_runtime_t *runtime, const bot_event_t *event, uint32_t
     if (is_active(runtime)) {
         begin_turn(runtime, now_ms);
     } else {
-        begin_session(runtime, now_ms);
+        if (begin_session(runtime, now_ms)) {
+            runtime->state.activation = event->kind == BOT_EVENT_TOUCH_WAKE ?
+                BOT_ACTIVATION_TOUCH : BOT_ACTIVATION_WAKE_WORD;
+        }
     }
 }
 
@@ -318,7 +342,7 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
     if (event->kind == BOT_EVENT_FAULT && source_allowed(event)) {
         /* A locally reported fatal condition does not become harmless merely
          * because its producer was delayed. Explicit local recovery is required. */
-        end_session(runtime, now_ms, true);
+        end_session(runtime, now_ms, SESSION_FAULT);
         return;
     }
     if (event->kind < 0 || event->kind >= BOT_EVENT_COUNT || !source_allowed(event) ||
@@ -337,7 +361,7 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         }
         if (!stopped_this_step && !is_active(runtime) && !state->settings_open &&
             !state->critical_fault && !(state->clock_valid && state->night_policy) &&
-            state->behavior != BOT_BEHAVIOR_NIGHT_DARK) {
+            state->behavior != BOT_BEHAVIOR_NIGHT_DARK && state->behavior != BOT_BEHAVIOR_SLEEPING) {
             state->sound_reaction = true;
             state->sound_direction_valid = event->data.sound.direction_valid;
             state->sound_azimuth_deg = event->data.sound.azimuth_deg;
@@ -365,11 +389,14 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         mark_wake(runtime, event, now_ms);
         break;
     case BOT_EVENT_LOCAL_STOP:
-        end_session(runtime, now_ms, false);
+        end_session(runtime, now_ms, SESSION_DISMISSED);
+        break;
+    case BOT_EVENT_RESULT_DISMISSED:
+        dismiss_result(state);
         break;
     case BOT_EVENT_SETTINGS_OPEN:
         state->settings_open = true;
-        end_session(runtime, now_ms, false);
+        end_session(runtime, now_ms, SESSION_DISMISSED);
         break;
     case BOT_EVENT_SETTINGS_CLOSE:
         state->settings_open = false;
@@ -497,10 +524,10 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
             state->rejected_events++;
             break;
         }
-        end_session(runtime, now_ms, false);
+        end_session(runtime, now_ms, SESSION_DISMISSED);
         break;
     case BOT_EVENT_FAULT:
-        end_session(runtime, now_ms, true);
+        end_session(runtime, now_ms, SESSION_FAULT);
         break;
     default:
         state->rejected_events++;
@@ -583,6 +610,8 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
              state->conversation != BOT_CONVERSATION_THINKING))
             return BOT_COMMAND_REJECTED_INVALID;
         state->conversation = BOT_CONVERSATION_THINKING;
+        state->last_interaction_ms = now_ms;
+        runtime->waiting_for_approval = false;
         reset_expression(runtime);
         break;
     case BOT_COMMAND_REPLY_DONE:
@@ -590,14 +619,33 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
             (state->conversation != BOT_CONVERSATION_LISTENING &&
              state->conversation != BOT_CONVERSATION_THINKING))
             return BOT_COMMAND_REJECTED_INVALID;
+        if (command->data.caption[0]) {
+            if (!valid_text(command->data.caption, sizeof(command->data.caption)))
+                return BOT_COMMAND_REJECTED_INVALID;
+            memcpy(state->reading_text, command->data.caption, sizeof(state->reading_text));
+            state->reading_token = state->token;
+        } else if (state->reading_token.session_id == state->token.session_id &&
+                   state->reading_token.turn_id != state->token.turn_id) {
+            /* A failed follow-up while reading must not rearm the microphone
+             * on room noise. A deliberate touch can start a new question. */
+            end_session(runtime, now_ms, SESSION_INACTIVE);
+            break;
+        }
         /* Audio completion is a local event. This receipt closes a text-only
          * reply; a remote server cannot declare hardware playback completed. */
         state->conversation = BOT_CONVERSATION_WAITING;
+        runtime->waiting_for_approval = false;
         state->last_interaction_ms = now_ms;
         reset_expression(runtime);
         break;
+    case BOT_COMMAND_PROGRESS:
+        if (state->utterance_active || state->conversation != BOT_CONVERSATION_THINKING)
+            return BOT_COMMAND_REJECTED_INVALID;
+        runtime->waiting_for_approval = command->data.waiting_for_approval;
+        state->last_interaction_ms = now_ms;
+        break;
     case BOT_COMMAND_END_SESSION:
-        end_session(runtime, now_ms, false);
+        end_session(runtime, now_ms, SESSION_DISMISSED);
         break;
     default: return BOT_COMMAND_REJECTED_INVALID;
     }
@@ -667,15 +715,35 @@ void bot_runtime_destroy(bot_runtime_t *runtime)
 {
     if (!runtime) return;
     /* Stop producers and the owner loop before destruction. */
-    end_session(runtime, runtime->state.last_interaction_ms, false);
+    end_session(runtime, runtime->state.last_interaction_ms, SESSION_DISMISSED);
     publish_state(runtime);
     free(runtime);
+}
+
+static void update_ambient(bot_runtime_t *runtime, uint32_t now_ms)
+{
+    bot_runtime_snapshot_t *state = &runtime->state;
+    const bool allow_probe = !is_active(runtime) && !state->settings_open && !state->critical_fault &&
+        !(state->clock_valid && state->night_policy);
+    bot_ambient_step(&runtime->ambient, now_ms, allow_probe);
+    state->ambient_dark = runtime->ambient.dark;
+    state->ambient_sample_valid = runtime->ambient.valid;
+    state->ambient_luma = runtime->ambient.luma;
+    state->ambient_probe = runtime->ambient.probing;
+}
+
+void bot_runtime_observe_light(bot_runtime_t *runtime, uint8_t mean_luma,
+                               uint32_t captured_ms, uint32_t now_ms)
+{
+    if (!runtime || !within_age(now_ms, captured_ms, 2000)) return;
+    bot_ambient_observe(&runtime->ambient, mean_luma, captured_ms);
 }
 
 void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
 {
     if (!runtime) return;
     now_ms = read_now_ms(runtime, now_ms);
+    update_ambient(runtime, now_ms);
     /* Debounce/barrier clocks are short leases, not a permanent comparison to
      * a boot-old timestamp. Expire them while stepping across timer wraps. */
     if (runtime->has_wake && !within_age(now_ms, runtime->last_wake_ms,
@@ -728,8 +796,10 @@ void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
     }
     consume_signals(runtime, &now_ms);
     if (is_active(runtime)) {
-        if (!within_age(now_ms, runtime->state.last_interaction_ms, runtime->config.session_timeout_ms)) {
-            end_session(runtime, now_ms, false);
+        uint32_t timeout_ms = runtime->config.session_timeout_ms;
+        if (runtime->waiting_for_approval && timeout_ms < 180000) timeout_ms = 180000;
+        if (!within_age(now_ms, runtime->state.last_interaction_ms, timeout_ms)) {
+            end_session(runtime, now_ms, SESSION_INACTIVE);
         } else if (runtime->state.behavior == BOT_BEHAVIOR_WAKING &&
                    (int32_t)(now_ms - runtime->waking_since_ms) >= 0 &&
                    (uint32_t)(now_ms - runtime->waking_since_ms) >= runtime->config.waking_ms) {
@@ -739,6 +809,7 @@ void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
     } else {
         set_passive(runtime, now_ms);
     }
+    update_ambient(runtime, now_ms);
     derive_permissions(runtime);
     runtime->state.near_face = bot_near_face_step(&runtime->near_face,
         runtime->has_vision && runtime->state.camera_available ? &runtime->vision : NULL, now_ms,
@@ -748,6 +819,7 @@ void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
         &runtime->state.near_face_area_permille);
     if (is_active(runtime) || runtime->state.settings_open || runtime->state.critical_fault ||
         runtime->state.behavior == BOT_BEHAVIOR_NIGHT_DARK ||
+        runtime->state.behavior == BOT_BEHAVIOR_SLEEPING ||
         !within_age(now_ms, runtime->last_sound_ms, 1800)) {
         runtime->state.sound_reaction = false;
         runtime->state.sound_direction_valid = false;
@@ -782,7 +854,7 @@ void bot_runtime_clear_fault(bot_runtime_t *runtime, uint32_t now_ms)
      * they can receive an explicit stale/passive receipt; they regain no lease. */
     if (consume_signals(runtime, &now_ms)) return;
     runtime->state.critical_fault = false;
-    end_session(runtime, now_ms, false);
+    end_session(runtime, now_ms, SESSION_DISMISSED);
     derive_permissions(runtime);
     publish_state(runtime);
 }

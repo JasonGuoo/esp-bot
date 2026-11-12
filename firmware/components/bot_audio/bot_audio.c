@@ -5,6 +5,7 @@
  */
 #include "bot_audio.h"
 #include "bot_audio_afe.h"
+#include "followup_vad.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,7 +91,7 @@ struct bot_audio {
     bot_audio_token_t session;
     uint32_t afe_reset_requested, afe_epoch;
     bot_audio_token_t afe_token;
-    bool afe_speech;
+    bool afe_speech, waiting_for_followup;
     uint32_t afe_speech_epoch;
     unsigned afe_failures;
     bool playback_requested, playback_cancelled, playback_end_enqueued;
@@ -515,6 +516,7 @@ static void fetch_frame(bot_audio_t *a)
     a->passive_speech = a->run && a->capture_good && !echo_block && result->vad_state == VAD_SPEECH;
     bool vad_allowed = a->run && a->capture_good && a->status.session_open && epoch != 0 &&
                        epoch == a->gate_epoch && a->status.rx_discard_frames == 0 && !echo_block;
+    const bool waiting_for_followup = a->waiting_for_followup;
     bool wake = a->run && a->capture_good && a->status.wake_status == BOT_AUDIO_WAKE_READY &&
                 result->wakeup_state == WAKENET_DETECTED &&
                 result->wakenet_model_index == 1 && result->wake_word_index == 1;
@@ -534,7 +536,8 @@ static void fetch_frame(bot_audio_t *a)
         a->afe_speech_epoch = epoch;
     }
     if (!vad_allowed) return;
-    bool next_speech = result->vad_state == VAD_SPEECH;
+    bool next_speech = bot_audio_speech_frame(result->vad_state == VAD_SPEECH,
+        result->data_volume, waiting_for_followup, a->afe_speech);
     if (next_speech != a->afe_speech) {
         a->afe_speech = next_speech;
         emit(a, (bot_audio_event_t){.kind = next_speech ? BOT_AUDIO_EVENT_VAD_STARTED : BOT_AUDIO_EVENT_VAD_ENDED,
@@ -854,16 +857,19 @@ esp_err_t bot_audio_start(bot_audio_t *a)
     return ESP_OK;
 }
 
-esp_err_t bot_audio_set_session(bot_audio_t *a, const bot_audio_token_t *token, bool deliver_pcm)
+static esp_err_t set_session(bot_audio_t *a, const bot_audio_token_t *token,
+                             bool deliver_pcm, bool waiting_for_followup)
 {
-    if (!a || (!token && deliver_pcm) || (token && (!token->epoch || !token->session_id))) return ESP_ERR_INVALID_ARG;
+    if (!a || (!token && (deliver_pcm || waiting_for_followup)) ||
+        (token && (!token->epoch || !token->session_id))) return ESP_ERR_INVALID_ARG;
     LOCK(a);
     if (!a->run) {
         UNLOCK(a);
         return ESP_ERR_INVALID_STATE;
     }
     bool unchanged = a->status.session_open == (token != NULL) &&
-        a->status.pcm_delivery_enabled == deliver_pcm && (!token || same_token(&a->session, token));
+        a->status.pcm_delivery_enabled == deliver_pcm && a->waiting_for_followup == waiting_for_followup &&
+        (!token || same_token(&a->session, token));
     if (unchanged) {
         UNLOCK(a);
         return ESP_OK;
@@ -872,6 +878,7 @@ esp_err_t bot_audio_set_session(bot_audio_t *a, const bot_audio_token_t *token, 
     if (++a->gate_epoch == 0) ++a->gate_epoch;
     a->status.session_open = token != NULL;
     a->status.pcm_delivery_enabled = token && deliver_pcm;
+    a->waiting_for_followup = waiting_for_followup;
     a->session = token ? *token : (bot_audio_token_t){0};
     a->status.rx_discard_frames = token ? a->dma_frames + a->capture_samples : 0;
     a->afe_reset_requested = 0; /* fetch acknowledges only after fresh RX fence */
@@ -882,6 +889,16 @@ esp_err_t bot_audio_set_session(bot_audio_t *a, const bot_audio_token_t *token, 
     }
     UNLOCK(a);
     return ESP_OK;
+}
+
+esp_err_t bot_audio_set_session(bot_audio_t *a, const bot_audio_token_t *token, bool deliver_pcm)
+{
+    return set_session(a, token, deliver_pcm, false);
+}
+
+esp_err_t bot_audio_wait_for_followup(bot_audio_t *a, const bot_audio_token_t *token)
+{
+    return set_session(a, token, false, true);
 }
 
 esp_err_t bot_audio_playback_begin(bot_audio_t *a, const bot_audio_token_t *token, uint32_t *out_id)

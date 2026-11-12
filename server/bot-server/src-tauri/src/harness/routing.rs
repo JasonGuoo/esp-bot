@@ -16,6 +16,7 @@ pub enum FailureKind {
     Authentication,
     Configuration,
     Transport,
+    HeadersTimeout,
     Upstream,
     Cancelled,
 }
@@ -28,6 +29,7 @@ impl FailureKind {
             Self::Authentication => "provider_authentication",
             Self::Configuration => "provider_configuration",
             Self::Transport => "opencode_transport",
+            Self::HeadersTimeout => "provider_headers_timeout",
             Self::Upstream => "provider_error",
             Self::Cancelled => "turn_cancelled",
         }
@@ -58,6 +60,7 @@ impl Failure {
     pub fn permits_route_change(&self, config: &HarnessConfig) -> bool {
         self.kind == FailureKind::QuotaExhausted
             || (self.kind == FailureKind::RateLimited && config.fallback_on_rate_limit)
+            || matches!(self.kind, FailureKind::HeadersTimeout | FailureKind::Authentication | FailureKind::Configuration)
     }
 }
 
@@ -102,6 +105,8 @@ pub(super) fn classify(error: &Value, route: &ModelRoute, http_status: Option<u1
         || text.contains("modelnotfound") || text.contains("providernotfound")
     {
         FailureKind::Configuration
+    } else if text.contains("timed out waiting for response headers") {
+        FailureKind::HeadersTimeout
     } else {
         FailureKind::Upstream
     };
@@ -114,6 +119,7 @@ pub(super) fn classify(error: &Value, route: &ModelRoute, http_status: Option<u1
             FailureKind::RateLimited => "provider reported a temporary rate or concurrency limit",
             FailureKind::Authentication => "check the selected provider's credential and subscription endpoint",
             FailureKind::Configuration => "check provider, model, endpoint and request configuration",
+            FailureKind::HeadersTimeout => "provider did not return response headers in time",
             _ => "OpenCode reported an upstream failure; inspect its local diagnostics",
         },
     }
@@ -139,6 +145,7 @@ impl RoutingState {
         let default_ms = match error.kind {
             FailureKind::QuotaExhausted => config.quota_cooldown_secs.saturating_mul(1_000),
             FailureKind::RateLimited => config.rate_limit_cooldown_secs.saturating_mul(1_000),
+            FailureKind::HeadersTimeout | FailureKind::Authentication | FailureKind::Configuration => 300_000,
             _ => 0,
         };
         let at = super::now_ms();
@@ -147,5 +154,21 @@ impl RoutingState {
             retry_at_ms: at.saturating_add(error.retry_after_ms.unwrap_or(default_ms)),
             reset_is_provider_hint: error.retry_after_ms.is_some(),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn response_header_timeout_is_eligible_but_generic_failure_is_not() {
+        let route=ModelRoute::default();let config=HarnessConfig::default();
+        let timeout=classify(&json!({"message":"Timed out waiting for response headers"}),&route,None);
+        assert_eq!(timeout.kind,FailureKind::HeadersTimeout);
+        assert!(timeout.permits_route_change(&config));
+        let unknown=classify(&json!({"message":"upstream execution failed"}),&route,None);
+        assert_eq!(unknown.kind,FailureKind::Upstream);
+        assert!(!unknown.permits_route_change(&config));
     }
 }

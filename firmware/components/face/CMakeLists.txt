@@ -6,7 +6,8 @@ idf_component_register(
         "renderer_outline.c"
         "renderer_pill.c"
         "renderer_eve.c"
-        "fonts/xiaodai_font_sc_16.c"
+        "fonts/xiaodai_font_sc_22.c"
+        "fonts/xiaodai_font_sc_30.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."
     REQUIRES lvgl__lvgl

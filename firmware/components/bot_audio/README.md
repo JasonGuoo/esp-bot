@@ -92,9 +92,11 @@ ESP-SR 2.6.1 的 CMake 在 `CONFIG_PARTITION_TABLE_CUSTOM` 开启且找到 `mode
 `bot_audio_set_session(audio, token, deliver_pcm)` 有两个独立含义：
 
 - `token!=NULL`：允许这个运行时会话产生本地 VAD 事件。
-- `deliver_pcm=true`：另外允许 `on_pcm` 接收会话后采集的数据。只有上层已经确认授权、配对、认证、加密传输后才应设置；当前纯文本 LAN 连接必须保持 false。
+- `deliver_pcm=true`：另外允许 `on_pcm` 接收会话后采集的数据。上层必须先完成明确激活及设备认证，并按用户选择的音频传输策略接线；当前设备使用独立的局域网明文 TCP 音频通道，旧 LAN v1 诊断连接不能授权此回调。
 
-任何 token 字段变化、传输权限变化、关闭或重新开启会话都会增加内部 gate epoch。新的采集窗口先丢弃至少官方 I2S DMA 容量加一个采集块的数据，再重置 AFE ring buffer 与 VAD 状态。重置返回值不成功时，检测被关闭，不会假装完成隔离。相同 token/权限重复调用是幂等操作，可用于主程序每 20 ms 的 reconcile。
+回答后等待下一句话时，运行时调用 `bot_audio_wait_for_followup(audio, token)`。此时只有官方 AFE 同时报告语音且帧音量达到 −42 dBFS 才触发追问。沿用 AFE 的 `data_volume` 和 Mac ASR 的活跃帧门槛。已经开始的语音由 VAD 判断结束，主动触摸后的首句沿用原有灵敏度。
+
+任何 token 字段、传输权限或等待模式变化，以及关闭或重新开启会话，都会增加内部 gate epoch。新的采集窗口先丢弃至少官方 I2S DMA 容量加一个采集块的数据，再重置 AFE ring buffer 与 VAD 状态。重置返回值不成功时，检测被关闭。相同 token、权限和等待模式重复调用是幂等操作，可用于主程序每 20 ms 的 reconcile。
 
 会话切换还会取消旧 token 的播放。VAD 的 speech 状态按 epoch 重建：如果孩子持续说话且上层更换 turn token，新 epoch 在拿到新的语音结果后重新发 START，然后用该 token 发 END。因此运行时在 WAITING 收到 START 后建立新轮次的模式可以接续。DMA 丢弃和检测重置可能截断轮次开头的少量音频，这是当前显式授权边界的取舍；没有偷偷补发旧 `vad_cache`。
 
@@ -135,7 +137,7 @@ Wake 事件的 `echo_safe=true` 只表示当时未处于自身播放或尾音屏
 | `CONFIG_BOT_AUDIO_PLAYBACK_QUEUE_FRAMES` | 12 | 有界播放队列槽数 |
 | `CONFIG_BOT_AUDIO_WORKER_PRIORITY` | 8 | 采集/AFE 与播放两个应用音频任务的优先级 |
 
-主程序使用 `bot_audio_default_config()`，设置 `on_event` 与 context 后 create/start。需要启用 PCM 回调时再接入 `on_pcm` 并提供对应的加密传输授权；当前主程序保留 `on_pcm=NULL`、`deliver_pcm=false`。VAD、wake、playback 回调与运行时状态的映射见 [INTEGRATION.md](INTEGRATION.md)。
+主程序使用 `bot_audio_default_config()`，设置 `on_event`、`on_pcm` 与 context 后 create/start。仅在明确会话、设备认证和音频通道就绪时允许 PCM 回调；未经唤醒或触摸时 `deliver_pcm=false`。VAD、wake、playback 回调与运行时状态的映射见 [INTEGRATION.md](INTEGRATION.md)，实板验证状态见 [整合记录](../../../docs/server-integration-2026-11-08.md)。
 
 要求项目配置 `CONFIG_CODEC_ES8389_SUPPORT=y`、`CONFIG_MODEL_IN_FLASH=y`、可供官方 AFE 使用的 PSRAM，以及 ESP32-S31 BSP 所需配置。`CONFIG_BSP_ERROR_CHECK=n` 允许可恢复的 BSP 错误返回上层，而不是在 BSP 宏内 abort。运行时仍必须处理 start 返回错误和健康状态变化。
 

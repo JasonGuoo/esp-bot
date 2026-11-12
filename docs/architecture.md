@@ -2,6 +2,8 @@
 
 **This is the canonical overall architecture.** Older descriptions of the first Python Brain/Face demo are historical implementation snapshots, not competing design authorities. For event schemas use [module-contracts.md](module-contracts.md); for passive UX use [behavior-lifecycle.md](behavior-lifecycle.md); for concrete sensor/actuator boundaries use [eye-contact.md](eye-contact.md) and [hardware-power.md](hardware-power.md).
 
+**Current integration, 2026-11-08:** The Mac app and ESP32-S31 firmware have been built locally, the board is connected over Wi-Fi, and its WSS control connection has authenticated. At the user's request, current per-turn LAN PCM is plaintext with integrity checks; WSS still protects credentials, control, and text. One device speech turn reached local ASR, GLM and the device playback queue; physical sound and long-term stability remain unverified. See [integration results](server-integration-2026-11-08.md). The older status paragraphs below describe their respective deliveries.
+
 **Implementation update 2026-11-06:** [local-runtime.md](local-runtime.md) records the source-integrated firmware. Hardware is awaiting delivery; this change was not compiled or tested. “Stationary V1” below describes the initial target configuration, not a verified installed robot. The custom wake model remains absent.
 
 **Latest Mac decision and source integration, 2026-11-06:** [mac-bot-server.md](mac-bot-server.md)
@@ -96,7 +98,7 @@ In a running implementation bot_runtime manages lifecycle and priorities, **not 
 
 ## 4. Interaction state and autonomy
 
-- bot_runtime retains IDLE, BORED, DROWSY, SLEEPING, NIGHT_DARK, WAKING and ENGAGED identifiers for compatibility. The daytime passive policy uses IDLE ↔ brief DROWSY; it does not automatically enter BORED or indefinite SLEEPING. LISTENING/THINKING/SPEAKING and visual focus remain separate substates.
+- bot_runtime retains IDLE, BORED, DROWSY, SLEEPING, NIGHT_DARK, WAKING and ENGAGED identifiers. The ordinary daytime passive policy uses IDLE ↔ brief DROWSY; sustained camera-estimated room darkness can independently enter SLEEPING until brightness recovers, without starting a conversation. Scheduled NIGHT_DARK remains higher priority. LISTENING/THINKING/SPEAKING and visual focus remain separate substates. See [behavior-lifecycle.md](behavior-lifecycle.md) for the provisional camera-based thresholds and hardware limits.
 - *No engagement merely because a person is visible or looking toward Bot*. Human gaze is perception, not permission to initiate conversation.
 - Full **小呆小呆** locally recognized or a deliberate user touch/manual action authorizes engagement. During an active session the name need not be repeated each sentence.
 - Night screen-off is application-level low-activity mode: keyword/audio path stays alive, camera/inference stops, display sleep requested. Actual full physical blackout on current board is not yet proven.

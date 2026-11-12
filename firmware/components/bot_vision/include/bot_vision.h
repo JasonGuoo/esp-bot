@@ -121,6 +121,9 @@ esp_err_t bot_vision_start(const bot_vision_config_t *config, bot_vision_t **out
  * BSP XCLK remains initialized; this does not claim camera rail power-off.
  * Pause takes effect after any already-running synchronous model invocation. */
 esp_err_t bot_vision_set_enabled(bot_vision_t *vision, bool enabled);
+/** While enabled, capture brightness metadata only; skip face inference and
+ * preview callbacks. Used for short ambient-light probes during sleep. */
+esp_err_t bot_vision_set_light_only(bot_vision_t *vision, bool light_only);
 /** Request official sensor flips. Stream and old face tracks restart on change. */
 esp_err_t bot_vision_set_sensor_orientation(bot_vision_t *vision, uint8_t orientation);
 /** Request shutdown and wait up to timeout_ms. On timeout, keep the handle and

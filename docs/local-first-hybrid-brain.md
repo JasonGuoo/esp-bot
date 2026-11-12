@@ -1,5 +1,7 @@
 # Local-First Hybrid Brain — product architecture decision (2026-10-30)
 
+**Current status, 2026-11-08:** The firmware and Mac app are built and the real board has authenticated over Wi-Fi. The user chose plaintext LAN audio with integrity checks; control remains WSS. End-to-end speech, BLE, the dedicated wake model, and a physical speaker remain unverified or pending. See [integration results](server-integration-2026-11-08.md); earlier delivery status below is historical.
+
 **Status: NEW SELECTED DESIGN, not implemented end-to-end. Supersedes older assumptions that Mac/Linux is only a generic optional HTTP Brain and that every new capability gets its own route.**
 
 **2026-11-06 update:** the user's latest explicit LLM choice is **OpenCode v2**,

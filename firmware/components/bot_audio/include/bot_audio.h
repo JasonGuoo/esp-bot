@@ -149,6 +149,9 @@ esp_err_t bot_audio_destroy(bot_audio_t *audio, uint32_t timeout_ms);
 esp_err_t bot_audio_set_session(bot_audio_t *audio, const bot_audio_token_t *token,
                                 bool deliver_pcm);
 
+/** Keep VAD local while an active conversation waits for audible follow-up speech. */
+esp_err_t bot_audio_wait_for_followup(bot_audio_t *audio, const bot_audio_token_t *token);
+
 /** One producer submits one bounded PCM stream at a time. Token must match the
  * open local session. BEGIN is silent until the first queued audio frame.
  * Enqueue APIs are nonblocking; ESP_ERR_TIMEOUT means backpressure, not success.

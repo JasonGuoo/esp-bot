@@ -80,7 +80,7 @@ static void post_event(bot_bus_t *bus, bot_runtime_t *runtime, bot_event_t event
     bot_runtime_step(runtime, event.observed_ms);
 }
 
-static void test_processing_requires_server_ack(void)
+static void test_processing_requires_server_ack(bool failed_followup)
 {
     bot_runtime_config_t config = bot_runtime_default_config();
     config.waking_ms = 50;
@@ -143,6 +143,35 @@ static void test_processing_requires_server_ack(void)
     bot_runtime_step(runtime, 10140);
     bot_runtime_get_snapshot(runtime, &state);
     assert(state.conversation == BOT_CONVERSATION_THINKING && strcmp(state.expression, "thinking") == 0);
+    bus.command = (bot_command_t){.kind = BOT_COMMAND_REPLY_DONE, .token = secure_token,
+        .received_ms = 10160, .data.caption = "蓝盆高 4 厘米"};
+    bus.has_command = true;
+    bot_runtime_step(runtime, 10160);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.reading_token.session_id == secure_token.session_id);
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_UTTERANCE_STARTED,
+        .source = BOT_SOURCE_AUDIO, .observed_ms = 10200, .token = secure_token});
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.token.turn_id != secure_token.turn_id);
+    assert(state.reading_token.turn_id == secure_token.turn_id);
+    if (failed_followup) {
+        const bot_session_token_t followup = state.token;
+        post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_UTTERANCE_ENDED,
+            .source = BOT_SOURCE_AUDIO, .observed_ms = 10240, .token = followup});
+        bus.command = (bot_command_t){.kind = BOT_COMMAND_REPLY_DONE, .token = followup,
+            .received_ms = 10260};
+        bus.has_command = true;
+        bot_runtime_step(runtime, 10260);
+    } else {
+        bot_runtime_step(runtime, 12000);
+    }
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.audio_uplink_permitted && state.token.session_id == 0);
+    assert(state.display_awake_requested && strcmp(state.reading_text, "蓝盆高 4 厘米") == 0);
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_RESULT_DISMISSED,
+        .source = BOT_SOURCE_LOCAL_UI, .observed_ms = 12020});
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.reading_token.session_id && !*state.reading_text && !state.audio_uplink_permitted);
     bot_runtime_destroy(runtime);
 }
 
@@ -198,6 +227,78 @@ static void test_passive_sound_reactions(void)
     post_event(&bus, runtime, sound);
     bot_runtime_get_snapshot(runtime, &state);
     assert(!state.sound_reaction && state.rejected_events == rejected + 2);
+    bot_runtime_destroy(runtime);
+}
+
+static void light_sample(bot_runtime_t *runtime, uint8_t luma, uint32_t now)
+{
+    bot_runtime_observe_light(runtime, luma, now, now);
+    bot_runtime_step(runtime, now);
+}
+
+static void test_ambient_sleep_and_recovery(void)
+{
+    bot_bus_t bus = {0};
+    bot_runtime_t *runtime = NULL;
+    bot_runtime_snapshot_t state;
+    assert(bot_runtime_create(&bus, NULL, NULL, NULL, 1000, &runtime) == ESP_OK);
+    /* Brief darkness and a missing camera never count as continuous darkness. */
+    light_sample(runtime, 10, 1000);
+    light_sample(runtime, 10, 5000);
+    bot_runtime_step(runtime, 10000);
+    light_sample(runtime, 10, 10001);
+    for (uint32_t t = 11001; t <= 39001; t += 1000) light_sample(runtime, 10, t);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.ambient_dark && state.behavior == BOT_BEHAVIOR_IDLE);
+    light_sample(runtime, 10, 40001);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.ambient_dark && state.behavior == BOT_BEHAVIOR_SLEEPING);
+    assert(!state.display_awake_requested && !state.camera_requested && !state.ambient_probe);
+    assert(state.token.session_id == 0 && !state.audio_uplink_permitted);
+    bot_runtime_step(runtime, 70000);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.ambient_probe && !state.ambient_sample_valid);
+    bot_runtime_step(runtime, 70001);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.ambient_probe && state.camera_requested && !state.display_awake_requested);
+    /* A short bright flash cannot wake the robot. */
+    light_sample(runtime, 80, 71001);
+    light_sample(runtime, 20, 72001);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.ambient_dark);
+    for (uint32_t t = 73001; t <= 76001; t += 1000) light_sample(runtime, 80, t);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.ambient_dark && state.behavior == BOT_BEHAVIOR_IDLE);
+    assert(state.display_awake_requested && state.camera_requested && !state.ambient_probe);
+    assert(state.token.session_id == 0 && !state.audio_session_requested);
+    bot_runtime_destroy(runtime);
+}
+
+static void test_ambient_session_and_night_priority(void)
+{
+    bot_bus_t bus = {0};
+    bot_runtime_t *runtime = NULL;
+    bot_runtime_snapshot_t state;
+    assert(bot_runtime_create(&bus, NULL, NULL, NULL, 1000, &runtime) == ESP_OK);
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,
+        .source=BOT_SOURCE_LOCAL_UI, .observed_ms=1010, .data.touch={.intentional=true}});
+    for (uint32_t t = 2000; t <= 32000; t += 1000) light_sample(runtime, 10, t);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.ambient_dark && state.behavior == BOT_BEHAVIOR_ENGAGED);
+    assert(state.display_awake_requested && state.token.session_id != 0);
+    set_night(&bus, 32010, true);
+    bot_runtime_step(runtime, 32010);
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_LOCAL_STOP,
+        .source=BOT_SOURCE_LOCAL_UI, .observed_ms=32020});
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.behavior == BOT_BEHAVIOR_NIGHT_DARK && !state.camera_requested);
+    bot_runtime_step(runtime, 92020);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.ambient_probe && state.behavior == BOT_BEHAVIOR_NIGHT_DARK);
+    set_night(&bus, 92030, false);
+    bot_runtime_step(runtime, 92030);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.behavior == BOT_BEHAVIOR_SLEEPING && state.ambient_dark);
     bot_runtime_destroy(runtime);
 }
 
@@ -272,7 +373,10 @@ int main(void)
     bot_runtime_get_snapshot(runtime, &state);
     assert(!state.near_face && !state.camera_requested && state.behavior == BOT_BEHAVIOR_NIGHT_DARK);
     bot_runtime_destroy(runtime);
-    test_processing_requires_server_ack();
+    test_processing_requires_server_ack(false);
+    test_processing_requires_server_ack(true);
     test_passive_sound_reactions();
+    test_ambient_sleep_and_recovery();
+    test_ambient_session_and_night_priority();
     return 0;
 }

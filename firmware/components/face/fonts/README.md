@@ -1,15 +1,15 @@
 # 小呆中文界面字库
 
-`xiaodai_font_sc_16` 基于 LVGL 依赖中提供的 Source Han Sans SC Normal，
-使用 16 px、4 bpp 的静态字形。覆盖 ASCII、常见标点、CJK 基本汉字区
-U+4E00–U+9FFF 中源字体实际包含的字形，以及常用全角字符。它不能覆盖所有
-Unicode 扩展汉字或 emoji。现有主题、设置和固定状态提示中的字均已检查。
+结果、字幕和“关闭”按钮使用 30 px 的 Source Han Sans SC Normal。该字体采用
+2 bpp 抗锯齿，覆盖 ASCII、常见标点、源字体在 U+4E00–U+9FFF 中提供的汉字及
+常用全角字符。设置使用 22 px、4 bpp，小字库包含设置面板和生成的主题、
+表情名称所需的字符。增加设置文案或名称后重新运行生成器。
 
-字体数据位于应用分区并直接从 flash 读取，不在运行时加载整套字库，也不需要
-访问文件系统。应用分区需为该资源预留约 3 MiB；`LV_FONT_FMT_TXT_LARGE`
-必须开启。字体许可见 [OFL-SourceHanSans.txt](OFL-SourceHanSans.txt)。
+字形描述符和压缩位图随应用镜像发布。当前 S31 配置由 IDF 将只读数据映射到
+PSRAM；LVGL 按需解压当前字形。30 px 压缩位图占 3,040,023 字节。构建须开启 `LV_FONT_FMT_TXT_LARGE` 和
+`LV_USE_FONT_COMPRESSED`。字体许可见 [OFL-SourceHanSans.txt](OFL-SourceHanSans.txt)。
 
-复现：使用 LVGL 官方 `lv_font_conv` 1.5.3 与本项目 LVGL 依赖中的原字体：
+使用 LVGL 官方 `lv_font_conv` 1.5.3 和项目 LVGL 依赖中的原字体可重新生成。
 
 ```sh
 python3 firmware/components/face/fonts/generate_font.py \

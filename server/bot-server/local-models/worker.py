@@ -577,11 +577,74 @@ class Worker:
         gc.collect()
         return {"unloaded": True}
 
+    def display_image(self, payload: dict) -> dict:
+        """Prepare a single bounded still image for the device display."""
+        from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+        fields(payload, {"kind", "image_base64", "series", "unit"})
+        kind = payload.get("kind")
+        if kind == "photo":
+            raw = decode_base64(payload.get("image_base64"), 2 * 1024 * 1024)
+            with Image.open(io.BytesIO(raw)) as source:
+                if source.format not in {"JPEG", "PNG"} or source.width * source.height > MAX_IMAGE_PIXELS:
+                    fail("display_image_invalid", "Expected a bounded JPEG or PNG.")
+                image = ImageOps.exif_transpose(source).convert("RGB")
+                image.thumbnail((480, 272), Image.Resampling.LANCZOS)
+        elif kind == "bars":
+            series, unit = payload.get("series"), payload.get("unit")
+            if (not isinstance(series, list) or len(series) != 2 or not isinstance(unit, str)
+                    or not unit or len(unit) > 12):
+                fail("display_chart_invalid", "Expected two labelled values and a unit.")
+            for item in series:
+                if (not isinstance(item, dict) or set(item) != {"label", "value"}
+                        or not isinstance(item["label"], str) or not 0 < len(item["label"]) <= 12
+                        or isinstance(item["value"], bool) or not isinstance(item["value"], (int, float))
+                        or not math.isfinite(item["value"]) or not 0 <= item["value"] <= 1000000):
+                    fail("display_chart_invalid", "Invalid chart value.")
+            image = Image.new("RGB", (480, 272), "#fffdf6")
+            draw = ImageDraw.Draw(image)
+            font_path = "/System/Library/Fonts/STHeiti Medium.ttc"
+            title_font = ImageFont.truetype(font_path, 28)
+            value_font = ImageFont.truetype(font_path, 30)
+            label_font = ImageFont.truetype(font_path, 26)
+            draw.text((18, 7), f"单位：{unit}", fill="#1c293b", font=title_font)
+            baseline = 204
+            draw.line((22, baseline, 458, baseline), fill="#748394", width=2)
+            maximum = max(item["value"] for item in series) or 1
+            for index, item in enumerate(series):
+                center = 126 + index * 228
+                height = round(126 * item["value"] / maximum)
+                if height:
+                    draw.rectangle((center - 43, baseline - height, center + 43, baseline - 1),
+                                   fill=("#ce5a4d", "#4278b9")[index])
+                value = f"{item['value']:g}"
+                draw.text((center, baseline - height - 5), value, fill="#16263b", font=value_font, anchor="mb")
+                # Keep the full label, at a readable size, on at most two lines.
+                label = item["label"]
+                split = len(label)
+                while split > 1 and draw.textlength(label[:split], font=label_font) > 214:
+                    split -= 1
+                draw.text((center, 212), label[:split], fill="#16263b", font=label_font, anchor="mt")
+                if split < len(label):
+                    draw.text((center, 241), label[split:], fill="#16263b", font=label_font, anchor="mt")
+        else:
+            fail("display_image_invalid", "Unknown image kind.")
+
+        for quality in (88, 75, 60, 45):
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=quality, progressive=False, optimize=True)
+            raw = output.getvalue()
+            if len(raw) <= 65536:
+                return {"width": image.width, "height": image.height,
+                        "jpeg_base64": base64.b64encode(raw).decode("ascii")}
+        fail("display_image_too_large", "Prepared image exceeds the display limit.")
+
     def dispatch(self, op: str, payload: dict) -> dict:
         if op in {"health", "unload", "voices"}:
             fields(payload, set())
         handlers = {
             "health": lambda _: self.health(),
+            "display_image": self.display_image,
             "transcribe": self.transcribe,
             "speaker_embed": self.speaker_embed,
             "face_embed": self.face_embed,

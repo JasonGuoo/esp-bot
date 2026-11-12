@@ -2,17 +2,19 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LocalCamera, PcmRecorder, base64ToBuffer, readImageFile, readWavFile, type CapturedWav } from "./capture";
 import { CONSOLE_PANELS, consoleTemplate, type ConsolePanel } from "./console-layout";
-import { renderActivity, renderCapabilities, renderDeviceStatus, renderRuntimeMetrics } from "./console-presenters";
+import { deviceDeliveryText, deviceReplyMetrics, renderActivity, renderCapabilities, renderDeviceStatus, renderRuntimeMetrics, type DeviceDisplayReport } from "./console-presenters";
 import "./companion.css";
 import "./console.css";
 
 type JsonObject = Record<string, unknown>;
+type DeviceTurnView = { id: string; device: string; text: DeviceDisplayReport; image: DeviceDisplayReport };
 type Profile = { id: string; display_name: string; is_child: boolean };
 type MemoryRecord = {
   id: string; scope: "household" | "profile"; profile_id: string | null; content: string;
   category: string; source: string; source_ref: string | null; confirmed: boolean;
   allow_cloud: boolean; expires_at_ms: number | null;
 };
+type UnattributedMemory = { id: string; content: string; category: string; quote: string; created_at_ms: number };
 type Enrollment = { profile_id: string; kind: string; model_id: string; sample_count: number };
 type Card = { kind: string; title: string; body: string; url: string | null };
 type Scene = { speech: string; expression: string; cards: Card[] };
@@ -58,6 +60,8 @@ function errorText(error: unknown): string {
     ["brain_not_started", "服务尚未启动，请点击左下角“启动服务”。"],
     ["all_routes_unavailable", "当前没有可调用的模型路线。请在“模型与密钥”检查密钥、路线开关和冷却状态。"],
     ["local_worker_not_configured", "本地模型环境尚未配置，请在“本地能力”检查 Python 与 Worker 路径。"],
+    ["no_speech", "这段录音没有识别出文字。等小呆提示“请说”后再说一次。"],
+    ["audio_too_quiet", "小呆收到的声音太轻。请靠近麦克风，等“请说”后再试。"],
     ["brain_busy", "还有一个任务正在进行，可以先停止当前任务再重试。"],
     ["api_key_keychain_authorization_timeout", "等待 macOS 钥匙串授权已超时，密钥仍然保留。请完成系统授权，再点击“启动服务”。"],
     ["api_key_keychain_read", "macOS 未允许读取已保存密钥。请解锁登录钥匙串并完成系统授权，再启动服务。无需重新填写密钥。"],
@@ -94,10 +98,15 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   let panel: ConsolePanel = "talk";
   let profiles: Profile[] = [];
   let memories: MemoryRecord[] = [];
+  let unattributedMemories: UnattributedMemory[] = [];
   let enrollments: Enrollment[] = [];
   let selectedProfile: string | null = null;
   let conversationId = newId("console");
   let activeTurn: string | null = null;
+  let activeDeviceTurn: DeviceTurnView | null = null;
+  let resultDeviceTurn: DeviceTurnView | null = null;
+  const resultDelivery = element("p", "cc-caption");
+  const deviceToolEvents = new Set<string>();
   let turnGeneration = 0;
   let mediaGeneration = 0;
   let turnBusy = false;
@@ -566,9 +575,10 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   async function refreshFamily(): Promise<void> {
     const results = await Promise.allSettled([
       request<Profile[]>("profile.list"), request<MemoryRecord[]>("memory.list"), request<Enrollment[]>("identity.list"),
+      request<UnattributedMemory[]>("memory.unattributed.list"),
     ]);
     if (disposed) return;
-    const [people, notes, identities] = results;
+    const [people, notes, identities, unattributed] = results;
     if (people.status === "fulfilled") {
       profiles = people.value;
       if (selectedProfile && !profiles.some((profile) => profile.id === selectedProfile)) {
@@ -576,7 +586,9 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       }
       renderProfiles();
     }
-    if (notes.status === "fulfilled") { memories = notes.value; renderMemories(); }
+    if (notes.status === "fulfilled") memories = notes.value;
+    if (unattributed.status === "fulfilled") unattributedMemories = unattributed.value;
+    renderMemories();
     if (identities.status === "fulfilled") { enrollments = identities.value; renderEnrollments(); }
     for (const result of results) if (result.status === "rejected") { notice(errorText(result.reason), true); break; }
   }
@@ -609,13 +621,14 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   function renderMemories(): void {
     const query = $<HTMLInputElement>("#cc-memory-filter").value.trim().toLowerCase();
     const shown = memories.filter((memory) => `${memory.content} ${memory.category} ${profileName(memory.profile_id)}`.toLowerCase().includes(query));
-    $("#cc-memory-count").textContent = `(${shown.length})`;
+    const pending = unattributedMemories.filter((item) => `${item.content} ${item.category}`.toLowerCase().includes(query));
+    $("#cc-memory-count").textContent = `(${shown.length + pending.length})`;
     const host = $("#cc-memory-list"); host.replaceChildren();
     for (const memory of shown.slice(0, 100)) {
       const card = element("article", "cc-memory-item");
       const tags = element("div", "cc-memory-tags");
       tags.append(element("span", "cc-tag", memory.scope === "household" ? "家庭共享" : profileName(memory.profile_id)),
-        element("span", `cc-tag ${memory.confirmed ? "good" : "pending"}`, memory.confirmed ? "已确认" : "待确认"),
+        element("span", `cc-tag ${memory.confirmed ? "good" : "pending"}`, memory.source_ref?.startsWith("auto:") ? "自动提取" : memory.confirmed ? "已确认" : "待确认"),
         element("span", "cc-tag", memory.allow_cloud ? "允许云端" : "仅本地"));
       card.append(tags, element("p", "cc-memory-text", memory.content));
       const meta = element("div", "cc-memory-footer");
@@ -628,7 +641,24 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       }), "cc-button danger"));
       meta.append(actions); card.append(meta); host.append(card);
     }
-    if (!shown.length) host.append(element("p", "cc-muted", query ? "没有匹配的记忆。" : "还没有保存的记忆。记录一些有帮助的小偏好就够了。"));
+    for (const item of pending) {
+      const card = element("article", "cc-memory-item");
+      const tags = element("div", "cc-memory-tags");
+      tags.append(element("span", "cc-tag pending", "身份未确定"), element("span", "cc-tag", "自动提取 · 暂不参与个人召回"));
+      card.append(tags, element("p", "cc-memory-text", item.content), element("p", "cc-caption", `原话：${item.quote}`));
+      const actions=element("div", "cc-inline");
+      const select=element("select", "cc-input"); select.setAttribute("aria-label", "选择这条记忆所属成员");
+      const placeholder=element("option", "", "选择成员"); placeholder.value=""; select.append(placeholder);
+      for (const profile of profiles) {const option=element("option", "", profile.display_name); option.value=profile.id; select.append(option);}
+      actions.append(select, button("归属给成员", () => perform("正在关联记忆…", async () => {
+        if (!select.value) throw new Error("请先选择成员。");
+        await request("memory.unattributed.assign", {id:item.id,profile_id:select.value}); await refreshFamily(); notice("记忆已关联到所选成员。");
+      })), button("删除", () => perform("正在删除记忆…", async () => {
+        await request("memory.unattributed.delete", {id:item.id}); await refreshFamily(); notice("未归属记忆已删除。");
+      }), "cc-button danger"));
+      card.append(actions);host.append(card);
+    }
+    if (!shown.length && !pending.length) host.append(element("p", "cc-muted", query ? "没有匹配的记忆。" : "还没有保存的记忆。记录一些有帮助的小偏好就够了。"));
     if (shown.length > 100) host.append(element("p", "cc-caption", "当前显示前 100 条，请使用搜索缩小范围。"));
   }
   function resetMemoryForm(): void {
@@ -682,18 +712,23 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       if (disposed) return;
       const harness = object(value.harness);
       serviceReady = value.ready === true && value.accepting_turns === true && harness.healthy === true;
-      serviceRunning = harness.running === true || object(value.gateway).running === true;
+      const gatewayListening = object(value.gateway).running === true;
+      serviceRunning = harness.running === true || gatewayListening;
       const pill = $("#cc-service-pill");
-      pill.textContent = serviceReady ? "对话服务运行中" : value.ready === false ? "配置待处理" : "对话服务未启动";
+      pill.textContent = serviceReady ? "对话服务运行中" : value.ready === false ? "配置待处理" : gatewayListening ? "等待对话引擎，设备可连接" : "对话服务未启动";
       pill.classList.toggle("ready", serviceReady);
       $("#cc-service-dot").classList.toggle("ready", serviceReady);
       $("#cc-service-dot").classList.toggle("error", value.ready === false || (serviceRunning && !serviceReady));
       $("#cc-service-caption").textContent = `OpenCode ${string(harness.version, string(harness.source_version, "版本待读取"))} · Mac 本机`;
       $("#cc-updated-at").textContent = `更新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })} · 每 15 秒刷新`;
       $("#cc-status-summary").textContent = value.ready === false ? string(value.error, "配置未完成")
-        : `${serviceReady ? "可以开始对话" : serviceRunning ? "对话服务未就绪，可停止后重试" : "对话服务未启动，可在左下角启动"} · OpenCode ${string(harness.version, string(harness.source_version, "版本待读取"))} · ${string(harness.mode, "managed")}`;
+        : `${serviceReady ? "可以开始对话" : gatewayListening ? "设备入口已监听；可点击启动服务重试对话引擎" : serviceRunning ? "对话服务未就绪，可停止后重试" : "对话服务未启动，可在左下角启动"} · OpenCode ${string(harness.version, string(harness.source_version, "版本待读取"))} · ${string(harness.mode, "managed")}`;
       $("#cc-status-json").textContent = pretty(value);
       $("#cc-config-path").textContent = string(value.config_path);
+      const memoryState=object(value.memory), pending=number(memoryState.background_pending), failed=number(memoryState.background_failed);
+      $("#cc-memory-background").textContent = value.background_memory_model_ready === true
+        ? `本地后台整理 · 待处理 ${pending} 条${failed ? ` · ${failed} 条需要检查` : ""}。身份不明确的内容先暂存。`
+        : `本地后台整理模型尚未就绪 · 待处理 ${pending} 条。`;
       renderKeySettings(list(harness.routes));
       renderRoutes(list(harness.routes));
       renderDeviceStatus(container, value);
@@ -722,7 +757,11 @@ export function mountCompanion(container: HTMLElement): CompanionController {
         : route.credential_present !== true ? "等待配置密钥" : "已配置密钥 · 等待实际调用确认";
       if (route.cooling_down === true) state = `暂时跳过 · ${new Date(number(route.retry_at_ms)).toLocaleTimeString()} 后再尝试`;
       card.append(element("span", "cc-caption", state));
-      if (route.last_failure) card.append(element("span", "cc-caption", string(route.last_failure)));
+      if (route.last_failure) {
+        const reason=string(route.last_failure);
+        const labels:Record<string,string>={headers_timeout:"服务商响应超时",authentication:"密钥或订阅验证失败",configuration:"模型或端点配置有误",quota_exhausted:"额度不足",rate_limited:"请求暂时受限"};
+        card.append(element("span", "cc-caption", labels[reason] ?? reason));
+      }
       card.append(route.id === keyRoute.value ? element("span", "cc-tag good", "当前选择") : button("配置此路线", () => selectRoute(string(route.id))));
       if (route.cooling_down === true) card.append(button("重新尝试此路线", () => perform("正在清除该路线的冷却状态…", async () => {
         await request("harness.route.reset", { route_id: string(route.id) }); await refreshStatus(); notice("冷却状态已清除，下次对话按模型顺序重试。");
@@ -1232,12 +1271,84 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       if (kind === "service.started") phase("idle", "服务已启动，可以开始对话。");
       if (kind === "service.stopped") {
         cancelCapture(); closeCamera(); stopPlayback(); phase("idle", "服务已停止。");
+        activeDeviceTurn = null;
+        resultDeviceTurn = null;
+        $("#cc-device-turn").hidden = true;
+        $("#cc-device-turn-result").replaceChildren();
         if (latestModelHealth) {
           for (const model of Object.values(object(object(latestModelHealth.models).models))) object(model).loaded = false;
           renderCapabilities(container, latestModelHealth);
         }
       }
       const eventTurn = string(data.turn_id);
+      if (kind === "device.turn.started" && eventTurn) {
+        const device = string(object(data.payload).device_id);
+        activeDeviceTurn = { id: eventTurn, device, text: null, image: null };
+        deviceToolEvents.clear();
+        $("#cc-device-turn").hidden = false;
+        $("#cc-device-turn-status").textContent = "正在处理设备上的请求";
+        if (!device || resultDeviceTurn?.device !== device) {
+          $("#cc-device-turn-result").replaceChildren();
+          resultDeviceTurn = null;
+        }
+        resultDelivery.hidden = !resultDeviceTurn;
+        $("#cc-device-tool-events").replaceChildren();
+      } else if (kind === "device.display" && eventTurn) {
+        const turn = activeDeviceTurn?.id === eventTurn ? activeDeviceTurn : resultDeviceTurn?.id === eventTurn ? resultDeviceTurn : null;
+        const display = object(data.payload);
+        if (turn && (display.status === "rendered" || display.status === "unavailable")
+          && (display.part === "text" || display.part === "image")) {
+          turn[display.part] = display.status;
+          const label = deviceDeliveryText(turn.text, turn.image);
+          if (turn === activeDeviceTurn) $("#cc-device-turn-status").textContent = label;
+          if (turn === resultDeviceTurn) resultDelivery.textContent = label;
+        }
+      } else if (eventTurn && activeDeviceTurn?.id === eventTurn) {
+        const status = $("#cc-device-turn-status");
+        if (kind === "harness_tool_activity") {
+          const call = string(data.call_id), phase = string(data.phase), tool = string(data.tool);
+          const labels: Record<string, string> = { "session.tool.called": "开始", "session.tool.success": "返回", "session.tool.failed": "失败" };
+          const key = `${string(data.message_id)}:${call}:${phase}`;
+          if (call && labels[phase] && !deviceToolEvents.has(key)) {
+            deviceToolEvents.add(key);
+            $("#cc-device-tool-events").append(element("p", "cc-caption", `${labels[phase]} · ${tool || "工具"} · ${call}`));
+          }
+        }
+        if (kind === "turn.transcribing") status.textContent = "正在转写设备语音";
+        else if (kind === "turn.thinking") status.textContent = "正在处理请求";
+        else if (kind === "harness_permission_required") status.textContent = "等待在 Mac 上确认工具操作";
+        else if (kind === "harness_question_required") status.textContent = "等待在 Mac 上回答问题";
+        else if (kind === "harness_tool_activity" && data.phase === "session.tool.called") status.textContent = `正在使用工具 ${string(data.tool)}`;
+        else if (kind === "harness_tool_activity" && data.phase === "session.tool.success") status.textContent = `工具已返回 ${string(data.tool)}`;
+        else if (kind === "device.turn.failed" || kind === "turn.cancelled") status.textContent = kind === "turn.cancelled" ? "任务已停止" : errorText(object(data.payload).code);
+        else if (kind === "device.turn.completed") {
+          const payload = object(data.payload);
+          const scene = object(payload.scene);
+          const result = $("#cc-device-turn-result");
+          resultDeviceTurn = activeDeviceTurn;
+          const heading = payload.outcome === "needs_input" ? "最近一次回复 · 需要补充"
+            : payload.outcome === "partial" ? "最近一次回复 · 部分完成" : "最近一次回复";
+          result.replaceChildren(element("h3", "", heading), element("p", "cc-muted", string(payload.transcript)), element("p", "", string(scene.speech)));
+          for (const value of list(scene.cards).slice(0, 4)) {
+            const card = object(value);
+            result.append(renderCard({ kind: string(card.kind), title: string(card.title),
+              body: string(card.body), url: typeof card.url === "string" ? card.url : null }));
+          }
+          const imageData = string(payload.image_base64);
+          if (imageData && imageData.length <= 90_000 && /^[A-Za-z0-9+/=]+$/.test(imageData)) {
+            const image = element("img", "cc-card-image");
+            image.alt = "设备收到的图片";
+            image.src = `data:image/jpeg;base64,${imageData}`;
+            result.append(image);
+          }
+          const metrics = deviceReplyMetrics(payload);
+          if (metrics) result.append(element("p", "cc-caption", metrics));
+          resultDelivery.textContent = deviceDeliveryText(activeDeviceTurn.text, activeDeviceTurn.image);
+          resultDelivery.hidden = true;
+          result.append(resultDelivery);
+          status.textContent = resultDelivery.textContent;
+        }
+      }
       if (!eventTurn || eventTurn !== activeTurn) return;
       if (kind === "turn.transcribing") phase("thinking", "先在 Mac 上听懂这句话…");
       else if (kind === "turn.thinking") phase("thinking");

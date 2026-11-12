@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>在局域网公布小呆服务，让已配对的设备自动发现这台 Mac 并连接。</string>
+  <key>NSBonjourServices</key>
+  <array><string>_espbot-brain._tcp</string><string>_espbot-server._tcp</string></array>
   <key>NSMicrophoneUsageDescription</key>
   <string>在你点击录音后，小呆会用本地语音模型转写这段声音。停止后立即关闭麦克风。</string>
   <key>NSCameraUsageDescription</key>

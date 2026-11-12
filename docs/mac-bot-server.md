@@ -5,8 +5,10 @@ Apple Silicon Mac 完成 TypeScript / Vite、Rust release、依赖锁文件解�
 并实际打开控制台、读取用户保存的钥匙串密钥、启动和停止官方 OpenCode v2.2.5。
 2026-11-08 的本机测试已尝试真实 Qwen 对话请求，但该端点 TLS 握手超时，未得到模型回复；
 GLM 和 DeepSeek 仅完成无凭据的网络连通性检查。Mac 控制台现可复用 RMA 的 Qwen3-ASR
-优化 worker，合成中文样本已识别成功；实板私密语音链路仍未打通。当前控制台只保留小呆功能，API Key 可在
-“模型与密钥”中配置；详细范围见 [Mac 控制台](mac-console.md)。实板状态以 [接入记录](board-bringup-2026-11-06.md) 为准，本轮已观察到诊断在线。
+优化 worker，合成中文样本及一次实板语音回合已识别成功；后者通过 GLM 返回并进入板端
+播放流程，语音按用户选择在局域网明文传输。当前控制台只保留小呆功能，API Key 可在
+“模型与密钥”中配置；详细范围见 [Mac 控制台](mac-console.md)，实测范围和限制见
+[整合记录](server-integration-2026-11-08.md)。
 
 ## 1. 现在的组成
 
@@ -196,18 +198,19 @@ FileVault 提供。原始输入照片和录音不写入数据库，不给 MCP �
 ## 7. 设备接入已经写到哪一层
 
 Mac 新增独立 **WSS v3** 入口，使用 rustls、每台设备的随机 bearer credential、
-运行时 token、顺序帧、限长音频缓冲、取消广播与连接撤销。没有证书时不会降级为明文。
+运行时 token、顺序帧、限长音频缓冲、取消广播与连接撤销。控制连接没有证书时不会
+降级；用户选择的语音 PCM 本身通过单独的局域网 TCP 明文传输。
 证书准备脚本和控制台凭据功能已经写入，详见 [mac-gateway.md](mac-gateway.md) 和
 [shared/mac-brain-v3.md](../shared/mac-brain-v3.md)。
 
-**当前 ESP 固件仍只有先前的诊断 LAN client，不会连接 WSS v3。** 它继续拒绝未认证的
-远程请求，且没有上传私人音视频。尚需在设备侧接入证书/凭据、WSS 会话、PCM、播放停止和
-场景 capability 映射，才能有真实端到端语音。BLE 安全配网也尚未实现；不会拿 mDNS
-发现或软配对冒充密钥认证。
+当前 ESP 固件已接入证书/凭据与 WSS v3 控制会话，实板 Wi-Fi 认证连接已建立。明确激活后
+按用户选择通过独立的局域网 TCP 连接发送明文 PCM，完整语音回合仍以
+[整合记录](server-integration-2026-11-08.md) 中的实测结果为准。诊断 LAN 继续拒绝未认证
+的远程请求；BLE 安全配网尚未实现，不会拿 mDNS 发现或软配对冒充密钥认证。
 
 ## 8. 配置与数据位置
 
-默认 Mac 配置目录：`~/Library/Application Support/ai.reasonia.espbot.server/`。
+默认 Mac 配置与工作目录：`~/小呆 Server/`。
 
 | 路径 | 内容 |
 | --- | --- |
@@ -217,7 +220,7 @@ Mac 新增独立 **WSS v3** 入口，使用 rustls、每台设备的随机 beare
 | `runtime/opencode/` | 路由退避、会话 ledger、生成的 OpenCode 配置与专用工作目录 |
 | `runtime/devices/secure-devices.json` | 每设备 bearer 的 SHA256 摘要，不保存原 token |
 
-OpenCode 自己的数据/认证目录仍由官方程序管理。继承的 MCP、OAuth 与既有全局
+Server 管理的 OpenCode 运行与工作数据位于该目录下；继承的 MCP、OAuth 与既有全局
 OpenCode 配置不会被项目复制进 git。私密运行目录、模型、venv、数据库和 `.env` 都已忽略。
 
 ## 9. 后续接硬件前的实际缺口

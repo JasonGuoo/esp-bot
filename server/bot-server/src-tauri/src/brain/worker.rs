@@ -48,14 +48,15 @@ impl Drop for Process {
 
 pub struct ModelWorker {
     config: ModelWorkerConfig,
+    data_root: PathBuf,
     process: Mutex<Option<Process>>,
     cancel: watch::Sender<u64>,
 }
 
 impl ModelWorker {
-    pub fn new(config: ModelWorkerConfig) -> Arc<Self> {
+    pub fn new(config: ModelWorkerConfig, data_root: PathBuf) -> Arc<Self> {
         let (cancel, _) = watch::channel(0);
-        Arc::new(Self { config, process: Mutex::new(None), cancel })
+        Arc::new(Self { config, data_root, process: Mutex::new(None), cancel })
     }
 
     pub fn configured(&self) -> bool {
@@ -67,6 +68,10 @@ impl ModelWorker {
         let script = self.config.script.as_ref().filter(|p| p.is_file())
             .ok_or("local_worker_not_configured: set models.script to local-models/worker.py")?;
         let model_dir = self.config.model_dir.as_ref().ok_or("local_worker_model_dir_missing")?;
+        let temp_dir = self.data_root.join("runtime/tmp");
+        let cache_dir = self.data_root.join("runtime/cache");
+        super::settings::private_dir(&temp_dir)?;
+        super::settings::private_dir(&cache_dir)?;
         let mut command = Command::new(&self.config.python);
         // The worker may live inside the signed app bundle. Python must not
         // create __pycache__ there and invalidate the app's sealed resources.
@@ -74,6 +79,8 @@ impl ModelWorker {
             .arg("--asr-backend").arg(&self.config.asr_backend)
             .env("HF_HUB_OFFLINE", "1").env("TRANSFORMERS_OFFLINE", "1")
             .env("TOKENIZERS_PARALLELISM", "false")
+            .env("TMPDIR", temp_dir).env("XDG_CACHE_HOME", &cache_dir)
+            .env("HF_HOME", cache_dir.join("huggingface"))
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
             .kill_on_drop(true);
         for (flag, path) in [("--rma-qwen-python", &self.config.rma_qwen_python),

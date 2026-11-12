@@ -5,6 +5,7 @@ use std::{collections::VecDeque, fs::{File, OpenOptions}, io::{Read, Write},
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use serde_json::{Value, json};
+use zeroize::Zeroizing;
 
 const MAGIC: &[u8; 8] = b"\xd79XDBG\x01\xa5";
 const MAX_PAYLOAD: usize = 96 * 1024;
@@ -51,11 +52,21 @@ impl Snapshot {
     fn clear_frames(&mut self) { self.screen=None; self.camera=None; }
 }
 
-struct Worker { cancel: Arc<AtomicBool>, tx: SyncSender<(String,Instant)>, task: JoinHandle<()> }
-#[derive(Default)]
-pub struct UsbDebug { state: Arc<Mutex<Snapshot>>, worker: Mutex<Option<Worker>> }
+struct Worker { cancel: Arc<AtomicBool>, tx: SyncSender<(Zeroizing<String>,Instant,bool)>, task: JoinHandle<()> }
+pub struct UsbDebug { state: Arc<Mutex<Snapshot>>, worker: Mutex<Option<Worker>>, data_root: std::path::PathBuf }
 
 impl UsbDebug {
+    pub fn new(data_root:std::path::PathBuf)->Self {
+        Self {state:Arc::new(Mutex::new(Snapshot::default())),worker:Mutex::new(None),data_root}
+    }
+    fn export_directory(&self)->Result<std::path::PathBuf,String> {
+        let parent=self.data_root.join("runtime/exports");
+        crate::brain::settings::private_dir(&parent)?;
+        let dir=parent.join(format!("usb-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).map_err(|e|e.to_string())?;
+        #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;std::fs::set_permissions(&dir,std::fs::Permissions::from_mode(0o700)).map_err(|e|e.to_string())?;}
+        Ok(dir)
+    }
     pub fn stop(&self) {
         if let Some(worker)=self.worker.lock().unwrap_or_else(|e|e.into_inner()).take() {
             worker.cancel.store(true,Ordering::Relaxed);
@@ -68,7 +79,7 @@ impl UsbDebug {
         if !ports().contains(&port.to_owned()) {return Err("请选择当前可见的 USB 串口".into());}
         self.stop();
         let cancel=Arc::new(AtomicBool::new(false));
-        let (tx,rx)=mpsc::sync_channel::<(String,Instant)>(8);
+        let (tx,rx)=mpsc::sync_channel::<(Zeroizing<String>,Instant,bool)>(8);
         let state=Arc::clone(&self.state); let path=port.to_owned(); let flag=Arc::clone(&cancel);
         {let mut state=state.lock().map_err(|_|"USB 状态不可用")?;
             *state=Snapshot::default();state.requested=true;state.preview=true;state.port=Some(path.clone());}
@@ -85,14 +96,30 @@ impl UsbDebug {
                         let mut ready=false;
                         let (mut preview,mut camera_requested)={let s=state.lock().unwrap();(s.preview,s.camera_requested)};
                         while !flag.load(Ordering::Relaxed) {
-                            for (command,queued) in rx.try_iter() {
-                                if queued.elapsed()>Duration::from_secs(2) {continue;}
-                                if command=="preview on" {preview=true;}
-                                if command=="preview off" {preview=false;camera_requested=false;state.lock().unwrap().clear_frames();}
-                                if command=="camera on" {camera_requested=true;}
-                                if command=="camera off" {camera_requested=false;}
-                                let _=serial.write_all(format!("{command}\n").as_bytes());
-                                state.lock().unwrap().event("usb.command",&command,None);
+                            for (command,queued,sensitive) in rx.try_iter() {
+                                if queued.elapsed()>Duration::from_secs(2) {
+                                    if sensitive {state.lock().unwrap().event("wifi.failed","Wi-Fi 配置发送超时，请重试",None);}
+                                    continue;
+                                }
+                                if sensitive {
+                                    // Pace USB writes so the board's shared UART input cannot
+                                    // overflow. Never put this command in events or exports.
+                                    let mut ok=true;
+                                    for chunk in command.as_bytes().chunks(16) {
+                                        if serial.write_all(chunk).is_err() {ok=false;break;}
+                                        thread::sleep(Duration::from_millis(20));
+                                    }
+                                    state.lock().unwrap().event("wifi.setup",if ok {
+                                        "Wi-Fi 配置已发送，等待开发板确认"
+                                    } else {"Wi-Fi 配置发送失败，请重试"},None);
+                                    continue;
+                                }
+                                if command.as_str()=="preview on" {preview=true;}
+                                if command.as_str()=="preview off" {preview=false;camera_requested=false;state.lock().unwrap().clear_frames();}
+                                if command.as_str()=="camera on" {camera_requested=true;}
+                                if command.as_str()=="camera off" {camera_requested=false;}
+                                let _=serial.write_all(format!("{}\n",command.as_str()).as_bytes());
+                                state.lock().unwrap().event("usb.command",command.as_str(),None);
                             }
                             if !ready && started.elapsed()>Duration::from_secs(5) {
                                 if preview {
@@ -118,6 +145,11 @@ impl UsbDebug {
                                         let mut s=state.lock().unwrap();
                                         match item {
                                             Parsed::Log(line)=>{if let Some(line)=safe_log(&line) {
+                                                if line.contains("XIAODAI_WIFI_OK") {
+                                                    s.event("wifi.saved","开发板已保存 Wi-Fi 配置并正在重启；等待连接结果",None);
+                                                } else if line.contains("XIAODAI_WIFI_ERROR") {
+                                                    s.event("wifi.failed","开发板拒绝了 Wi-Fi 配置，请检查后重试",None);
+                                                }
                                                 if line.contains("ESP-ROM:esp32s31-") {
                                                     s.clear_frames();s.camera_orientation=None;s.event("usb.reboot","检测到设备重新启动；等待预览恢复",None);
                                                     started=Instant::now();ready=false;
@@ -176,7 +208,7 @@ impl UsbDebug {
             if (command=="camera on" || face_valid || orientation_valid) && !s.preview {return Err("请先恢复 USB 预览".into());}}
         let worker=self.worker.lock().map_err(|_|"USB 状态不可用")?;
         let worker=worker.as_ref().ok_or("请先连接 USB")?;
-        worker.tx.try_send((command.to_owned(),Instant::now())).map_err(|_|"USB 命令队列繁忙")?;
+        worker.tx.try_send((Zeroizing::new(command.to_owned()),Instant::now(),false)).map_err(|_|"USB 命令队列繁忙")?;
         if command.starts_with("preview ") {
             let mut s=self.state.lock().map_err(|_|"USB 状态不可用")?;
             s.preview=command=="preview on";if !s.preview {s.camera_requested=false;s.clear_frames();}
@@ -184,6 +216,27 @@ impl UsbDebug {
             let mut s=self.state.lock().map_err(|_|"USB 状态不可用")?;
             s.camera_requested=command=="camera on";if !s.camera_requested {s.camera=None;}
         }
+        Ok(json!({"queued":true}))
+    }
+    fn provision_wifi(&self, ssid:&str, password:&str)->Result<Value,String> {
+        let size=ssid.as_bytes().len(); let pass=password.as_bytes();
+        if size==0 || size>32 || ssid.contains('\0') {
+            return Err("网络名称须为 1–32 字节，不能包含空字符".into());
+        }
+        if !pass.is_empty() && (pass.len()<8 || pass.len()>64 ||
+            !pass.iter().all(|b| (32..=126).contains(b)) ||
+            (pass.len()==64 && !pass.iter().all(u8::is_ascii_hexdigit))) {
+            return Err("Wi-Fi 密码须为 8–63 位可打印字符，或 64 位十六进制字符".into());
+        }
+        {let s=self.state.lock().map_err(|_|"USB 状态不可用")?;
+            if !s.connected {return Err("请先连接开发板 USB".into());}}
+        #[derive(Serialize)] struct Wifi<'a> { ssid:&'a str, password:&'a str }
+        let payload=Zeroizing::new(serde_json::to_vec(&Wifi {ssid,password}).map_err(|_|"Wi-Fi 配置编码失败")?);
+        let encoded=Zeroizing::new(STANDARD.encode(payload.as_slice()));
+        let command=Zeroizing::new(format!("wifi config {}\n",encoded.as_str()));
+        let worker=self.worker.lock().map_err(|_|"USB 状态不可用")?;
+        worker.as_ref().ok_or("请先连接 USB")?.tx.try_send((command,Instant::now(),true))
+            .map_err(|_|"USB 命令队列繁忙")?;
         Ok(json!({"queued":true}))
     }
     fn snapshot(&self, after:u64) -> Result<Value,String> {
@@ -195,9 +248,7 @@ impl UsbDebug {
     fn export(&self, source:&str) -> Result<Value,String> {
         let frame={let s=self.state.lock().map_err(|_|"USB 状态不可用")?;
             match source {"screen"=>s.screen.clone(),"camera"=>s.camera.clone(),_=>None}.ok_or("暂无画面")?};
-        let dir=std::env::temp_dir().join(format!("espbot-debug-{}",uuid::Uuid::new_v4()));
-        std::fs::create_dir(&dir).map_err(|e|e.to_string())?;
-        #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;std::fs::set_permissions(&dir,std::fs::Permissions::from_mode(0o700)).map_err(|e|e.to_string())?;}
+        let dir=self.export_directory()?;
         let path=dir.join(format!("{source}-{}.jpg",frame.sequence));
         let mut options=OpenOptions::new();options.write(true).create_new(true);
         #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
@@ -208,9 +259,7 @@ impl UsbDebug {
         let content={let s=self.state.lock().map_err(|_|"USB 状态不可用")?;
             serde_json::to_vec_pretty(&json!({"port":s.port,"events":s.events,"last_crash":s.last_crash,
                 "invalid_packets":s.invalid_packets,"received_frames":s.received_frames,"lcd_underruns":s.lcd_underruns})).map_err(|e|e.to_string())?};
-        let dir=std::env::temp_dir().join(format!("espbot-debug-{}",uuid::Uuid::new_v4()));
-        std::fs::create_dir(&dir).map_err(|e|e.to_string())?;
-        #[cfg(unix)] {use std::os::unix::fs::PermissionsExt;std::fs::set_permissions(&dir,std::fs::Permissions::from_mode(0o700)).map_err(|e|e.to_string())?;}
+        let dir=self.export_directory()?;
         let path=dir.join("events.json");
         let mut options=OpenOptions::new();options.write(true).create_new(true);
         #[cfg(unix)] {use std::os::unix::fs::OpenOptionsExt;options.mode(0o600);}
@@ -330,12 +379,19 @@ impl Parser {
 
 #[tauri::command]
 pub fn usb_debug_request(hub:tauri::State<'_,Arc<UsbDebug>>,method:String,payload:Option<Value>)->Result<Value,String>{
-    let payload=payload.unwrap_or_default();
+    let mut payload=payload.unwrap_or_default();
     match method.as_str(){
         "ports"=>Ok(json!(ports())),
         "connect"=>hub.connect(payload["port"].as_str().ok_or("请选择 USB 串口")?),
         "disconnect"=>{hub.stop();Ok(json!({"disconnected":true}))},
         "command"=>hub.command(payload["command"].as_str().ok_or("缺少命令")?),
+        "wifi_provision"=>{
+            let password=Zeroizing::new(match payload.get_mut("password").map(Value::take) {
+                Some(Value::String(value))=>value,
+                _=>return Err("缺少 Wi-Fi 密码".into()),
+            });
+            hub.provision_wifi(payload["ssid"].as_str().ok_or("缺少网络名称")?,password.as_str())
+        },
         "state"=>hub.snapshot(payload["after"].as_u64().unwrap_or(0)),
         "export"=>hub.export(payload["source"].as_str().ok_or("缺少画面类型")?),
         "export_events"=>hub.export_events(),

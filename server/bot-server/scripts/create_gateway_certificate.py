@@ -35,32 +35,52 @@ def main() -> None:
     directory.mkdir(parents=True, exist_ok=True)
     directory.chmod(0o700)
     certificate, key = directory / "gateway-cert.pem", directory / "gateway-key.pem"
-    if certificate.exists() or key.exists():
+    ca_certificate, ca_key = directory / "gateway-ca.pem", directory / "gateway-ca-key.pem"
+    if any(path.exists() for path in (certificate, key, ca_certificate, ca_key)):
         parser.error("Existing certificate/key preserved; use a new directory for rotation")
-    config = "[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=extensions\n[dn]\nCN=Xiaodai Mac Bot Server\n[extensions]\nsubjectAltName=@names\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,digitalSignature,keyCertSign\nextendedKeyUsage=serverAuth\n[names]\n"
+    # A CA certificate must not also be presented as the server leaf: strict
+    # TLS clients reject CA:TRUE end entities.  Pin the CA on the device and
+    # sign a separate serverAuth leaf with the requested host names.
+    ca_config = "[req]\nprompt=no\ndistinguished_name=dn\nx509_extensions=extensions\n[dn]\nCN=Xiaodai Local Gateway CA\n[extensions]\nbasicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n"
+    config = "[req]\nprompt=no\ndistinguished_name=dn\n[dn]\nCN=Xiaodai Mac Bot Server\n[extensions]\nsubjectAltName=@names\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n[names]\n"
     config += "".join(f"DNS.{i}={host}\n" for i, host in enumerate(args.dns, 1))
     config += "".join(f"IP.{i}={address}\n" for i, address in enumerate(ips, 1))
     old_umask = os.umask(0o077)
     try:
         with tempfile.TemporaryDirectory(prefix=".tls-", dir=directory) as temporary:
             root = Path(temporary)
+            ca_configuration = root / "ca-openssl.cnf"
+            ca_configuration.write_text(ca_config, encoding="ascii")
             configuration = root / "openssl.cnf"
             configuration.write_text(config, encoding="ascii")
             subprocess.run([openssl, "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
-                            "-nodes", "-sha256", "-days", "365", "-config", str(configuration),
-                            "-out", str(root / "cert.pem"), "-keyout", str(root / "key.pem")],
+                            "-nodes", "-sha256", "-days", "3650", "-config", str(ca_configuration),
+                            "-out", str(root / "ca.pem"), "-keyout", str(root / "ca-key.pem")],
                            check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-            # The private key remains only on the Mac. Trust the public cert out of band.
+            subprocess.run([openssl, "req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+                            "-nodes", "-sha256", "-config", str(configuration),
+                            "-out", str(root / "request.pem"), "-keyout", str(root / "key.pem")],
+                           check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            subprocess.run([openssl, "x509", "-req", "-in", str(root / "request.pem"),
+                            "-CA", str(root / "ca.pem"), "-CAkey", str(root / "ca-key.pem"), "-CAcreateserial",
+                            "-sha256", "-days", "365", "-extfile", str(configuration), "-extensions", "extensions",
+                            "-out", str(root / "cert.pem")],
+                           check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            # Private keys remain on the Mac; only the public CA is provisioned.
+            os.replace(root / "ca-key.pem", ca_key)
+            os.replace(root / "ca.pem", ca_certificate)
             os.replace(root / "key.pem", key)
             os.replace(root / "cert.pem", certificate)
     finally:
         os.umask(old_umask)
     key.chmod(0o600)
     certificate.chmod(0o600)
-    der = ssl.PEM_cert_to_DER_cert(certificate.read_text(encoding="ascii"))
-    print(f"Certificate: {certificate}\nPrivate key: {key}")
-    print(f"Certificate SHA256: {hashlib.sha256(der).hexdigest()}")
-    print("Provision the public certificate and the per-device bearer token over a trusted channel.")
+    ca_key.chmod(0o600)
+    ca_certificate.chmod(0o600)
+    der = ssl.PEM_cert_to_DER_cert(ca_certificate.read_text(encoding="ascii"))
+    print(f"Server certificate: {certificate}\nPublic CA certificate: {ca_certificate}")
+    print(f"CA SHA256: {hashlib.sha256(der).hexdigest()}")
+    print("Provision the public CA certificate and the per-device bearer token over a trusted channel.")
     print("This script does not configure Wi-Fi, BLE, firmware or start the server.")
 
 

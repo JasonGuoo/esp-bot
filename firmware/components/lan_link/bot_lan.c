@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <arpa/inet.h>
 #include "cJSON.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_websocket_client.h"
@@ -15,6 +16,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 
 static const char *TAG = "bot_lan";
 #define QUEUE_LENGTH 8
@@ -125,11 +127,19 @@ static void websocket_event(void *handler_args, esp_event_base_t base,
     if (event_id == WEBSOCKET_EVENT_DISCONNECTED ||
         event_id == WEBSOCKET_EVENT_CLOSED || event_id == WEBSOCKET_EVENT_ERROR) {
         xSemaphoreTake(s.mutex, portMAX_DELAY);
+        bool first = !s.ws_failed;
         s.ws_failed = true;
         s.ws_connected = false;
         s.welcomed = false;
         xSemaphoreGive(s.mutex);
-        notify(BOT_LAN_EVENT_DISCONNECTED, ESP_OK, NULL);
+        if (first && event_id == WEBSOCKET_EVENT_ERROR) {
+            const esp_websocket_event_data_t *data = event_data;
+            esp_err_t err = ESP_FAIL;
+            if (data && data->error_handle.error_type == WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT) {
+                err = data->error_handle.esp_tls_last_esp_err;
+            }
+            notify(BOT_LAN_EVENT_ERROR, err == ESP_OK ? ESP_FAIL : err, NULL);
+        } else if (first) notify(BOT_LAN_EVENT_DISCONNECTED, ESP_OK, NULL);
         return;
     }
     if (event_id != WEBSOCKET_EVENT_DATA || !event_data) return;
@@ -164,6 +174,8 @@ static void websocket_event(void *handler_args, esp_event_base_t base,
         }
         xSemaphoreGive(s.mutex);
         if (valid) {
+            ESP_LOGI(TAG, "Diagnostic WebSocket welcomed; stack_free=%u",
+                     (unsigned)uxTaskGetStackHighWaterMark(NULL));
             notify(BOT_LAN_EVENT_CONNECTED, ESP_OK, NULL);
         } else {
             notify(BOT_LAN_EVENT_ERROR, ESP_ERR_INVALID_RESPONSE, NULL);
@@ -216,7 +228,9 @@ static esp_err_t start_connection(const bot_lan_server_t *server) {
         .network_timeout_ms = 3000,
         .ping_interval_sec = 20,
         .pingpong_timeout_sec = 10,
-        .task_stack = 6144,
+        /* The upstream WebSocket client uses a 4096-byte default. The
+         * diagnostic callback only handles bounded 512-byte JSON frames. */
+        .task_stack = 4096,
         .buffer_size = 1024,
     };
     s.ws = esp_websocket_client_init(&config);
@@ -224,6 +238,9 @@ static esp_err_t start_connection(const bot_lan_server_t *server) {
     esp_err_t err = esp_websocket_register_events(s.ws, WEBSOCKET_EVENT_ANY, websocket_event, NULL);
     if (err == ESP_OK) err = esp_websocket_client_start(s.ws);
     if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Diagnostic WebSocket start failed; internal_free=%u largest=%u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         destroy_socket();
         return err;
     }
@@ -397,9 +414,13 @@ esp_err_t bot_lan_start(const bot_lan_config_t *config,
             sizeof(config->preferred_server_id) ||
         s.queue) return ESP_ERR_INVALID_ARG;
     s.mutex = xSemaphoreCreateMutex();
-    s.queue = xQueueCreate(QUEUE_LENGTH, sizeof(command_t));
+    /* Diagnostic discovery and the authenticated media gateway are active
+     * together. Keep this sizeable task-only queue in PSRAM so Wi-Fi, TLS and
+     * the websocket tasks retain scarce DMA-capable internal RAM. */
+    s.queue = xQueueCreateWithCaps(QUEUE_LENGTH, sizeof(command_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s.queue) s.queue = xQueueCreateWithCaps(QUEUE_LENGTH, sizeof(command_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!s.mutex || !s.queue) {
-        if (s.queue) vQueueDelete(s.queue);
+        if (s.queue) vQueueDeleteWithCaps(s.queue);
         if (s.mutex) vSemaphoreDelete(s.mutex);
         s.queue = NULL;
         s.mutex = NULL;
@@ -410,8 +431,14 @@ esp_err_t bot_lan_start(const bot_lan_config_t *config,
     s.callback = callback;
     s.callback_ctx = ctx;
     s.state = BOT_LAN_WAITING_FOR_WIFI;
-    if (xTaskCreate(worker, "bot_lan", 8192, NULL, 5, NULL) != pdPASS) {
-        vQueueDelete(s.queue);
+    BaseType_t created = xTaskCreateWithCaps(worker, "bot_lan", 8192, NULL, 5, NULL,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (created != pdPASS) {
+        created = xTaskCreateWithCaps(worker, "bot_lan", 8192, NULL, 5, NULL,
+                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (created != pdPASS) {
+        vQueueDeleteWithCaps(s.queue);
         vSemaphoreDelete(s.mutex);
         s.queue = NULL;
         s.mutex = NULL;

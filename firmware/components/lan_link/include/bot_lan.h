@@ -15,6 +15,10 @@ extern "C" {
 #define BOT_LAN_MAX_SERVERS 8
 #define BOT_LAN_MAX_EVENT_JSON 512
 
+/* Discover the WSS listener paired to this board (CA fingerprint is a
+ * public selector, not authentication). Caller still verifies TLS and token. */
+esp_err_t bot_lan_find_secure_gateway(const char *ca_sha256, char ip[16], uint16_t *port);
+
 /** IPv4-only discovery records. These are copied values, safe for UI use. */
 typedef struct {
     char instance[64];

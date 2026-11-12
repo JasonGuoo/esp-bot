@@ -9,5 +9,5 @@ mod store;
 mod types;
 
 pub use identity::fuse_identity;
-pub use store::Store;
+pub use store::{Store, ExtractedFact};
 pub use types::*;

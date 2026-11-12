@@ -28,6 +28,23 @@ firmware/idf.sh                 为本项目配置环境并调用 idf.py
 不能同时占用同一个串口。串口日志可能包含敏感信息，先写入受限的
 `firmware/.bringup/`，检查后再分享；不要提交私有 `sdkconfig` 或完整镜像。
 
+## 哪些测试需要写入开发板
+
+| 要验证的行为 | 本机入口 | 是否需要烧录 |
+| --- | --- | --- |
+| 固件触摸唤醒、会话状态、收到 Server 确认后进入思考 | 用 Mac Clang 编译现有的 [runtime 测试](../firmware/components/bot_runtime/tests/test_runtime_near_face.c)、`bot_runtime.c` 和 `attention_manager.c`。测试提供内存总线，使用 IDF 的 POSIX FreeRTOS 头文件和单核设置 | 直接在 Mac 执行 C 代码 |
+| 回答后等待下一句的起音判断 | 用 `cc -std=c11` 编译并运行[追问起音用例](../firmware/components/bot_audio/tests/test_followup_vad.c)。覆盖官方 AFE 的语音标记、安静帧、阈值边界和轻声收尾 | 先离板运行，之后用 Mac 朗读、S31 麦克风复核实际起音 |
+| Mac 网关处理正确、错误凭据，文字限长和图片分块 | `cargo test --manifest-path server/bot-server/src-tauri/Cargo.toml --lib brain::gateway::tests` | 在 Mac 运行 |
+| 正式 App 公布的服务、端口、TLS 身份 | 用 `dns-sd -B _espbot-brain._tcp local.` 浏览，再用 `dns-sd -L` 解析实例。用配对 CA 校验解析到的端口 | 在 Mac 运行 |
+| 中文排版、静态图及阅读时长 | 在 Mac 用仓库锁定的 LVGL 版本构建 800×480 显示，渲染正式 face 和字库；用上面的 runtime 测试检查超时后收音停止且结果保留 | 日常修改先做本机验证。实板复核用正式 Mac App 的 USB 帧和旁边 Mac 的系统朗读 |
+| 已运行的固件能否发现新端口、断线后重连 | 保持同一个串口监视器打开，只重启或更换 Mac 服务端口。核对认证日志、单调运行时间和 Mac 的已建立连接 | 沿用板上镜像 |
+| 新固件是否可编译，实际无线回包、驱动和堆是否正常 | 用 `./firmware/idf.sh build` 增量构建。需要执行新板端代码时才写应用分区，用同一份 ELF 和串口日志检查 | 编译可离板，运行新板端代码需更新应用 |
+
+项目固定的 ESP-IDF v6.1 的 `idf.py qemu` 目标表没有 ESP32-S31。排查 TCP 时先对照
+SDK 的 `examples/protocols/sockets/tcp_client` 和同目录树下的
+`scripts/run_tcp_server.py`。在本板上重新打开 USB 串口曾触发复位，测试持续运行或
+热重连时应保持监视器打开。[实板换端口记录](specs/server-voice-tasks/acceptance.md)
+
 ## 分步排查
 
 1. 核对芯片、SDK、实际相机型号和已烧录镜像，保留该镜像对应的 ELF 和配置。

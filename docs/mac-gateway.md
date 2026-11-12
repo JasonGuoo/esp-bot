@@ -1,16 +1,16 @@
 # Mac 安全设备网关：配置、凭据与固件接线
 
-**2026-11-06 源码交付，未构建、未测试、未运行模型、未连接硬件。** Mac 的 WSS v3
-服务端、证书准备脚本和本地凭据管理已写入；当前 ESP32-S31-Korvo-1 V1.1 固件尚未
-有 WSS v3 客户端。下面是为后续 Mac 安装和固件接线准备的操作说明，不表示这些命令
-本轮已经执行。字段、帧布局和错误规则详见 [mac-brain-v3.md](../shared/mac-brain-v3.md)。
+数据目录为 `~/小呆 Server`；Mac 和 ESP32-S31 固件均已接入 v3。设备联网、
+无线握手及完整语音对话的实际验证状态以 [本次整合记录](server-integration-2026-11-08.md)
+为准。字段、帧布局和错误规则详见 [mac-brain-v3.md](../shared/mac-brain-v3.md)。
 
 ## 1. 四条边界先分清
 
 | 入口 | 用途 | 当前状态 |
 | --- | --- | --- |
 | 原有 LAN v1 / 软配对 | 发现、诊断、原有设备管理 | 独立保留；没有认证加密，不能承载私密媒体或授权行为 |
-| `wss://Mac:7443/v3/brain/ws` | 明确激活后的设备文本、PCM、语义卡片和音频回复 | Mac 服务端源码已实现；默认关闭；板端客户端待接 |
+| Bonjour `_espbot-brain._tcp` 公布的 WSS 入口 | 设备认证、会话控制、文本和语义卡片 | 小呆查询当前地址及端口，主动发起 TCP/TLS 连接，Mac 在已建立的连接上回送结果 |
+| 按回合临时开放的局域网 TCP 端口 | 明确激活后的 PCM 语音上行和下行 | 当前固件使用明文音频，帧带认证校验但不保密 |
 | 本地 Tauri `companion_request` | 家长配置、档案、记忆、模型、权限和设备凭据 | 中文 Mac 控制台通过此入口调用 Rust；没有映射到设备 WSS |
 | 本地模型进程 JSONL | ASR、声纹、人脸 embedding、macOS TTS | Rust 监督子进程，无局域网 HTTP 监听；模型需单独准备 |
 
@@ -24,42 +24,45 @@ LAN 的“看见设备”或“软配对通过”不等于 WSS token 和证书�
 
 ## 2. 准备 Mac 证书
 
-为实际连接使用的 Mac 主机名或 IP 创建证书。下面从 `server/bot-server` 目录执行，
-`xiaodai-mac.local` 和 `192.168.1.20` 是占位示例，必须替换成实际地址；只使用主机名时
-可省略 `--ip`，每种参数可重复。目标目录尚未有证书/私钥时才会生成。
+首次配对可退出 Mac App，从 `server/bot-server` 目录运行以下命令。脚本用这台 Server
+的持久 ID 生成稳定的证书名称。已有证书的安装沿用证书中的名称或 IP 作为 TLS 身份。
+用实际串口和设备 ID 替换示例值。已有配对的设备升级固件后直接读取原有信任材料。
 
 ```bash
-python3 scripts/create_gateway_certificate.py \
-  --directory "$HOME/Library/Application Support/ai.reasonia.espbot.server/tls" \
-  --dns xiaodai-mac.local \
-  --ip 192.168.1.20
+python3 scripts/provision_usb_gateway.py --port /dev/cu.usbserial-210 --device-id korvo-01
 ```
 
 [create_gateway_certificate.py](../server/bot-server/scripts/create_gateway_certificate.py)
-复用本机 OpenSSL，生成 P-256 密钥、自签名 SHA-256 证书、实际 DNS/IP 的 SAN、
-365 天有效期，并打印证书 DER 的 SHA-256 指纹。它创建目录权限 `0700`，将
-`gateway-key.pem` 和 `gateway-cert.pem` 设为 `0600`，保留已有文件并拒绝覆盖。
-需要轮换时使用新目录，再显式更新配置和设备信任材料。
+复用本机 OpenSSL，生成独立的 P-256 本地 CA 和由其签署的服务端证书。服务端证书
+包含实际 DNS/IP 的 SAN，有效期 365 天；脚本打印公有 CA 证书的 SHA-256 指纹，
+将目录设为 `0700`、文件设为 `0600`，保留已有文件并拒绝覆盖。需要轮换时使用
+新目录，再显式更新配置和设备信任材料。
 
-**公有证书给设备，私钥留在 Mac。** 初始化时应通过可信渠道核对证书指纹，并将
-公有证书/信任材料写入未来的设备配置；连接 URL 的主机名或 IP 必须匹配 SAN。
-这份自签名证书是供显式信任使用的材料，脚本不会把它安装到 macOS 或设备信任库。
+**公有 CA 证书给设备，两个私钥留在 Mac。** 初始化时应通过可信渠道核对 CA 指纹；
+固件用配对时保存的 TLS 身份核对证书 SAN。
+脚本不会把 CA 安装到 macOS 系统信任库。
 Mac 的服务端 TLS 不要求客户端证书，设备身份另由专属 Bearer 凭据验证。
 
-脚本不配置 Wi-Fi、BLE、NVS，不签发设备 token，也不启动服务。项目计划的 Mac BLE
-配对和安全 Wi-Fi 配置仍需后续接线；目前没有自动把公有证书/token 送进板子的流程。
-不能通过关闭设备 TLS 校验补齐这一步。若使用已有正式证书，也可配置 PEM 证书链和
-对应私钥，无需运行生成脚本。
+生成证书的脚本不配置设备。已有
+[`provision_usb_gateway.py`](../server/bot-server/scripts/provision_usb_gateway.py)
+可在退出 Server 和断开 USB 调试后，将 CA、设备专属 token 和证书身份通过本机 USB 写入
+开发板；重新打开 App 才会载入新 token。它不配置 Wi-Fi 或 BLE。若使用其他证书，仍须
+配置 PEM 证书链、对应私钥和设备可信 CA，不能关闭设备 TLS 校验。
+Mac 监听成功后发布服务类型、实际端口和公有 CA 指纹。每次连接或重连前，小呆通过
+Espressif mDNS 查询同一局域网中与配对 CA 匹配的记录，再把解析出的地址、端口交给
+官方 WebSocket 客户端。只有 TLS 证书验证通过后才发送设备凭据。Mac 从通过认证的连接
+取得设备 ID。任一方的 DHCP 地址变化后按同样流程重连。
 
 ## 3. 配置 `brain.json`
 
 Mac 配置位于：
 
 ```text
-~/Library/Application Support/ai.reasonia.espbot.server/brain.json
+~/小呆 Server/brain.json
 ```
 
-首次默认 `gateway.enabled=false`，默认监听地址是 `0.0.0.0:7443`，最大连接数为 4。
+首次默认 `gateway.enabled=false`，最大连接数为 4。USB 配对后监听 `0.0.0.0:7443`，
+允许私有、链路本地及回环 IPv4 对端。也可使用端口 0 让系统分配，实际端口通过 Bonjour 公布。
 启用后必须提供可读证书和私钥。把以下 gateway 节合并到现有配置，保留 harness、
 models、memory 等其他配置；不要把这个片段当作替换全部配置的操作。
 
@@ -68,16 +71,15 @@ models、memory 等其他配置；不要把这个片段当作替换全部配置�
   "gateway": {
     "enabled": true,
     "bind": "0.0.0.0:7443",
-    "certificate_pem": "/Users/YOUR_ACCOUNT/Library/Application Support/ai.reasonia.espbot.server/tls/gateway-cert.pem",
-    "private_key_pem": "/Users/YOUR_ACCOUNT/Library/Application Support/ai.reasonia.espbot.server/tls/gateway-key.pem",
+    "certificate_pem": "/Users/YOUR_ACCOUNT/小呆 Server/tls/gateway-cert.pem",
+    "private_key_pem": "/Users/YOUR_ACCOUNT/小呆 Server/tls/gateway-key.pem",
     "max_connections": 4
   }
 }
 ```
 
-将 `/Users/YOUR_ACCOUNT` 替换为实际绝对路径。JSON 中的 `~` 或 `$HOME` 不会像 shell
-一样自动展开。`bind` 需要 IP:port SocketAddr；可改成需要的本机网卡 IP，而非随意
-填写 DNS 名称。TLS 主机名验证针对设备连接 URL 和证书 SAN，与监听通配地址不同。
+将示例账户替换为实际路径。JSON 中的 `~` 或 `$HOME` 不会像 shell 一样自动展开。
+Bonjour 默认读取证书同目录的 `gateway-ca.pem`，其他位置可在 `pairing_ca_pem` 指定。
 
 Unix/macOS 上私钥只要存在任何组或其他用户权限位，启动就会报
 `gateway_private_key_requires_mode_0600`；生成脚本已按 `0600` 写入。证书读取失败、
@@ -89,8 +91,8 @@ Unix/macOS 上私钥只要存在任何组或其他用户权限位，启动就会
 自动启动由顶层 `auto_start` 控制，默认关闭。配置定义见
 [settings.rs](../server/bot-server/src-tauri/src/brain/settings.rs)。
 
-网关不自动修改防火墙、不配置端口映射，也没有新增自动发现广播。实际设备地址、
-局域网可达性与证书信任，需要后续安装和固件接线时配置。
+网关开始监听后在局域网上公布实际地址和端口。设备与 Mac 只需在局域网允许 mDNS
+和相应 TCP 连接时完成一次可信配对，之后即可按服务自动发现。网关无需改动系统路由。
 
 ## 4. 家长签发、轮换与撤销设备凭据
 
@@ -122,7 +124,7 @@ Unix/macOS 上私钥只要存在任何组或其他用户权限位，启动就会
 存储文件是应用配置目录下的 `runtime/devices/secure-devices.json`，持久化内容只有
 token 的 SHA-256 摘要与创建时间，采用私有目录/文件权限。它与旧软配对记录独立。
 
-未来的固件初始化流程应接收至少这四项：设备 ID、token、Mac WSS URL、可信证书。
+固件的 USB 配对接收 token、Mac WSS URL 和可信 CA；设备 ID 来自固件配置。
 公有证书可以公开核对，token 必须作为设备秘密保存；不要把 token 放进 URL、日志、
 公开仓库或 LAN hello。握手应发送：
 
@@ -136,14 +138,19 @@ X-Espbot-Device: xiaodai-001
 
 ## 5. 设备接线采用哪条输入路径
 
-设备当前只有本地唤醒/VAD 等能力，不应宣称已有完整 ASR。后续 WSS 适配可复用设备
-现有音频单一所有者，在完整“小呆小呆”或明确触摸后接出 PCM consumer：
+设备复用现有音频单一所有者，仅在明确触摸或完整“小呆小呆”唤醒后接出 PCM；
+专用唤醒词声学模型尚未配置，以下设备路径尚待无线实机验证：
 
 1. 带运行时 `epoch/session_id/turn_id/focus_generation` 发送 `session.open`。
-2. 发送 `audio.begin`，随后按 XDAI 20 字节头发送 16 kHz 单声道 PCM16LE。
-3. 一次明确输入结束时发送 `audio.commit`，最多 30 秒；Mac 在本地 ASR 后调用 harness。
+2. 发送 `audio.begin` 并协商临时 TCP 连接，随后按 XDAI 20 字节头发送明文 16 kHz 单声道 PCM16LE。
+3. 一次明确输入结束时在 WSS 发送带帧数的 `audio.commit`，最多 30 秒；Mac 在本地 ASR 后调用 harness。
 4. 先处理最终回复的文字、卡片、表情语义，再按顶层 `audio` 描述接收二进制回复。
 5. 按当前 runtime 和 stream 拒绝旧内容；本地播放缓冲耗尽后才视为真正播完。
+
+本次实板网络探测发现无线链路在负载下丢包；固件按乐鑫排障建议关闭 Wi-Fi 聚合与省电，
+并优先使用 PSRAM 分配 Wi-Fi/lwIP 可迁移的内存。本次实板语音和网络测试结果见
+[整合记录](server-integration-2026-11-08.md)，长期稳定性仍需观察。明确交互期间诊断连接
+暂时暂停，控制连接恢复且交互结束后自动恢复。
 
 如果未来设备已经有自己的 ASR，直接用 `assistant.text` 提交文本，跳过 Mac ASR。
 两条路径共享相同会话、记忆过滤和模型路由。Mac 原始音频只在内存处理，ASR 文本
@@ -208,13 +215,9 @@ TLS 和 WS 升级各限 10 秒；WS Ping 周期 15 秒，无上行消息超过 5
 
 ## 8. 固件下一步的具体边界
 
-现有 [brain_link README](../firmware/components/brain_link/README.md) 明确：旧 LAN
-未认证且未加密，收到远程请求返回 `AUTH_REQUIRED`。主程序没有安装已认证的媒体
-consumer，所以没有实际上传原始麦克风、相机、面部轨迹或对话。启动 Mac WSS 不会
-改变这个状态，也不能把旧 LAN 的 authenticated 标志直接改成 true 来接通。
-
-后续工作是给现有 ESP32-S31 运行时接入可信配置存储、原生 WSS、runtime token、
-唤醒后的有界 PCM 发送、音频播放与取消，以及语义卡片渲染。设备屏幕/声音能力需要
-按真实固件逐项接线，模型/摄像头/扬声器的效果需要硬件到货后再确认。Mac 层的人脸
-识别、本地语音和设备协议已经分离；今后增添相机输入时，应先扩展版本化契约与显式
-采集授权，再建立对应媒体通道。
+现有 [brain_link README](../firmware/components/brain_link/README.md) 说明：
+LAN 诊断入口未认证且未加密，收到远程请求返回 `AUTH_REQUIRED`；设备只在认证 WSS
+会话明确激活后，经独立 TCP 连接发送明文 PCM，局域网抓包可以读取。还需要完成语音
+无线实机验收、语义卡片显示、真实
+扬声器、专用唤醒词模型和 BLE 配网。设备相机目前不上传；增加相机输入前应扩展
+版本化契约与明确采集授权。

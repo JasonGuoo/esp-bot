@@ -31,6 +31,7 @@
       "../local-models/model_store.py": "local-models/model_store.py",
       "../local-models/models.json": "local-models/models.json",
       "../local-models/rma_qwen.py": "local-models/rma_qwen.py",
+      "../local-models/memory_extract.py": "local-models/memory_extract.py",
       "../local-models/say_guard.py": "local-models/say_guard.py",
       "../local-models/NOTICE.md": "local-models/NOTICE.md",
       "../tools/": "tools/",

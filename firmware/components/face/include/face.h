@@ -38,13 +38,20 @@ void face_get_gaze(const face_view_t *view, int *x, int *y);
 
 /** Set caption text or NULL/"" to hide; truncates at 383 UTF-8 bytes. */
 void face_set_subtitle(face_view_t *view, const char *text);
+/** Show the current text reply in a scrollable view. Call with an empty string
+ * when the reply is no longer current. Must be called under the display lock. */
+void face_set_result_text(face_view_t *view, const char *text);
+/** Transfer ownership of an RGB565 buffer to the current result view.
+ * Returns false without taking ownership when that view is no longer open. */
+bool face_set_result_image(face_view_t *view, uint8_t *pixels, uint16_t width, uint16_t height);
+bool face_result_visible(const face_view_t *view);
 
 /** Reveal the top-right gear for five seconds; opens Settings -> Appearance. */
 void face_reveal_settings(face_view_t *view);
 
 typedef enum {
     FACE_EVENT_TOUCH, FACE_EVENT_STOP,
-    FACE_EVENT_SETTINGS_OPENED, FACE_EVENT_SETTINGS_CLOSED
+    FACE_EVENT_SETTINGS_OPENED, FACE_EVENT_SETTINGS_CLOSED, FACE_EVENT_RESULT_DISMISSED
 } face_event_t;
 /** UI events are intent only; runtime owns behavior. Callback runs under the
  * LVGL lock and must only enqueue work. No driver/network calls in callback. */

@@ -30,13 +30,14 @@ pub struct GatewayConfig {
     pub bind: String,
     pub certificate_pem: Option<PathBuf>,
     pub private_key_pem: Option<PathBuf>,
+    pub pairing_ca_pem: Option<PathBuf>,
     pub max_connections: usize,
 }
 
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self { enabled: false, bind: "0.0.0.0:7443".into(), certificate_pem: None,
-            private_key_pem: None, max_connections: 4 }
+            private_key_pem: None, pairing_ca_pem: None, max_connections: 4 }
     }
 }
 
@@ -66,13 +67,18 @@ pub fn load_or_create(dir: &Path, bundled_worker: Option<PathBuf>) -> Result<Bra
         serde_json::from_str(&text).map_err(|e| format!("brain_config_invalid: {e}"))?
     } else {
         let mut config = BrainConfig::default();
-        config.models.script = bundled_worker;
-        config.models.model_dir = Some(dir.join("models"));
+        config.models.script = bundled_worker.clone();
+        config.models.model_dir = Some(dir.join("models/local"));
         save(dir, &config)?;
         config
     };
     // The worker is a bundled source resource; models remain an explicit install.
-    if config.models.model_dir.is_none() { config.models.model_dir = Some(dir.join("models")); }
+    // Installations migrated by our helper use this known default; prefer the
+    // current signed bundle on updates. User-selected custom workers are kept.
+    if config.models.script.as_deref() == Some(dir.join("engines/local-models/worker.py").as_path()) {
+        if let Some(resource) = bundled_worker { config.models.script = Some(resource); }
+    }
+    if config.models.model_dir.is_none() { config.models.model_dir = Some(dir.join("models/local")); }
     validate(&config)?;
     Ok(config)
 }

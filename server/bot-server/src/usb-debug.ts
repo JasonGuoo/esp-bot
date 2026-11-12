@@ -14,6 +14,14 @@ export function mountUsbDebug(parent: HTMLElement) {
   root.innerHTML = `<div class="cc-section-title"><div><span class="cc-eyebrow">USB 开发调试</span><h2>画面与设备事件</h2></div><span class="cc-tag" data-usb="state">未连接</span></div>
     <p class="cc-muted">并排查看小呆屏幕和相机检测输入。预览仅经本机 USB，默认保存在内存；连接串口可能使开发板重启。</p>
     <div class="usb-toolbar"><select data-usb="ports" aria-label="USB 串口"></select><button class="cc-button quiet" data-usb="refresh">刷新串口</button><button class="cc-button" data-usb="connect">连接 USB</button><button class="cc-button quiet" data-usb="disconnect" disabled>断开</button></div>
+    <details class="usb-wifi"><summary>通过 USB 设置机器人 Wi-Fi</summary>
+      <p class="cc-caption">先连接 USB，再填写与 Mac 可互相访问的 2.4 GHz 网络。密码不会保存在 Mac 控制台；当前开发板尚未启用存储加密，请保护好设备。</p>
+      <form class="cc-form" data-usb="wifi-form" autocomplete="off">
+        <div class="cc-two-fields"><label>网络名称<input data-usb="wifi-ssid" aria-label="Wi-Fi 网络名称" autocomplete="off" required></label>
+        <label>网络密码<input data-usb="wifi-password" aria-label="Wi-Fi 网络密码" type="password" autocomplete="new-password" maxlength="64" placeholder="开放网络留空"></label></div>
+        <button class="cc-button" type="submit" data-usb="wifi-submit" disabled>保存到机器人</button>
+        <p class="cc-caption" data-usb="wifi-status" role="status">等待 USB 连接。</p>
+      </form></details>
     <div class="usb-toolbar"><button class="cc-button" data-usb="wake" disabled>手动唤醒小呆</button><button class="cc-button quiet" data-usb="stop" disabled>停止本次互动</button><button class="cc-button quiet" data-usb="preview" disabled>暂停画面</button><button class="cc-button quiet" data-usb="camera-toggle" disabled>开启相机调试保活</button><span data-usb="metrics" class="cc-caption"></span></div>
     <p class="cc-caption">新版固件在白天空闲时会在设备本地检测附近人脸；夜间休息时停止。调试保活只是额外的相机请求，关闭它或断开 USB 不会关闭白天的本地检测。预览画面仅经本机 USB 传输。</p>
     <div class="usb-toolbar"><span class="cc-caption">独立眼睛测试：</span><button class="cc-button quiet" data-usb="eye-left" disabled>向左</button><button class="cc-button quiet" data-usb="eye-center" disabled>居中</button><button class="cc-button quiet" data-usb="eye-right" disabled>向右</button><span class="cc-caption">手动测试 10 秒，暂时覆盖自动注视，不唤醒对话。</span></div>
@@ -32,7 +40,7 @@ export function mountUsbDebug(parent: HTMLElement) {
   parent.prepend(root);
   const $ = <T extends HTMLElement = HTMLElement>(name: string) => root.querySelector<T>(`[data-usb="${name}"]`)!;
   const request = <T>(method: string, payload: unknown = {}) => invoke<T>("usb_debug_request", { method, payload });
-  let disposed = false, busy = false, after = 0;
+  let disposed = false, busy = false, after = 0, wifiSentAt = 0;
   let state: State | null = null, wantedPreview = true;
   let lastOrientation: number | null = null;
   let events: Event[] = [], lastPreviewRequest = "";
@@ -109,6 +117,13 @@ export function mountUsbDebug(parent: HTMLElement) {
       $("camera-toggle").textContent = state.camera_requested ? "关闭相机调试保活" : "开启相机调试保活";
       $("camera-toggle").setAttribute("aria-pressed", String(state.camera_requested));
       $<HTMLButtonElement>("connect").disabled = state.requested;
+      $<HTMLButtonElement>("wifi-submit").disabled = !state.connected;
+      if (state.connected && $("wifi-status").textContent === "等待 USB 连接。")
+        $("wifi-status").textContent = "USB 已连接，请填写网络信息。";
+      if (wifiSentAt && Date.now() - wifiSentAt > 20000) {
+        $("wifi-status").textContent = "尚未收到开发板确认，请检查 USB 连接后重试。";
+        wifiSentAt = 0;
+      }
       $("preview").textContent = wantedPreview ? "暂停画面" : "恢复画面";
       $("metrics").textContent = `${state.received_frames} 帧 · ${state.invalid_packets} 个校验/同步异常 · 驱动欠载日志 ${state.lcd_underruns} 次`;
       if (state.error) notice(state.error);
@@ -122,7 +137,17 @@ export function mountUsbDebug(parent: HTMLElement) {
           seconds < 0.1 ? "两路画面分别采集，采集间隔不足 0.1 秒。" :
           `两路画面分别采集；${delta < 0 ? "屏幕" : "摄像头"}采集时间较早 ${seconds.toFixed(1)} 秒。`;
       } else $("frame-skew").textContent = "两路画面分别采集，等待时间信息。";
-      if (state.events.length) { events.push(...state.events); events = events.slice(-300); after = state.events.at(-1)!.id; renderEvents(); }
+      if (state.events.length) {
+        for (const event of state.events) {
+          if (["wifi.setup", "wifi.saved", "wifi.failed"].includes(event.kind)) {
+            $("wifi-status").textContent = event.detail;
+            if (event.kind !== "wifi.setup" || event.detail.includes("失败")) wifiSentAt = 0;
+          }
+          if (event.kind === "serial.log" && event.detail.includes("Wi-Fi address acquired"))
+            $("wifi-status").textContent = "机器人已连接 Wi-Fi，正在查找 Server。";
+        }
+        events.push(...state.events); events = events.slice(-300); after = state.events.at(-1)!.id; renderEvents();
+      }
       await syncPreview();
     } catch (error) { notice(String(error)); }
     finally { busy = false; }
@@ -130,6 +155,20 @@ export function mountUsbDebug(parent: HTMLElement) {
   $("refresh").addEventListener("click", () => { void action(refreshPorts); });
   $("connect").addEventListener("click", () => { void action(async () => { after = 0; events = []; wantedPreview = true; lastPreviewRequest = ""; await request("connect", { port: $<HTMLSelectElement>("ports").value }); await poll(); }); });
   $("disconnect").addEventListener("click", () => { void action(async () => { await request("disconnect"); await poll(); }); });
+  $("wifi-form").addEventListener("submit", event => {
+    event.preventDefault();
+    const ssid = $<HTMLInputElement>("wifi-ssid").value;
+    const passwordField = $<HTMLInputElement>("wifi-password");
+    const password = passwordField.value;
+    if (!ssid || new TextEncoder().encode(ssid).length > 32) {
+      $("wifi-status").textContent = "网络名称须为 1–32 字节。"; return;
+    }
+    $("wifi-status").textContent = "正在发送 Wi-Fi 配置…";
+    wifiSentAt = Date.now();
+    const pending = request("wifi_provision", { ssid, password });
+    passwordField.value = "";
+    void pending.catch(error => { wifiSentAt = 0; $("wifi-status").textContent = String(error); });
+  });
   for (const name of ["wake", "stop"]) $(name).addEventListener("click", () => { void action(() => request("command", { command: name })); });
   for (const direction of ["left", "center", "right"]) $(`eye-${direction}`).addEventListener("click", () => {
     void action(() => request("command", { command: `eye ${direction}` }));

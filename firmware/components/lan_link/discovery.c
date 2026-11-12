@@ -33,6 +33,32 @@ static const esp_ip4_addr_t *best_ipv4(const mdns_result_t *result,
     return fallback;
 }
 
+esp_err_t bot_lan_find_secure_gateway(const char *ca_sha256, char ip[16], uint16_t *port) {
+    if (!ca_sha256 || strlen(ca_sha256) != 64 || !ip || !port) return ESP_ERR_INVALID_ARG;
+    esp_netif_ip_info_t local = {0};
+    esp_netif_t *wifi = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (!wifi || esp_netif_get_ip_info(wifi, &local) != ESP_OK || !local.ip.addr) return ESP_ERR_INVALID_STATE;
+    mdns_result_t *results = NULL;
+    esp_err_t err = mdns_query_ptr("_espbot-brain", "_tcp", 1500, 12, &results);
+    if (err != ESP_OK) return err;
+    err = ESP_ERR_NOT_FOUND;
+    for (const mdns_result_t *r = results; r; r = r->next) {
+        const char *v = txt_value(r, "proto"), *path = txt_value(r, "path"), *ca = txt_value(r, "ca");
+        if (!r->port || !v || strcmp(v,"3") || !path || strcmp(path,"/v3/brain/ws") ||
+            !ca || strcmp(ca,ca_sha256)) continue;
+        esp_ip4_addr_t resolved = {0};
+        const esp_ip4_addr_t *addr = best_ipv4(r, &local);
+        if (!addr && r->hostname && mdns_query_a(r->hostname, 600, &resolved) == ESP_OK) addr = &resolved;
+        if (!addr || !addr->addr || (addr->addr & local.netmask.addr) != (local.ip.addr & local.netmask.addr)) continue;
+        char candidate[16];
+        snprintf(candidate,sizeof(candidate),IPSTR,IP2STR(addr));
+        if (err == ESP_OK && (*port != r->port || strcmp(ip,candidate))) { err = ESP_ERR_INVALID_RESPONSE; break; }
+        snprintf(ip,16,"%s",candidate); *port=r->port; err=ESP_OK;
+    }
+    if (results) mdns_query_results_free(results);
+    return err;
+}
+
 esp_err_t bot_lan_discovery_scan(bot_lan_server_t *servers,
                                  size_t capacity, size_t *count) {
     if (!servers || !count || capacity == 0) return ESP_ERR_INVALID_ARG;

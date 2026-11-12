@@ -47,6 +47,7 @@ typedef enum {
     BOT_EVENT_SESSION_END,
     BOT_EVENT_FAULT,
     BOT_EVENT_SOUND_ACTIVITY,
+    BOT_EVENT_RESULT_DISMISSED,
     BOT_EVENT_COUNT
 } bot_event_kind_t;
 
@@ -84,6 +85,7 @@ typedef enum {
     BOT_COMMAND_SET_CAPTION,
     BOT_COMMAND_THINKING,
     BOT_COMMAND_REPLY_DONE,
+    BOT_COMMAND_PROGRESS,
     BOT_COMMAND_END_SESSION
 } bot_command_kind_t;
 
@@ -96,6 +98,7 @@ typedef struct {
     union {
         char expression[BOT_EXPRESSION_MAX_BYTES + 1];
         char caption[BOT_CAPTION_MAX_BYTES + 1];
+        bool waiting_for_approval;
     } data;
 } bot_command_t;
 

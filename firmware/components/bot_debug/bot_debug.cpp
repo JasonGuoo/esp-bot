@@ -30,7 +30,8 @@ const char *event_name(unsigned kind) {
     static const char *names[] = {"wake.detected", "touch.wake", "local.stop", "settings.open",
         "settings.close", "utterance.started", "utterance.ended", "playback.started",
         "playback.done", "playback.failed", "link.state", "audio.health", "camera.health",
-        "display.health", "wake.status", "night.policy", "session.end", "fault", "sound.activity"};
+        "display.health", "wake.status", "night.policy", "session.end", "fault", "sound.activity",
+        "result.dismissed"};
     static_assert(sizeof(names) / sizeof(names[0]) == BOT_EVENT_COUNT);
     return kind < BOT_EVENT_COUNT ? names[kind] : "unknown";
 }

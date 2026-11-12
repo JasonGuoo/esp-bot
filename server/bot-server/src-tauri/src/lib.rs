@@ -1,4 +1,3 @@
-#[cfg(feature = "lan-diagnostics")]
 mod identity;
 #[cfg(feature = "lan-diagnostics")]
 mod lan;
@@ -10,6 +9,7 @@ mod memory;
 mod brain;
 mod face_catalog_generated;
 mod usb_debug;
+mod data_root;
 
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -18,8 +18,9 @@ use tauri::{Emitter, Manager};
 pub fn run() {
     tauri::Builder::default()
         .setup(move |app| {
-            app.manage(Arc::new(usb_debug::UsbDebug::default()));
-            let config_dir = app.path().app_config_dir()?;
+            let legacy_dir = app.path().app_config_dir()?;
+            let config_dir = data_root::prepare(&app.path().home_dir()?, &legacy_dir)?;
+            app.manage(Arc::new(usb_debug::UsbDebug::new(config_dir.clone())));
             #[cfg(feature = "lan-diagnostics")]
             let diagnostics: Option<brain::DiagnosticSnapshot> = {
                 let state = start_lan_diagnostics(app.handle(), &config_dir);
@@ -70,18 +71,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("ESP Bot Server console failed to start")
         .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                static CLOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                if !CLOSING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                    api.prevent_exit();
-                    if let Some(debug)=app.try_state::<Arc<usb_debug::UsbDebug>>() {debug.stop();}
-                    let host = app.try_state::<Arc<brain::BrainHost>>().map(|state|Arc::clone(&state));
-                    let handle = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        if let Some(host) = host {
-                            let _ = tokio::time::timeout(std::time::Duration::from_secs(12), host.shutdown()).await;
-                        }
-                        handle.exit(0);
+            // Native macOS Quit can go straight from applicationWillTerminate to
+            // RunEvent::Exit. Wait for owned child processes before returning to Cocoa.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(debug) = app.try_state::<Arc<usb_debug::UsbDebug>>() { debug.stop(); }
+                if let Some(host) = app.try_state::<Arc<brain::BrainHost>>() {
+                    tauri::async_runtime::block_on(async {
+                        let _ = tokio::time::timeout(std::time::Duration::from_secs(12), host.shutdown()).await;
                     });
                 }
             }

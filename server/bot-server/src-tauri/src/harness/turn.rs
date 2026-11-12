@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::{
     checked_id, now_ms, write_state, ActiveTurn, Conversation, Harness,
-    HarnessReply, ModelRoute, TurnRequest, AGENT_ID,
+    HarnessReply, ModelRoute, ToolEvidence, TurnRequest, AGENT_ID,
     http::{Api, ApiError}, routing::{classify, Failure, FailureKind},
 };
 
@@ -50,13 +50,16 @@ fn reviewable_native_permission(action: &str, data: &Value, input: Option<&Value
     }
 }
 
-fn shell_environment() -> Value {
+fn shell_environment(temp_dir: Option<&std::path::Path>) -> Value {
     // OpenCode's own process has provider credentials for model/MCP calls.
     // A session shell must not inherit that process environment. Retain only
     // normal platform/session variables; this is not an OS sandbox.
     let mut vars = serde_json::Map::new();
     for name in ["HOME", "USER", "LOGNAME", "PATH", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM"] {
         if let Ok(value) = std::env::var(name) { vars.insert(name.to_owned(), Value::String(value)); }
+    }
+    if let Some(path) = temp_dir {
+        vars.insert("TMPDIR".into(), Value::String(path.to_string_lossy().into_owned()));
     }
     if !vars.contains_key("PATH") {
         vars.insert("PATH".into(), Value::String("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()));
@@ -125,7 +128,7 @@ impl Harness {
             // Abort any prior unfinished execution after restart/reconnect. Never
             // resume old voice input just because the network returned.
             self.interrupt_session(&session).await?;
-            api.json(Method::PATCH, &format!("/api/session/{session}"), Some(&json!({"permissions":self.config.permissions()})))
+            api.json(Method::PATCH, &format!("/api/session/{session}"), Some(&json!({"permissions":self.config.session_permissions(request.clarify_on_device)})))
                 .await.map_err(|e| e.public_message())?;
             api.json(Method::POST, &format!("/api/session/{session}/agent"), Some(&json!({"agent":AGENT_ID})))
                 .await.map_err(|e| e.public_message())?;
@@ -136,7 +139,7 @@ impl Harness {
                 // V2 session environments are process-local; refresh before
                 // every prompt (including a reconnected or forked session).
                 api.json(Method::PUT, &format!("/api/session/{session}/environment"),
-                    Some(&json!({"variables":shell_environment()})))
+                    Some(&json!({"variables":shell_environment(Some(&self.data_root.join("runtime/xdg/tmp")))})))
                     .await.map_err(|e| e.public_message())?;
             }
             let instructions = json!({
@@ -157,7 +160,7 @@ impl Harness {
                 "attempt":index + 1
             }));
             match self.attempt(&api, request, route, &session, &input_id).await {
-                Ok(raw) => {
+                Ok((raw, evidence)) => {
                     {
                         let mut routing = self.routing.lock().map_err(|_| "opencode_state: route lock")?;
                         routing.routes.remove(&route.id);
@@ -172,7 +175,7 @@ impl Harness {
                     self.emit(json!({"kind":"harness_turn_completed","turn_id":request.turn_id,"route_id":route.id}));
                     return Ok(HarnessReply {
                         text, provider_id: route.provider_id.clone(), model_id: route.model_id.clone(),
-                        session_id: session, structured,
+                        session_id: session, structured, evidence,
                     });
                 }
                 Err(failure) => {
@@ -222,6 +225,10 @@ impl Harness {
                     self.emit(json!({"kind":"harness_route_skipped","route_id":route.id,"reason":"quota_cooldown"}));
                     continue;
                 }
+                if matches!(state.last_failure, FailureKind::HeadersTimeout | FailureKind::Authentication | FailureKind::Configuration) {
+                    self.emit(json!({"kind":"harness_route_skipped","route_id":route.id,"reason":state.last_failure.code()}));
+                    continue;
+                }
                 if state.last_failure == FailureKind::RateLimited {
                     if self.config.fallback_on_rate_limit { continue; }
                     // A lower-priority model must not silently become the default
@@ -240,7 +247,7 @@ impl Harness {
         Ok(routes)
     }
 
-    async fn attempt(&self, api: &Api, request: &TurnRequest, route: &ModelRoute, session: &str, input: &str) -> Result<String, AttemptFailure> {
+    async fn attempt(&self, api: &Api, request: &TurnRequest, route: &ModelRoute, session: &str, input: &str) -> Result<(String, Vec<ToolEvidence>), AttemptFailure> {
         let mut events = api.events().await.map_err(|error| AttemptFailure::api(error, route, false))?;
         // HTTP headers alone do not prove subscription registration has completed.
         tokio::time::timeout(Duration::from_millis(self.config.request_timeout_ms), async {
@@ -266,6 +273,8 @@ impl Harness {
         // so the parent can review commands and edits before approving them.
         let mut tool_inputs: HashMap<(String, String), Option<Value>> = HashMap::new();
         let mut tool_names: HashMap<(String, String), String> = HashMap::new();
+        let mut evidence = Vec::new();
+        let mut recorded_calls = std::collections::HashSet::new();
         loop {
             // Parent review can legitimately take longer than model streaming.
             // The outer whole-turn deadline still bounds the approval wait.
@@ -324,7 +333,28 @@ impl Harness {
                         }
                     }
                     let tool = data["name"].as_str().or_else(|| call_key.as_ref().and_then(|key| tool_names.get(key).map(String::as_str)));
-                    self.emit(json!({"kind":"harness_tool_activity","turn_id":request.turn_id,"tool":tool,"phase":kind}));
+                    if kind == "session.tool.success" && evidence.len() < 32 {
+                        if let (Some(key),Some(name))=(call_key.as_ref(),tool) {
+                            let completed=name!="shell" || (data.pointer("/metadata/status").and_then(Value::as_str)==Some("completed")
+                                && data.pointer("/metadata/exit").and_then(Value::as_i64)==Some(0));
+                            if completed && (matches!(name,"read" | "glob" | "grep" | "webfetch" | "write" | "edit" | "patch" | "shell")
+                                || name.starts_with("browser_") || name.starts_with("deepseek-search_"))
+                                && recorded_calls.insert(key.clone()) {
+                                if let Some(Some(input))=tool_inputs.get(key) {
+                                    let output=data["content"].as_array().into_iter().flatten()
+                                        .filter(|part|part["type"]=="text")
+                                        .filter_map(|part|part["text"].as_str())
+                                        .collect::<Vec<_>>().join("\n");
+                                    if output.len() <= 32_768 {
+                                        evidence.push(ToolEvidence {name:name.to_owned(),input:input.clone(),output});
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    self.emit(json!({"kind":"harness_tool_activity","turn_id":request.turn_id,"tool":tool,"phase":kind,
+                        "message_id":call_key.as_ref().map(|key|key.0.as_str()),
+                        "call_id":call_key.as_ref().map(|key|key.1.as_str())}));
                 }
                 "permission.asked" => {
                     let matched = data.pointer("/source/messageID").and_then(Value::as_str)
@@ -368,9 +398,7 @@ impl Harness {
                 }
                 "session.retry.scheduled" | "session.step.failed" => {
                     let error = classify(&data["error"], route, None);
-                    if error.kind == FailureKind::QuotaExhausted
-                        || (error.kind == FailureKind::RateLimited && self.config.fallback_on_rate_limit)
-                    {
+                    if error.permits_route_change(&self.config) {
                         // Cancel OpenCode's own retry wait before trying another
                         // route. Never let two providers execute this turn.
                         self.interrupt_session(session).await
@@ -408,7 +436,7 @@ impl Harness {
                     if text.trim().is_empty() || text.chars().count() > self.config.max_reply_chars {
                         return Err(AttemptFailure::transport("assistant reply is empty or exceeds the output budget"));
                     }
-                    return Ok(text);
+                    return Ok((text,evidence));
                 }
                 _ => (), // Reasoning deltas and raw tool outputs are not emitted.
             }
@@ -520,7 +548,7 @@ impl Harness {
             "id":id,"title":"小呆对话","agent":AGENT_ID,
             "model":{"providerID":route.provider_id,"id":route.model_id},
             "location":{"directory":self.workspace},
-            "permissions":self.config.permissions(),
+            "permissions":self.config.session_permissions(request.clarify_on_device),
             "metadata":{"esp_bot_conversation_id":request.conversation_id}
         }))).await.map_err(|e| e.public_message())?;
         if response.pointer("/data/id").and_then(Value::as_str) != Some(id.as_str()) {
@@ -611,7 +639,7 @@ mod tests {
 
     #[test]
     fn shell_environment_has_no_provider_or_server_credentials() {
-        let env = shell_environment();
+        let env = shell_environment(None);
         let names = env.as_object().unwrap();
         assert!(names.contains_key("PATH"));
         assert!(!names.contains_key("DEEPSEEK_API_KEY"));

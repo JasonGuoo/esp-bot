@@ -21,6 +21,9 @@ typedef enum {
     BOT_CONVERSATION_WAITING, BOT_CONVERSATION_ENDING
 } bot_conversation_t;
 typedef enum {
+    BOT_ACTIVATION_NONE = 0, BOT_ACTIVATION_TOUCH, BOT_ACTIVATION_WAKE_WORD
+} bot_activation_t;
+typedef enum {
     BOT_COMMAND_ACCEPTED = 0, BOT_COMMAND_REJECTED_STALE,
     BOT_COMMAND_REJECTED_EXPIRED, BOT_COMMAND_REJECTED_UNTRUSTED,
     BOT_COMMAND_REJECTED_PASSIVE, BOT_COMMAND_REJECTED_SETTINGS,
@@ -30,6 +33,7 @@ typedef enum {
 typedef struct {
     bot_behavior_t behavior;
     bot_conversation_t conversation;
+    bot_activation_t activation; /* origin accepted by the runtime, not a VAD inference */
     bot_session_token_t token;
     bot_focus_snapshot_t focus;
     bot_wake_status_t wake_status;
@@ -46,6 +50,8 @@ typedef struct {
     bool audio_available, camera_available;
     bool display_awake, display_sleep_supported, display_full_blackout_verified;
     bool clock_valid, night_policy;
+    bool ambient_dark, ambient_sample_valid, ambient_probe;
+    uint8_t ambient_luma;        /* camera image mean, not calibrated lux */
     bool critical_fault;
     bool utterance_active;
     uint32_t playback_id; /* current local playback operation; zero means none */
@@ -53,6 +59,9 @@ typedef struct {
     uint32_t rejected_commands, rejected_events;
     char expression[BOT_EXPRESSION_MAX_BYTES + 1];
     char caption[BOT_CAPTION_MAX_BYTES + 1];
+    /* Last completed visual reply. Its lifetime is independent of microphone permission. */
+    bot_session_token_t reading_token;
+    char reading_text[BOT_CAPTION_MAX_BYTES + 1];
 } bot_runtime_snapshot_t;
 
 typedef struct {
@@ -96,6 +105,10 @@ esp_err_t bot_runtime_create(bot_bus_t *bus, const bot_runtime_config_t *config,
 void bot_runtime_destroy(bot_runtime_t *runtime);
 /** now_ms is the fallback clock value when ops.now_ms is NULL. */
 void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms);
+/** Owner task only: a fresh, successfully captured camera brightness sample.
+ * Timestamp is local monotonic capture time, never the time of an old frame. */
+void bot_runtime_observe_light(bot_runtime_t *runtime, uint8_t mean_luma,
+                               uint32_t captured_ms, uint32_t now_ms);
 /** Owner task only. Other tasks should copy from apply_state callback. */
 void bot_runtime_get_snapshot(const bot_runtime_t *runtime, bot_runtime_snapshot_t *out);
 /** Owner-only explicit recovery after application has dealt with the overflow/fault.

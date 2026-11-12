@@ -2,13 +2,16 @@
  * No HTTP poller, second microphone reader, UI decision maker, or fake head pose.
  * First-board execution is recorded in docs/board-bringup-2026-11-06.md. */
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include "sdkconfig.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_random.h"
+#include "esp_rom_sys.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -37,6 +40,11 @@ typedef struct {
     bot_audio_t *audio;
     bot_vision_t *vision;
     face_view_t *face;
+    atomic_uint text_requested, text_started, text_ready;
+    atomic_uint image_requested, image_started, image_ready;
+    unsigned text_generation, image_generation;
+    bot_session_token_t result_token, image_token;
+    char image_asset_id[BOT_DISPLAY_ASSET_ID_BYTES];
     attention_controller_t attention;
     idle_attention_t idle_attention;
     bot_runtime_snapshot_t desired;
@@ -47,19 +55,25 @@ typedef struct {
     QueueHandle_t debug_camera_queue;
     QueueHandle_t debug_face_queue;
     QueueHandle_t debug_orientation_queue;
+    QueueHandle_t debug_light_queue;
     bool debug_camera_wanted;
     uint32_t debug_eye_until_ms;
     int debug_eye_x;
     uint32_t debug_face_until_ms;
     char debug_face[BOT_EXPRESSION_MAX_BYTES + 1];
+    bool simulated_light;
+    int simulated_luma;
+    uint32_t simulated_light_until_ms;
 #endif
     bool vision_health_sent, vision_available; /* only written by vision callback */
     esp_err_t vision_error;
     bool display_health_sent, last_display_awake;
     bool camera_request_sent, last_camera_requested;
+    bool light_mode_sent, last_light_mode;
+    bool ambient_reported, last_ambient_dark, last_ambient_probe;
     bool near_face_reported, last_near_face;
     bool night_sent, last_night, last_clock_valid;
-    uint32_t last_clock_poll_ms, last_diagnostic_ms;
+    uint32_t last_clock_poll_ms, last_diagnostic_ms, last_light_poll_ms;
     char rendered_caption[BOT_CAPTION_MAX_BYTES + 1];
     char rendered_expression[BOT_EXPRESSION_MAX_BYTES + 1];
 } app_t;
@@ -74,8 +88,28 @@ static void post(app_t *app, const bot_event_t *event) {
 static bot_session_token_t runtime_token(bot_audio_token_t t) {
     return (bot_session_token_t){t.epoch, t.session_id, t.turn_id, t.focus_generation};
 }
+static bool same_runtime_token(bot_session_token_t a, bot_session_token_t b) {
+    return a.epoch==b.epoch && a.session_id==b.session_id && a.turn_id==b.turn_id &&
+           a.focus_generation==b.focus_generation;
+}
+static void display_refresh(lv_event_t *event) {
+    app_t *app=lv_event_get_user_data(event);
+    if (lv_event_get_code(event)==LV_EVENT_REFR_START) {
+        atomic_store(&app->text_started,atomic_exchange(&app->text_requested,0));
+        atomic_store(&app->image_started,atomic_exchange(&app->image_requested,0));
+    } else if (lv_event_get_code(event)==LV_EVENT_REFR_READY) {
+        unsigned text=atomic_exchange(&app->text_started,0);
+        unsigned image=atomic_exchange(&app->image_started,0);
+        if (text) atomic_store(&app->text_ready,text);
+        if (image) atomic_store(&app->image_ready,image);
+    }
+}
 static bot_audio_token_t audio_token(bot_session_token_t t) {
     return (bot_audio_token_t){t.epoch, t.session_id, t.turn_id, t.focus_generation};
+}
+static void audio_pcm(void *context, const bot_audio_pcm_t *frame) {
+    (void)context;
+    brain_secure_pcm(frame);
 }
 
 static void audio_event(void *context, const bot_audio_event_t *source) {
@@ -186,7 +220,9 @@ static void touch_wake(void *context) {
  * and policy path as touch; it cannot bypass runtime permissions or stop. */
 static void usb_manual_task(void *context) {
     app_t *app = context;
-    char command[32];
+    enum { COMMAND_BYTES = 4096 };
+    char *command = heap_caps_malloc(COMMAND_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!command) { ESP_LOGW(TAG, "No PSRAM for USB console"); vTaskDelete(NULL); return; }
     size_t length = 0;
     bool discard = false;
     ESP_LOGI(TAG, "Local USB bring-up control enabled: wake / stop");
@@ -200,7 +236,31 @@ static void usb_manual_task(void *context) {
         if (byte == '\r' || byte == '\n') {
             if (!discard && length) {
                 command[length] = '\0';
-                if (strcmp(command, "wake") == 0) {
+                if (strncmp(command, "secure config ", 14) == 0) {
+                    esp_err_t saved = brain_secure_provision(command + 14);
+                    memset(command, 0, COMMAND_BYTES);
+                    if (saved == ESP_OK) {
+                        ESP_LOGI(TAG, "USB secure provisioning saved; restarting");
+                        /* The normal logger is queued and can lag behind UART
+                         * preview frames. A bounded direct receipt lets the
+                         * physical provisioner commit its matching token hash. */
+                        esp_rom_printf("\nXIAODAI_PROVISION_OK\n");
+                        vTaskDelay(pdMS_TO_TICKS(1000));
+                        esp_restart();
+                    } else ESP_LOGW(TAG, "USB secure provisioning failed: %s", esp_err_to_name(saved));
+                } else if (strncmp(command, "wifi config ", 12) == 0) {
+                    esp_err_t saved = brain_link_wifi_provision(command + 12);
+                    memset(command, 0, COMMAND_BYTES);
+                    if (saved == ESP_OK) {
+                        esp_rom_printf("\nXIAODAI_WIFI_OK\n");
+                        ESP_LOGI(TAG, "USB Wi-Fi configuration saved; restarting");
+                        vTaskDelay(pdMS_TO_TICKS(1000));
+                        esp_restart();
+                    } else {
+                        esp_rom_printf("\nXIAODAI_WIFI_ERROR\n");
+                        ESP_LOGW(TAG, "USB Wi-Fi configuration rejected: %s", esp_err_to_name(saved));
+                    }
+                } else if (strcmp(command, "wake") == 0) {
                     ESP_LOGI(TAG, "Intentional local USB wake received");
                     const bot_event_t event = {
                         .kind = BOT_EVENT_TOUCH_WAKE, .source = BOT_SOURCE_LOCAL_UI,
@@ -224,6 +284,17 @@ static void usb_manual_task(void *context) {
                     if (app->debug_camera_queue && (!requested || bot_debug_preview_enabled()))
                         xQueueOverwrite(app->debug_camera_queue, &requested);
                     else ESP_LOGW(TAG, "USB camera request rejected: preview is inactive");
+                } else if (strncmp(command, "light test ", 11) == 0) {
+                    char *end = NULL;
+                    long value = -1;
+                    const char *arg = command + 11;
+                    if (strcmp(arg, "off") != 0) value = strtol(arg, &end, 10);
+                    const bool valid = strcmp(arg, "off") == 0 ||
+                        (end != arg && end && *end == '\0' && value >= 0 && value <= 255);
+                    if (valid && bot_debug_preview_enabled() && app->debug_light_queue) {
+                        const int requested = (int)value;
+                        xQueueOverwrite(app->debug_light_queue, &requested);
+                    } else ESP_LOGW(TAG, "Light simulation rejected: invalid value or preview inactive");
                 } else if (strcmp(command, "camera orient?") == 0 ||
                            (strncmp(command, "camera orient ", 14) == 0 &&
                             command[14] >= '0' && command[14] <= '3' && command[15] == '\0')) {
@@ -255,7 +326,7 @@ static void usb_manual_task(void *context) {
             }
             length = 0;
             discard = false;
-        } else if (byte >= 0x20 && byte <= 0x7e && !discard && length < sizeof(command) - 1) {
+        } else if (byte >= 0x20 && byte <= 0x7e && !discard && length < COMMAND_BYTES - 1) {
             command[length++] = (char)byte;
         } else {
             discard = true;
@@ -268,7 +339,8 @@ static void face_event(face_event_t event, void *context) {
     if (event == FACE_EVENT_TOUCH) { touch_wake(app); return; }
     if (event == FACE_EVENT_STOP) { bot_bus_request_stop(app->bus, bot_platform_now_ms()); return; }
     bot_event_t message = { .source = BOT_SOURCE_LOCAL_UI, .observed_ms = bot_platform_now_ms(),
-        .kind = event == FACE_EVENT_SETTINGS_OPENED ? BOT_EVENT_SETTINGS_OPEN : BOT_EVENT_SETTINGS_CLOSE };
+        .kind = event == FACE_EVENT_RESULT_DISMISSED ? BOT_EVENT_RESULT_DISMISSED :
+                event == FACE_EVENT_SETTINGS_OPENED ? BOT_EVENT_SETTINGS_OPEN : BOT_EVENT_SETTINGS_CLOSE };
     post(app, &message);
 }
 static void theme_applied(const char *theme, void *context) {
@@ -277,15 +349,22 @@ static void theme_applied(const char *theme, void *context) {
     snprintf(value, sizeof(value), "%s", theme);
     if (app->theme_queue) xQueueOverwrite(app->theme_queue, value);
 }
+static void apply_audio_session(app_t *app, const bot_runtime_snapshot_t *state) {
+    if (!app->audio) return;
+    bot_audio_token_t token = audio_token(state->token);
+    if (state->audio_session_requested && state->conversation == BOT_CONVERSATION_WAITING) {
+        bot_audio_wait_for_followup(app->audio, &token);
+    } else {
+        bot_audio_set_session(app->audio, state->audio_session_requested ? &token : NULL,
+                              state->audio_uplink_permitted && brain_secure_uplink(&state->token));
+    }
+}
 static void apply_state(void *context, const bot_runtime_snapshot_t *state) {
     app_t *app = context;
     app->desired = *state;
-    /* This hook also runs at the intermediate revocation barrier. Close the
-     * audio token gate now, before stop_output and before another bus event. */
-    if (app->audio) {
-        bot_audio_token_t token = audio_token(state->token);
-        bot_audio_set_session(app->audio, state->audio_session_requested ? &token : NULL, false);
-    }
+    brain_secure_update(state);
+    /* Also close the audio token gate at the intermediate revocation barrier. */
+    apply_audio_session(app, state);
 }
 static void stop_output(void *context) {
     app_t *app = context;
@@ -294,8 +373,8 @@ static void stop_output(void *context) {
 }
 static void cancel_remote(void *context, const bot_session_token_t *token) {
     (void)context; (void)token;
-    /* No authenticated dialogue/media transport is installed. The local epoch
-     * fence is effective now; a future transport adds remote cancellation here. */
+    /* The secure transport observes the invalidated snapshot and token; it
+     * cancels the prior remote turn on its own nonblocking worker. */
 }
 static void command_result(void *context, uint32_t id, bot_command_result_t result) {
     (void)context;
@@ -361,11 +440,7 @@ static attention_output_t update_gaze(app_t *app, uint32_t now_ms) {
 
 static void reconcile(app_t *app, uint32_t now_ms) {
     bot_runtime_snapshot_t *s = &app->desired;
-    if (app->audio) {
-        bot_audio_token_t token = audio_token(s->token);
-        /* This build never supplies an on_pcm consumer or authenticated transport. */
-        bot_audio_set_session(app->audio, s->audio_session_requested ? &token : NULL, false);
-    }
+    apply_audio_session(app, s);
     bool camera_requested = s->camera_requested;
 #if CONFIG_ESPBOT_USB_DEBUG_PREVIEW
     int orientation_command;
@@ -395,9 +470,18 @@ static void reconcile(app_t *app, uint32_t now_ms) {
      * idle, without creating a conversation or enabling network media. Night
      * dark, settings and critical faults still suppress debug capture. */
     const bool debug_camera_active = app->debug_camera_wanted && usb_preview &&
-        s->behavior != BOT_BEHAVIOR_NIGHT_DARK && !s->settings_open && !s->critical_fault;
+        s->behavior != BOT_BEHAVIOR_NIGHT_DARK && s->behavior != BOT_BEHAVIOR_SLEEPING &&
+        !s->settings_open && !s->critical_fault;
     camera_requested = camera_requested || debug_camera_active;
 #endif
+    const bool light_only = s->behavior == BOT_BEHAVIOR_SLEEPING && s->ambient_probe;
+    if (app->vision && (!app->light_mode_sent || app->last_light_mode != light_only)) {
+        if (bot_vision_set_light_only(app->vision, light_only) == ESP_OK) {
+            app->last_light_mode = light_only;
+            app->light_mode_sent = true;
+            ESP_LOGI(TAG, "Ambient probe light_only=%d", light_only);
+        }
+    }
     if (app->vision && (!app->camera_request_sent || app->last_camera_requested != camera_requested)) {
         if (bot_vision_set_enabled(app->vision, camera_requested) == ESP_OK) {
             ESP_LOGI(TAG, "Camera requested=%d behavior=%s", camera_requested,
@@ -405,6 +489,15 @@ static void reconcile(app_t *app, uint32_t now_ms) {
             app->last_camera_requested = camera_requested;
             app->camera_request_sent = true;
         }
+    }
+    if (!app->ambient_reported || app->last_ambient_dark != s->ambient_dark ||
+        app->last_ambient_probe != s->ambient_probe) {
+        ESP_LOGI(TAG, "Ambient dark=%d probe=%d luma=%u valid=%d behavior=%s",
+                 s->ambient_dark, s->ambient_probe, s->ambient_luma,
+                 s->ambient_sample_valid, bot_behavior_name(s->behavior));
+        app->ambient_reported = true;
+        app->last_ambient_dark = s->ambient_dark;
+        app->last_ambient_probe = s->ambient_probe;
     }
     bot_platform_status_t platform;
     bot_platform_get_status(app->platform, &platform);
@@ -489,7 +582,7 @@ static void reconcile(app_t *app, uint32_t now_ms) {
         face_get_gaze(app->face, &rendered_gaze_x, &rendered_gaze_y);
         rendered_gaze_valid = true;
         face_set_stop_visible(app->face, s->behavior == BOT_BEHAVIOR_WAKING ||
-                                      s->behavior == BOT_BEHAVIOR_ENGAGED || s->critical_fault);
+                                      s->behavior == BOT_BEHAVIOR_ENGAGED || s->reading_token.session_id || s->critical_fault);
         const char *caption = s->caption;
         if (s->critical_fault) caption = "小呆需要重新启动";
         if (!*caption && s->wake_status != BOT_WAKE_READY && !s->settings_open &&
@@ -501,6 +594,40 @@ static void reconcile(app_t *app, uint32_t now_ms) {
             face_set_subtitle(app->face, caption);
             snprintf(app->rendered_caption, sizeof(app->rendered_caption), "%s", caption);
         }
+        bool showing_result = s->reading_token.session_id && !s->settings_open && !s->critical_fault;
+        if (!showing_result) {
+            face_set_result_text(app->face,"");
+            app->result_token=(bot_session_token_t){0};
+            app->image_token=(bot_session_token_t){0};
+        } else if (!same_runtime_token(app->result_token,s->reading_token)) {
+            face_set_result_text(app->face,"");
+            face_set_result_text(app->face,s->reading_text);
+            app->result_token=s->reading_token;
+            app->image_token=(bot_session_token_t){0};
+            if (!++app->text_generation) ++app->text_generation;
+            atomic_store(&app->text_requested,app->text_generation);
+            lv_obj_invalidate(face_root(app->face));
+        }
+        bot_display_image_t image;
+        if (brain_secure_take_image(&image)) {
+            bool current=showing_result && same_runtime_token(image.token,s->reading_token) && same_runtime_token(image.token,s->token);
+            if (current && face_set_result_image(app->face,image.pixels,image.width,image.height)) {
+                app->image_token=image.token;
+                snprintf(app->image_asset_id,sizeof(app->image_asset_id),"%s",image.asset_id);
+                if (!++app->image_generation) ++app->image_generation;
+                atomic_store(&app->image_requested,app->image_generation);
+                lv_obj_invalidate(face_root(app->face));
+            } else {
+                free(image.pixels);
+                if (current) brain_secure_display_report(image.token,"image",image.asset_id,false);
+            }
+        }
+        unsigned text_ready=atomic_exchange(&app->text_ready,0);
+        unsigned image_ready=atomic_exchange(&app->image_ready,0);
+        if (text_ready && text_ready==app->text_generation && showing_result && same_runtime_token(app->result_token,s->token) &&
+            face_result_visible(app->face)) brain_secure_display_report(s->token,"text",NULL,true);
+        if (image_ready && image_ready==app->image_generation && showing_result && same_runtime_token(app->image_token,s->token) &&
+            face_result_visible(app->face)) brain_secure_display_report(s->token,"image",app->image_asset_id,true);
         bot_platform_display_unlock();
     }
     if (expression_changed)
@@ -559,17 +686,53 @@ static void reconcile(app_t *app, uint32_t now_ms) {
     }
 }
 
+static void poll_ambient_light(app_t *app, uint32_t now_ms) {
+#if CONFIG_ESPBOT_USB_DEBUG_PREVIEW
+    int test_luma;
+    if (app->debug_light_queue && xQueueReceive(app->debug_light_queue, &test_luma, 0) == pdTRUE) {
+        app->simulated_light = test_luma >= 0;
+        app->simulated_luma = test_luma;
+        app->simulated_light_until_ms = now_ms + 120000;
+        ESP_LOGI(TAG, "Ambient simulation enabled=%d luma=%d (temporary)",
+                 app->simulated_light, test_luma);
+    }
+    if (app->simulated_light && (!bot_debug_preview_enabled() ||
+        (int32_t)(now_ms - app->simulated_light_until_ms) >= 0)) {
+        app->simulated_light = false;
+        ESP_LOGI(TAG, "Ambient simulation expired");
+    }
+#endif
+    if (!app->vision || !app->desired.camera_requested ||
+        (uint32_t)(now_ms - app->last_light_poll_ms) < 500) return;
+    app->last_light_poll_ms = now_ms;
+    bot_vision_status_t status;
+    bot_vision_get_status(app->vision, &status);
+    if (!status.stream_active || status.error != ESP_OK ||
+        (status.quality != BOT_VISION_FRAME_OK && status.quality != BOT_VISION_FRAME_DARK)) return;
+    uint8_t luma = status.mean_luma;
+#if CONFIG_ESPBOT_USB_DEBUG_PREVIEW
+    if (app->simulated_light) luma = (uint8_t)app->simulated_luma;
+#endif
+    bot_runtime_observe_light(app->runtime, luma, status.capture_ms, bot_platform_now_ms());
+}
+
 static void runtime_task(void *argument) {
     app_t *app = argument;
     TickType_t previous = xTaskGetTickCount();
     for (;;) {
         uint32_t now = bot_platform_now_ms();
         poll_night(app, now);
+        poll_ambient_light(app, now);
         bot_runtime_step(app->runtime, now);
         reconcile(app, bot_platform_now_ms());
         vTaskDelayUntil(&previous, pdMS_TO_TICKS(20));
     }
 }
+
+/* Reserve the local behavior/Stop task's internal stack at link time; its
+ * start still waits for initialization to finish. Optional clients cannot take it. */
+static StackType_t s_runtime_stack[12288 / sizeof(StackType_t)] __attribute__((aligned(portBYTE_ALIGNMENT)));
+static StaticTask_t s_runtime_tcb;
 
 void app_main(void) {
     ESP_LOGI(TAG, "Boot reset_reason=%d; normal operation does not rewrite application flash",
@@ -593,6 +756,11 @@ void app_main(void) {
     if (platform.display_available && bot_platform_display_lock(0)) {
         app->face = face_create(bot_platform_screen(app->platform));
         if (app->face) {
+            lv_display_t *display=lv_display_get_default();
+            if (display) {
+                lv_display_add_event_cb(display,display_refresh,LV_EVENT_REFR_START,app);
+                lv_display_add_event_cb(display,display_refresh,LV_EVENT_REFR_READY,app);
+            }
             char theme[32];
             if (bot_platform_load_theme(app->platform, theme, sizeof(theme)) == ESP_OK)
                 face_set_theme(app->face, theme);
@@ -602,7 +770,7 @@ void app_main(void) {
         bot_platform_on_dark_touch(app->platform, touch_wake, app);
         bot_platform_display_unlock();
     }
-    config.allow_audio_uplink = false;
+    config.allow_audio_uplink = true; /* runtime still requires authenticated WSS and explicit activation */
     config.allow_barge_in = false; /* no measured AEC reference */
     bot_runtime_ops_t ops = { .apply_state = apply_state, .stop_output = stop_output,
         .cancel_remote = cancel_remote, .command_result = command_result,
@@ -614,7 +782,7 @@ void app_main(void) {
     tzset();
 #endif
     bot_audio_config_t audio_cfg = bot_audio_default_config();
-    audio_cfg.on_event = audio_event; audio_cfg.context = app;
+    audio_cfg.on_event = audio_event; audio_cfg.on_pcm = audio_pcm; audio_cfg.context = app;
     esp_err_t err = bot_audio_create(&audio_cfg, &app->audio);
     if (err == ESP_OK) err = bot_audio_start(app->audio);
     if (err != ESP_OK) {
@@ -622,6 +790,17 @@ void app_main(void) {
         bot_event_t event = { .kind = BOT_EVENT_AUDIO_HEALTH, .source = BOT_SOURCE_AUDIO,
             .observed_ms = bot_platform_now_ms(), .data.health = { .available = false, .error = err } };
         post(app, &event);
+    }
+    /* Reserve the persistent authenticated client task while internal RAM is
+     * contiguous. Camera, USB preview and Bonjour must not be able to displace it. */
+    err = brain_link_start(app->bus);
+    if (err != ESP_OK) ESP_LOGW(TAG, "Network unavailable: %s; local runtime continues", esp_err_to_name(err));
+    if (err == ESP_OK) {
+        if (app->audio) {
+            esp_err_t secure = brain_secure_start(app->bus, app->audio);
+            if (secure != ESP_OK) ESP_LOGW(TAG, "Secure gateway unavailable: %s", esp_err_to_name(secure));
+        }
+        brain_link_start_diagnostics();
     }
     bot_vision_config_t vision_cfg = bot_vision_default_config();
     vision_cfg.prepare_camera = prepare_camera; vision_cfg.on_snapshot = vision_snapshot;
@@ -643,10 +822,12 @@ void app_main(void) {
     app->debug_camera_queue = xQueueCreate(1, sizeof(int));
     app->debug_face_queue = xQueueCreate(1, BOT_EXPRESSION_MAX_BYTES + 1);
     app->debug_orientation_queue = xQueueCreate(1, sizeof(int));
+    app->debug_light_queue = xQueueCreate(1, sizeof(int));
     if (!app->debug_eye_queue) ESP_LOGW(TAG, "USB eye test unavailable: queue allocation failed");
     if (!app->debug_camera_queue) ESP_LOGW(TAG, "USB camera test unavailable: queue allocation failed");
     if (!app->debug_face_queue) ESP_LOGW(TAG, "USB face test unavailable: queue allocation failed");
     if (!app->debug_orientation_queue) ESP_LOGW(TAG, "USB camera orientation unavailable: queue allocation failed");
+    if (!app->debug_light_queue) ESP_LOGW(TAG, "USB light simulation unavailable: queue allocation failed");
     err = bot_debug_start(app->platform);
     if (err != ESP_OK) ESP_LOGW(TAG, "USB preview unavailable: %s", esp_err_to_name(err));
 #endif
@@ -655,9 +836,7 @@ void app_main(void) {
 #endif
     err = bot_vision_start(&vision_cfg, &app->vision);
     if (err != ESP_OK) ESP_LOGW(TAG, "Vision unavailable: %s", esp_err_to_name(err));
-    err = brain_link_start(app->bus);
-    if (err != ESP_OK) ESP_LOGW(TAG, "Network unavailable: %s; local runtime continues", esp_err_to_name(err));
-    if (xTaskCreate(runtime_task, "bot_runtime", 12288, app, 6, NULL) != pdPASS) {
+    if (!xTaskCreateStatic(runtime_task, "bot_runtime", sizeof(s_runtime_stack), app, 6, s_runtime_stack, &s_runtime_tcb)) {
         stop_output(app);
         if (app->audio) bot_audio_set_session(app->audio, NULL, false);
         if (app->vision) bot_vision_set_enabled(app->vision, false);
@@ -665,7 +844,7 @@ void app_main(void) {
         return;
     }
 #if CONFIG_ESPBOT_USB_MANUAL_CONTROL
-    if (xTaskCreate(usb_manual_task, "bot_usb_manual", 3072, app, 2, NULL) != pdPASS)
+    if (xTaskCreate(usb_manual_task, "bot_usb_manual", 4096, app, 2, NULL) != pdPASS)
         ESP_LOGW(TAG, "USB bring-up control unavailable");
 #endif
     head_motion_status_t head = head_motion_get_status();

@@ -6,8 +6,25 @@
   examples and reuse working implementations where possible. Next consult the
   official development documentation; then review other open-source projects.
   Prefer adapting supported existing components to building replacements.
+- For requested firmware work, proceed with source changes, local builds, and
+  routine application-only flashing/verification on the identified development
+  board without repeatedly asking for confirmation. Preserve provisioning and
+  the model/data partitions. For networking, use the matching official client
+  and server examples as the first real-board comparison.
+- Exercise state changes and display layout locally with the project ESP-IDF/LVGL
+  versions first. For routine speech and screen checks, use Mac speech synthesis
+  next to the board microphone and the official Bot Server USB screen preview.
 
-## Latest delivery context (2026-11-06)
+## Delivery context
+
+- **2026-11-12 device connection:** The production S31 firmware discovers the paired Mac's
+  `_espbot-brain._tcp.local.` service and initiates authenticated WSS over TCP. A single
+  running board automatically followed two port changes. See the [real-board acceptance
+  record](docs/specs/server-voice-tasks/acceptance.md) and [local ESP-IDF test
+  workflow](docs/esp-idf-development.md). BLE provisioning and physical speaker playback
+  remain pending.
+
+### 2026-11-06 bring-up
 
 - **First real board bring-up is now in progress at the user's explicit request.** Read [docs/board-bringup-2026-11-06.md](docs/board-bringup-2026-11-06.md) before further firmware work. The connected ESP32-S31 has 16 MB Flash / PSRAM and an actual **SC101IOT** camera, unlike the earlier OV3660 assumption. A full original Flash backup, native module tests, local IDF build and initial flash have been performed; acceptance and remaining failures are recorded there. Do not infer that all peripherals or private Mac speech have passed.
 - **Mac server is now source-integrated.** Read [docs/mac-bot-server.md](docs/mac-bot-server.md) and [docs/mac-opencode.md](docs/mac-opencode.md) before changing the server. The user's selected LLM harness is **OpenCode v2 (source target 2.2.5)**, with **Qwen Coding Plan → GLM Coding Plan → DeepSeek Flash** routes. This explicit selection supersedes older local-LLM/HF-S2S defaults for LLM orchestration; ASR, TTS, face/speaker embeddings and personal memory remain local. Reuse installed `browser` / `deepseek-search` MCP definitions.
@@ -42,6 +59,6 @@
 - **Passive companion by default:** only explicit wake or intentional user touch/manual action initiates conversation; face presence, looking at Bot, speech energy, other conversation and acoustic DOA are NOT wake events. Idle → bored → drowsy → sleeping; night dark should keep local audio keyword recognition running while camera and screen are inactive. See [docs/behavior-lifecycle.md](docs/behavior-lifecycle.md).
 - **Currently installed V1 hardware:** fixed, non-actuated camera/head that may be moved by hand; **no installed IMU, servo or joint feedback**. **Revised physical target** is an enclosed speaker-equipped two-axis moving head using off-the-shelf parts; do not fabricate capability before real installation. Visual follow means rendered eyes update from CURRENT camera-relative human eye position if a visible target remains in frame. Software cannot turn camera to reacquire an off-screen person. The rendered eyes should not auto-recenter while the head has not physically aligned. Future motors/IMU are optional adapters. See [docs/eye-contact.md](docs/eye-contact.md), [docs/hardware-power.md](docs/hardware-power.md).
 - **One authority for each decision:** bot_runtime owns local behavior/lifecycle and command arbitration; bot_bus transports events/commands/snapshots but makes no decisions; attention_manager owns the single official human focus; vision_attention owns multi-person perception, eye landmarks and human look-at-Bot evidence; attention owns eye/head spatial planning; face renders; head_motion owns physical actuator safety when present. No server/LLM per-frame motor or pupil instructions.
-- **Audio single owner:** microphone capture is shared by local keyword recognizer and optional DOA, never independently opened twice; unrecognized pre-wake audio is neither persisted nor uploaded. Rust/Tauri bot-server now composes the Mac Brain; ESP lan_link remains diagnostic and must not send private media until the WSS v3 client is integrated.
+- **Audio single owner:** microphone capture is shared by local keyword recognizer and optional DOA, never independently opened twice; unrecognized pre-wake audio is neither persisted nor uploaded. Rust/Tauri bot-server composes the Mac Brain. Device media requires an explicitly activated session through the authenticated v3 client. The LAN v1 link is for diagnostics.
 - Keep contracts versioned, capture times monotonic for local control, explicit freshness/validity flags, ephemeral track IDs and distinct human-eye LOCATION versus human-GAZE estimates. No false claim of mutual eye contact when camera is unavailable or too dark.
 - When writing code, state what exists, what is only documented, and what requires absent board/model/motor resources. Respect the **no CI** project policy above even when adding new modules.

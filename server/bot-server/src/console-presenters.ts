@@ -1,4 +1,33 @@
 type Data = Record<string, unknown>;
+export type DeviceDisplayReport = "rendered" | "unavailable" | null;
+
+export function deviceDeliveryText(text: DeviceDisplayReport, image: DeviceDisplayReport): string {
+  if (image === "rendered") {
+    if (text === "rendered") return "文字和图片已绘制到设备屏幕";
+    if (text === "unavailable") return "图片已绘制，文字暂时无法显示";
+    return "图片已绘制到设备屏幕";
+  }
+  if (image === "unavailable") {
+    if (text === "rendered") return "文字已绘制，图片暂时无法显示";
+    if (text === "unavailable") return "文字和图片暂时无法显示";
+    return "图片暂时无法显示";
+  }
+  if (text === "rendered") return "文字已绘制到设备屏幕";
+  if (text === "unavailable") return "文字暂时无法显示";
+  return "Server 已完成，设备显示状态待确认";
+}
+
+export function deviceReplyMetrics(payload: Data): string {
+  const parts: string[] = [];
+  const { processing_ms: duration, tts_calls: calls, reply_pcm_bytes: bytes } = payload;
+  if (typeof duration === "number" && Number.isFinite(duration) && duration >= 0)
+    parts.push(`Mac 处理 ${(duration / 1000).toFixed(1)} 秒`);
+  if (typeof calls === "number" && Number.isSafeInteger(calls) && calls >= 0)
+    parts.push(`语音合成 ${calls} 次`);
+  if (typeof bytes === "number" && Number.isSafeInteger(bytes) && bytes >= 0)
+    parts.push(`回复音频 ${bytes.toLocaleString("zh-CN")} 字节`);
+  return parts.join(" · ");
+}
 const object = (value: unknown): Data => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Data : {};
 const text = (value: unknown, fallback = ""): string => typeof value === "string" ? value : fallback;
 const list = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
@@ -57,10 +86,13 @@ export function renderDeviceStatus(root: HTMLElement, status: Data): void {
   }
   if (diagnostic.server_id) host.append(node("p", "cc-caption", `服务器标识：${text(diagnostic.server_id)}`));
   const gateway = object(status.gateway);
-  find(root, "#cc-gateway-summary").textContent = gateway.running === true ? "WSS 网关已启动" : status.gateway_enabled === true ? "已启用，等待服务启动" : "WSS 网关未启用";
+  const secureDevices = list(gateway.devices);
+  find(root, "#cc-gateway-summary").textContent = gateway.running === true
+    ? secureDevices.length ? `${secureDevices.length} 台设备已认证连接` : "WSS 网关已启动，等待设备"
+    : status.gateway_enabled === true ? "已启用，等待服务启动" : "WSS 网关未启用";
   find(root, "#cc-gateway-detail").textContent = gateway.running === true
-    ? `${text(gateway.bind)}${text(gateway.path)} · TLS 加密 · 协议 v3`
-    : "在下方配置证书与监听地址，完成设备侧接入后再启用。";
+    ? `${text(gateway.bind)}${text(gateway.path)} · ${gateway.bonjour ? "Bonjour 已公布" : "Bonjour 未公布"} · 控制连接 TLS · 语音局域网明文 · 协议 v3${secureDevices.length ? ` · ${secureDevices.map((v) => text(v)).join("、")}` : ""}`
+    : "在下方配置证书与监听地址，并通过 USB 配置设备。";
 }
 
 export function renderRuntimeMetrics(root: HTMLElement, status: Data): void {

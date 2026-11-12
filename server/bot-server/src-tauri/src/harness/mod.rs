@@ -85,6 +85,8 @@ pub struct TurnRequest {
     pub system_prompt: String,
     #[serde(default)]
     pub response_schema: Option<Value>,
+    #[serde(default)]
+    pub clarify_on_device: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -94,8 +96,16 @@ pub struct HarnessReply {
     pub model_id: String,
     pub session_id: String,
     pub structured: Option<Value>,
+    #[serde(skip)]
+    pub(crate) evidence: Vec<ToolEvidence>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ToolEvidence {
+    pub name: String,
+    pub input: Value,
+    pub output: String,
+}
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct SessionLedger {
@@ -163,6 +173,7 @@ impl Drop for ManagedProcess {
 pub struct Harness {
     config: HarnessConfig,
     data_dir: PathBuf,
+    data_root: PathBuf,
     workspace: PathBuf,
     client: Client,
     process: Mutex<Option<ManagedProcess>>,
@@ -256,8 +267,9 @@ impl Drop for TurnGuard<'_> {
 }
 
 impl Harness {
+    pub(crate) fn workspace(&self) -> &std::path::Path { &self.workspace }
     /// Creates state, not a subprocess. Starting models remains a console action.
-    pub fn new(config: HarnessConfig, data_dir: PathBuf, sink: HarnessEventSink) -> Result<Arc<Self>, String> {
+    pub fn new(config: HarnessConfig, data_dir: PathBuf, data_root: PathBuf, sink: HarnessEventSink) -> Result<Arc<Self>, String> {
         config.validate()?;
         private_dir(&data_dir)?;
         let workspace = config.workspace(&data_dir);
@@ -265,6 +277,14 @@ impl Harness {
             if !workspace.is_dir() { return Err("opencode_config: working_directory does not exist".into()); }
         } else {
             private_dir(&workspace)?;
+        }
+        let real_root = data_root.canonicalize().map_err(|_| "server_data_root_invalid")?;
+        let real_workspace = workspace.canonicalize().map_err(|_| "opencode_workspace_invalid")?;
+        if !real_workspace.starts_with(&real_root) {
+            return Err("opencode_workspace_must_be_inside_server_directory".into());
+        }
+        for part in ["data", "config", "cache", "state", "tmp"] {
+            private_dir(&data_root.join("runtime/xdg").join(part))?;
         }
         if config.inherit_config.as_ref().is_some_and(|path| !path.is_file()) {
             return Err("opencode_config: inherit_config does not name an existing file".into());
@@ -278,7 +298,7 @@ impl Harness {
             .connect_timeout(Duration::from_secs(5)).build()
             .map_err(|_| "opencode_config: cannot construct HTTP client".to_owned())?;
         Ok(Arc::new(Self {
-            config, data_dir, workspace, client,
+            config, data_dir, data_root, workspace, client,
             process: Mutex::new(None), ready: AtomicBool::new(false),
             credential_envs: RwLock::new(BTreeSet::new()),
             password: RwLock::new(String::new()), version: RwLock::new(None), last_error: RwLock::new(None),
@@ -350,11 +370,24 @@ impl Harness {
             })).await.map_err(|_| "api_key_keychain_authorization_timeout: complete the macOS Keychain prompt, then retry startup")?
                 .map_err(|_| "api_key_keychain_task_failed")??;
             for (account, key) in &credentials.0 { command.env(account, key.as_str()); }
+            let inherited = std::env::var("no_proxy").ok().filter(|value| !value.is_empty())
+                .or_else(|| std::env::var("NO_PROXY").ok()).unwrap_or_default();
+            let no_proxy = self.config.provider_no_proxy(&inherited);
+            if !no_proxy.is_empty() {
+                command.env("NO_PROXY", &no_proxy).env("no_proxy", &no_proxy);
+            }
             command.args(["serve", "--hostname", host, "--port", &port.to_string()])
                 .current_dir(&self.workspace)
                 .env("OPENCODE_PASSWORD", password)
                 .env("OPENCODE_CONFIG_CONTENT", serde_json::to_string(&effective).map_err(|_| "opencode_config: cannot encode overlay")?)
                 .env("OPENCODE_CLIENT", "esp-bot-xiaodai")
+                // Keep OpenCode's sessions, logs and caches alongside 小呆's
+                // memory instead of sharing the user's global OpenCode store.
+                .env("XDG_DATA_HOME", self.data_root.join("runtime/xdg/data"))
+                .env("XDG_CONFIG_HOME", self.data_root.join("runtime/xdg/config"))
+                .env("XDG_CACHE_HOME", self.data_root.join("runtime/xdg/cache"))
+                .env("XDG_STATE_HOME", self.data_root.join("runtime/xdg/state"))
+                .env("TMPDIR", self.data_root.join("runtime/xdg/tmp"))
                 // Explicit/global MCP config is inherited. Unrelated ancestor
                 // project agents, scripts and instructions are not loaded.
                 .env("OPENCODE_DISABLE_PROJECT_CONFIG", "true")

@@ -132,6 +132,20 @@ impl Default for HarnessConfig {
 }
 
 impl HarnessConfig {
+    pub(super) fn provider_no_proxy(&self, inherited: &str) -> String {
+        let mut entries: Vec<String> = inherited.split(',').map(str::trim)
+            .filter(|entry| !entry.is_empty()).map(str::to_owned).collect();
+        for route in self.routes.iter().filter(|route| route.enabled) {
+            let Some(url) = route.base_url.as_deref().and_then(|base| reqwest::Url::parse(base).ok()) else { continue };
+            if let Some(host) = url.host_str() {
+                if !entries.iter().any(|entry| entry.eq_ignore_ascii_case(host)) {
+                    entries.push(host.to_owned());
+                }
+            }
+        }
+        entries.join(",")
+    }
+
     pub fn validate(&self) -> Result<reqwest::Url, String> {
         if self.mode != "managed" && self.mode != "attach" {
             return Err("opencode_config: mode must be managed or attach".into());
@@ -229,10 +243,15 @@ impl HarnessConfig {
     }
 
     pub fn permissions(&self) -> Value {
+        self.session_permissions(false)
+    }
+
+    pub(super) fn session_permissions(&self, clarify_on_device: bool) -> Value {
         let mut rules = vec![json!({"action":"*","resource":"*","effect":"deny"})];
-        // Questions are answered through the console form bridge, not as
-        // permission for any file, browser or system operation.
-        rules.push(json!({"action":"question","resource":"*","effect":"allow"}));
+        // A device user answers the next turn by voice. Advertising the Mac
+        // question form here would block that turn until someone used the Mac.
+        let forms = if clarify_on_device { "deny" } else { "allow" };
+        rules.push(json!({"action":"question","resource":"*","effect":forms}));
         let effect = if self.native_execution_mode == "autonomous" { "allow" } else { "ask" };
         for name in &self.native_actions {
             rules.push(json!({"action":name,"resource":"*","effect":effect}));
@@ -332,12 +351,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn provider_proxy_exclusions_keep_existing_hosts_and_follow_route_urls() {
+        let mut config = HarnessConfig::default();
+        config.routes[0].enabled = true;
+        config.routes[0].base_url = Some("https://models.example.test:443/v1".into());
+        let value = config.provider_no_proxy("localhost,MODELS.EXAMPLE.TEST,.internal");
+        assert_eq!(value.to_ascii_lowercase().matches("models.example.test").count(), 1);
+        assert!(value.starts_with("localhost,MODELS.EXAMPLE.TEST,.internal"));
+        assert!(!value.contains("/v1"));
+        for route in &mut config.routes { route.enabled = false; }
+        assert_eq!(config.provider_no_proxy(".internal"), ".internal");
+    }
+
+    #[test]
     fn logged_in_browser_reads_require_approval_even_with_legacy_settings() {
         let mut config = HarnessConfig::default();
         config.read_tools.push("browser_browser_snapshot".into());
         assert!(!config.automatic_read("browser_browser_snapshot", &json!({})));
         assert!(!config.automatic_read("browser_browser_snapshot", &json!({"filename":"page.yml"})));
         assert!(config.automatic_read("deepseek-search_search", &json!({"query":"weather"})));
+    }
+
+    #[test]
+    fn voice_clarifications_change_only_the_question_form() {
+        let config = HarnessConfig::default();
+        let mut expected = config.permissions();
+        let form = expected.as_array_mut().unwrap().iter_mut()
+            .find(|rule| rule["action"] == "question").unwrap();
+        assert_eq!(form["effect"], "allow");
+        form["effect"] = json!("deny");
+        assert_eq!(config.session_permissions(true), expected);
     }
 
     #[test]

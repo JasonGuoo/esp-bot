@@ -1,6 +1,9 @@
 .usb-debug { margin-bottom: 22px; }
 .usb-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:9px; margin:12px 0; }
 .usb-toolbar select { min-width:230px; max-width:100%; }
+.usb-wifi { margin:14px 0; padding:12px; border:1px solid #314234; border-radius:10px; }
+.usb-wifi summary { cursor:pointer; font-weight:600; }
+.usb-wifi .cc-form { margin-top:10px; }
 .usb-previews { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:18px; }
 .usb-previews figure { min-width:0; margin:0; border:1px solid var(--cc-border,#dfe3e7); border-radius:12px; overflow:hidden; }
 .usb-previews figcaption { display:flex; justify-content:space-between; gap:8px; padding:12px; }

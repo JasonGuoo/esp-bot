@@ -74,7 +74,7 @@ static lv_obj_t *label(lv_obj_t *parent, const char *zh, const char *en) {
     lv_obj_t *o = lv_label_create(parent);
     (void)en;
     lv_label_set_text(o, zh);
-    lv_obj_set_style_text_font(o, &xiaodai_font_sc_16, 0);
+    lv_obj_set_style_text_font(o, &xiaodai_font_sc_22, 0);
     return o;
 }
 
@@ -339,16 +339,16 @@ void face_settings_layout(face_settings_t *s, int w, int h) {
     put(s->settings_title, 62, 44, 320, 34);
     put(s->dismiss_button, w - 98, 28, 56, 48);
     put(s->appearance_row, w * 8 / 100, h * 32 / 100, w * 84 / 100, 116);
-    put(s->appearance_label, 30, 24, 300, 27);
-    put(s->appearance_description, 30, 66, 340, 27);
+    put(s->appearance_label, 30, 24, 300, 32);
+    put(s->appearance_description, 30, 66, 340, 32);
     put(s->active_swatch, w * 66 / 100, 35, 40, 40);
     put(s->chevron, w * 73 / 100, 38, 40, 40);
     put(s->back_button, 37, 28, 52, 47);
     put(s->appearance_title, 110, 43, 320, 30);
-    put(s->help_label, 38, 93, w - 76, 26);
+    put(s->help_label, 38, 93, w - 76, 31);
     const int margin = w * 4 / 100, gap = w / 100;
     const int preview_w = w * 48 / 100;
-    put(s->preview_title, margin, h * 25 / 100, preview_w, 24);
+    put(s->preview_title, margin, h * 25 / 100, preview_w, 30);
     put(s->preview_host, margin, h * 31 / 100, preview_w, h * 40 / 100);
     put(s->preview_prev, margin, h * 73 / 100, 48, 44);
     put(s->preview_next, margin + preview_w - 48, h * 73 / 100, 48, 44);

@@ -4,6 +4,8 @@
 
 **First actual board session, 2026-11-06:** see [the hardware bring-up record](docs/board-bringup-2026-11-06.md) for what was built, flashed, observed and remains unresolved. The delivered board has an **SC101IOT** camera. Older source-only and “awaiting hardware” statements below describe their original deliveries, not the current validation record.
 
+**[语音命令、Mac Server 解题与设备图文反馈开发规格](docs/specs/server-voice-tasks/README.md)**（2026-11-11）。实板已建立认证 WSS 连接并完成一次测试语音回合。新规格包含工具执行与屏幕反馈的开发顺序、本机与实板验收，以及喇叭到货后的声音测试。[11 月 8 日实板接入记录](docs/server-integration-2026-11-08.md)
+
 > Hardware target is **ESP32-S31-Korvo-1 V1.1** (ESP32-S31), **not** ESP32-S3-Korvo-1. The S31 board has an 800×480 RGB display and GT1151 touch panel. Use ESP-IDF 6.1 / `esp32s31`, not `esp32s3`.
 
 ## Mac bot-server local build — 2026-11-06
