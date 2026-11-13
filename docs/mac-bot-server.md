@@ -1,5 +1,7 @@
 # 小呆 Mac bot-server：OpenCode、多模型、本地声音与记忆
 
+**2026-11-13 模型选择：** 默认启用 **GLM Coding Plan → DeepSeek Flash**，Qwen Coding Plan 保留但默认停用。旧默认配置的升级范围见 [模型顺序迁移](mac-opencode.md#旧配置的模型顺序升级)。需要更新并重新打开 App 才会应用；此次未构建、运行测试或请求模型。
+
 **2026-11-13 源码修正：** 九项审查问题、分段耗时和语音匹配优化见
 [修正与延迟说明](review-fixes-2026-11-13.md)。本次没有运行测试、构建或设备验证。
 当前设备 WSS、静默连续问答及图文显示的既有实板记录见
@@ -34,7 +36,7 @@ flowchart TB
   Brain --> Harness["OpenCode v2"]
   Brain --> Local["本地 ASR / 身份 / TTS"]
   Brain --> Memory["本地 SQLite"]
-  Harness --> Routes["Qwen → GLM → DeepSeek Flash"]
+  Harness --> Routes["GLM → DeepSeek Flash"]
   Harness --> Tools["browser / deepseek-search"]
 ```
 
@@ -53,9 +55,9 @@ flowchart TB
 
 | 顺序 | 配置路由 | 默认模型 | 凭据环境变量 |
 | --- | --- | --- | --- |
-| 1 | `qwen-coding-plan` | `qwen3.7-plus` | `QWEN_CODING_PLAN_API_KEY` |
-| 2 | `glm-coding-plan` | `glm-5.3` | `GLM_CODING_PLAN_API_KEY` |
-| 3 | `deepseek-flash` | `deepseek-flash` | `DEEPSEEK_API_KEY` |
+| 1 | `glm-coding-plan` | `glm-5.3` | `GLM_CODING_PLAN_API_KEY` |
+| 2 | `deepseek-flash` | `deepseek-flash` | `DEEPSEEK_API_KEY` |
+| 默认停用，可手动启用 | `qwen-coding-plan` | `qwen3.7-plus` | `QWEN_CODING_PLAN_API_KEY` |
 
 模型名、地区端点、provider ID、enabled 和顺序都可以配置；`base_url: null` 可使用
 已经在 OpenCode 中配置的 provider。Qwen Code 的 OAuth 登录不被冒充为百炼 Coding Plan
@@ -67,7 +69,7 @@ API key；GLM 国内与国际账户也不混用端点。完整说明见 [mac-ope
 或上游是否执行不能确定，不会自动换模型重跑同一回合。
 
 阿里云当前 Coding Plan 文档对自定义应用后端等用途有明确限制。这里保留用户指定的
-接法与顺序，但 OpenCode 并不会改变套餐适用范围。账户不适用时，应将对应 route
+接法作为默认停用的可选路线；OpenCode 并不会改变套餐适用范围。账户不适用时，应将对应 route
 改成该账户允许的普通 API / provider；不要通过改客户端标识绕过限制。
 [官方套餐说明](https://help.aliyun.com/zh/model-studio/coding-plan-faq)。
 DeepSeek 当前正式 Flash 名称以 [官方 API 文档](https://api-docs.deepseek.com/quick_start/agent_integrations/)

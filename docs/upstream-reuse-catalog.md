@@ -99,8 +99,9 @@ recognition; audio AEC/DOA and secure Mac media remain subsequent integrations.
 
 ## 6. Mac adapters delivered in source (2026-11-06)
 
-The user's latest choice replaces the earlier exploratory local-LLM selection
-with **OpenCode v2**, ordered **Qwen Coding Plan → GLM Coding Plan → DeepSeek Flash**.
+The user's choice replaces the earlier exploratory local-LLM selection
+with **OpenCode v2**. The active default order, updated **2026-11-13**, is
+**GLM Coding Plan → DeepSeek Flash**; Qwen remains an optional disabled route.
 ASR, TTS, enrolled face/speaker embeddings and the personal memory store remain
 local. See [mac-bot-server.md](mac-bot-server.md) for the current composition.
 

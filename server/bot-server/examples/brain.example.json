@@ -6,6 +6,42 @@
     "executable": "opencode",
     "base_url": "http://127.0.0.1:4097",
     "inherit_config": null,
+    "route_order_version": 1,
+    "routes": [
+      {
+        "id": "glm-coding-plan",
+        "label": "GLM Coding Plan",
+        "enabled": true,
+        "provider_id": "xiaodai-glm-plan",
+        "model_id": "glm-5.3",
+        "base_url": "https://api.z.ai/api/coding/paas/v4",
+        "api_key_env": "GLM_CODING_PLAN_API_KEY",
+        "context_tokens": 131072,
+        "body": {
+          "thinking": { "type": "enabled" },
+          "reasoning_effort": "low"
+        }
+      },
+      {
+        "id": "deepseek-flash",
+        "label": "DeepSeek Flash",
+        "enabled": true,
+        "provider_id": "xiaodai-deepseek",
+        "model_id": "deepseek-flash",
+        "base_url": "https://api.deepseek.com/v1",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "context_tokens": 131072
+      },
+      {
+        "id": "qwen-coding-plan",
+        "label": "Qwen Coding Plan",
+        "enabled": false,
+        "provider_id": "xiaodai-qwen-plan",
+        "model_id": "qwen3.7-plus",
+        "base_url": "https://coding.dashscope.aliyuncs.com/v1",
+        "api_key_env": "QWEN_CODING_PLAN_API_KEY"
+      }
+    ],
     "required_mcp": ["browser", "deepseek-search"]
   },
   "models": {

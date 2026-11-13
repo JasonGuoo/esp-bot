@@ -26,10 +26,12 @@ See [architecture.md](architecture.md) for canonical module ownership, [module-c
 Hardware is awaiting delivery. This local-runtime source delivery was **not compiled, tested, flashed or run**. Detailed startup/model/dependency instructions: [local-runtime.md](local-runtime.md).
 
 The subsequent **Mac server source delivery** adds OpenCode 2.2.5 with the user's
-ordered Qwen/GLM/DeepSeek routes, local MLX ASR/system TTS, enrolled speaker/face
+configurable model routes, local MLX ASR/system TTS, enrolled speaker/face
 identity, SQLite memory, a Chinese parent console and Mac WSS v3. It likewise
 was **not compiled, tested, installed or run**, and has no CI. See
 [mac-bot-server.md](mac-bot-server.md) for exact integration and remaining gates.
+
+**2026-11-13 routing update:** active defaults are **GLM Coding Plan → DeepSeek Flash**; Qwen is retained but disabled by default. The change is source-only and requires the updated App; no tests, builds, model calls or CI were run. Existing-default upgrade behavior is documented in [mac-opencode.md](mac-opencode.md#旧配置的模型顺序升级).
 
 | Area | Source now present and integrated | Still missing |
 |---|---|---|
@@ -42,7 +44,7 @@ was **not compiled, tested, installed or run**, and has no CI. See
 | Display/night | Logical black overlay preserving touch, camera STREAMOFF/inference pause, audio kept running | BSP backlight control unsupported; actual full blackout/rail power-off not provided |
 | Motion/IMU | Stationary head_motion capability adapter, unsupported motion requests, invalid pose feedback | Motors, IMU and real actuator driver |
 | Connectivity | Main brain_link uses existing Wi-Fi/mDNS/WS; AUTH_REQUIRED receipts; Mac has separate TLS v3 gateway and device credential registry | Firmware WSS client, secure credential provisioning/BLE, actual private-media interoperability |
-| Mac harness/tools | Official OpenCode v2 process/API, ordered Qwen/GLM/DeepSeek routes, MCP inheritance, quota handling and parent permissions | Actual account/tool installation and end-to-end execution |
+| Mac harness/tools | Official OpenCode v2 process/API, GLM → DeepSeek active routes with optional disabled Qwen, MCP inheritance, quota handling and parent permissions | Actual account/tool installation and end-to-end execution |
 | Mac local models | MLX Whisper ASR, SpeechBrain ECAPA, OpenCV YuNet/SFace, system TTS adapters and explicit model provisioner | Model installation, Mac execution/performance and household threshold calibration |
 | Mac memory/console | SQLite scopes/confirmation/cloud flags/deletion; face/speaker enrollment; Chinese capture/scene/parent UI | Real Mac permissions/UI execution; parent PIN/profile isolation remains future work |
 | Legacy transport | Python server and HTTP client source retained | HTTP client is already excluded from firmware main; legacy server remains independent |

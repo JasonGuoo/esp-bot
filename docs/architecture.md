@@ -2,13 +2,15 @@
 
 **This is the canonical overall architecture.** Older descriptions of the first Python Brain/Face demo are historical implementation snapshots, not competing design authorities. For event schemas use [module-contracts.md](module-contracts.md); for passive UX use [behavior-lifecycle.md](behavior-lifecycle.md); for concrete sensor/actuator boundaries use [eye-contact.md](eye-contact.md) and [hardware-power.md](hardware-power.md).
 
+**Current model selection, 2026-11-13:** OpenCode uses **GLM Coding Plan → DeepSeek Flash** as its active defaults. Qwen remains an optional disabled route. See [configuration and upgrade behavior](mac-opencode.md#旧配置的模型顺序升级); this source update has not been built or run.
+
 **Current integration, 2026-11-08:** The Mac app and ESP32-S31 firmware have been built locally, the board is connected over Wi-Fi, and its WSS control connection has authenticated. At the user's request, current per-turn LAN PCM is plaintext with integrity checks; WSS still protects credentials, control, and text. One device speech turn reached local ASR, GLM and the device playback queue; physical sound and long-term stability remain unverified. See [integration results](server-integration-2026-11-08.md). The older status paragraphs below describe their respective deliveries.
 
 **Implementation update 2026-11-06:** [local-runtime.md](local-runtime.md) records the source-integrated firmware. Hardware is awaiting delivery; this change was not compiled or tested. “Stationary V1” below describes the initial target configuration, not a verified installed robot. The custom wake model remains absent.
 
-**Latest Mac decision and source integration, 2026-11-06:** [mac-bot-server.md](mac-bot-server.md)
+**Mac decision and source integration, 2026-11-06:** [mac-bot-server.md](mac-bot-server.md)
 records the new Rust/Tauri Brain. The user selected native **OpenCode v2.2.5** with
-**Qwen Coding Plan → GLM Coding Plan → DeepSeek Flash** and inherited browser/search MCP.
+configurable model routes and inherited browser/search MCP; current defaults follow the November 13 selection above.
 This supersedes the older local-LLM/S2S default for LLM orchestration; ASR, TTS,
 voice/face embeddings and personal memory remain local. Mac WSS v3 is written,
 but the firmware client, BLE and physical validation remain pending. No server

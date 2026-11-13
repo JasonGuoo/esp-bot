@@ -32,7 +32,7 @@ App 内嵌前端、Python worker 源码和工具示例，直接打开不依赖 V
 ## 在控制台配置 API Key
 
 1. 打开 **模型与密钥 → API Key**。
-2. 选择 Qwen Coding Plan、GLM Coding Plan 或 DeepSeek Flash，粘贴对应 Key，点击 **保存密钥**。
+2. 选择 GLM Coding Plan 或 DeepSeek Flash，粘贴对应 Key，点击 **保存密钥**。Qwen Coding Plan 保留为默认停用的可选路线。
 3. 保存后密钥输入框清空，只显示“已配置”；点击 **启动服务** 生效。
 
 密钥保存在本机 macOS 登录钥匙串，不写入 `brain.json`、日志或浏览器存储。
@@ -40,9 +40,10 @@ App 内嵌前端、Python worker 源码和工具示例，直接打开不依赖 V
 已保存的钥匙串密钥优先于启动环境变量；移除后已有环境变量仍可生效。
 此入口用于 managed 模式的显式 provider。attach 模式及继承的 provider 由外部 OpenCode 配置凭据。
 
-`brain.json` 位于 `~/Library/Application Support/ai.reasonia.espbot.server/`。
+`brain.json` 位于 `~/小呆 Server/brain.json`。
 模型、端点与优先级在 **模型与密钥** 编辑；本机模型环境在 **本地能力**；启动偏好和完整 JSON 在 **运行设置**。
-默认模型顺序为 Qwen → GLM → DeepSeek；配置密钥不代表已确认账户额度或模型可用性。
+**2026-11-13 默认顺序：GLM → DeepSeek Flash**；Qwen 默认停用，仍可在控制台重新启用。
+旧默认配置的升级条件见 [模型顺序迁移](../../docs/mac-opencode.md#旧配置的模型顺序升级)。更新并重新打开 App 后生效；单独拉取源码不会改变已运行的 App。本次仅修改源码和文档，没有运行测试、构建、模型请求或 CI。配置密钥不代表已确认账户额度或模型可用性。
 
 OpenCode 使用官方 v2.2.5 或兼容的后续 v2。此次本机安装位于被 Git 忽略的
 `runtime/bin/opencode`，不是 App 内置安装器。其他 Mac 需要自行安装并配置可执行路径。

@@ -1,11 +1,13 @@
 # Local-First Hybrid Brain — product architecture decision (2026-10-30)
 
+**Current model selection, 2026-11-13:** Active defaults are **GLM Coding Plan → DeepSeek Flash** through the existing OpenCode harness. Qwen is retained but disabled by default. This source update requires the updated App and has not been built or run; see [configuration upgrade behavior](mac-opencode.md#旧配置的模型顺序升级).
+
 **Current status, 2026-11-08:** The firmware and Mac app are built and the real board has authenticated over Wi-Fi. The user chose plaintext LAN audio with integrity checks; control remains WSS. End-to-end speech, BLE, the dedicated wake model, and a physical speaker remain unverified or pending. See [integration results](server-integration-2026-11-08.md); earlier delivery status below is historical.
 
 **Status: NEW SELECTED DESIGN, not implemented end-to-end. Supersedes older assumptions that Mac/Linux is only a generic optional HTTP Brain and that every new capability gets its own route.**
 
-**2026-11-06 update:** the user's latest explicit LLM choice is **OpenCode v2**,
-with **Qwen Coding Plan → GLM Coding Plan → DeepSeek Flash**, inheriting
+**2026-11-06 integration:** the user's explicit LLM choice is **OpenCode v2**,
+with configurable cloud routes (current defaults above), inheriting
 `browser` and `deepseek-search`. That replaces the earlier local LLM / S2S
 orchestration preference below. ASR, TTS, embeddings and personal memory stay
 local. [Mac implementation](mac-bot-server.md) now has source-integrated
@@ -100,7 +102,7 @@ Text-only queries should not require audio models; on-device offline commands sh
 [mac-memory.md](mac-memory.md) and [mac-gateway.md](mac-gateway.md).
 
 **Written in the current source:** Rust/Tauri Mac Brain, OpenCode v2 managed/attach
-harness, Qwen → GLM → DeepSeek routing, inherited browser/search MCP, local MLX
+harness, GLM → DeepSeek routing with optional disabled Qwen, inherited browser/search MCP, local MLX
 Whisper, ECAPA speaker and YuNet/SFace face embeddings, macOS TTS, SQLite memory,
 explicit parent enrollment and a Chinese companion console. A separate TLS WSS
 v3 server provides bounded PCM framing, device credentials, runtime tokens and

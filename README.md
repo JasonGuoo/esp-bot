@@ -10,7 +10,7 @@
 
 ## Mac bot-server local build — 2026-11-06
 
-**[Mac 端完整接入与准备指南](docs/mac-bot-server.md)** is the current server implementation record. The existing Tauri app now has a Chinese companion console, native **OpenCode 2.2.5** harness, ordered **Qwen Coding Plan → GLM Coding Plan → DeepSeek Flash** routes, inherited browser/search MCP, local Whisper ASR/system TTS, enrolled face/speaker recognition and SQLite memory.
+**[Mac 端完整接入与准备指南](docs/mac-bot-server.md)** is the current server implementation record. The existing Tauri app now has a Chinese companion console, native **OpenCode 2.2.5** harness, ordered **GLM Coding Plan → DeepSeek Flash** active routes, inherited browser/search MCP, local Whisper ASR/system TTS, enrolled face/speaker recognition and SQLite memory. **2026-11-13:** Qwen Coding Plan is retained as a disabled optional route. The routing change requires the updated App; no tests, builds, inference or CI were run for this source update.
 
 The standalone Mac App now builds locally: TypeScript/Vite, Rust release and packaging passed, and official OpenCode v2.2.5 start/stop was exercised in the real console. Configure provider API keys in **模型与密钥 → API Key**; they persist in macOS Keychain. The current UI has one companion flow, with the prototype Chat/Provider/Events removed. **The firmware WSS client is still pending; LAN discovery/diagnostics support the current firmware and appear in the device page.** No real model inference, paid API calls or CI were performed for this console update. Hardware bring-up is now active; see [the board record](docs/board-bringup-2026-11-06.md). The console has observed the real diagnostic connection; private media remains separate. See the Mac guide for model and device setup.
 
@@ -22,7 +22,7 @@ The standalone Mac App now builds locally: TypeScript/Vite, Rust release and pac
 
 ## New project direction: reuse-first + Mac-first (2026-10-30)
 
-**小呆 prioritizes mature open-source modules rather than recreating audio, media, hardware or inference stacks.** Our **M4 Pro / 48 GB Mac with Rust/Tauri `server/bot-server`** is the primary AI host. The latest user selection uses OpenCode and the three model routes above; speech, embeddings and memory stay local. Secure Wi-Fi plus **Bluetooth (BLE) provisioning/control fallback** remain the device transport target. **All device-local wake/behavior stays independent of Mac availability.**
+**小呆 prioritizes mature open-source modules rather than recreating audio, media, hardware or inference stacks.** Our **M4 Pro / 48 GB Mac with Rust/Tauri `server/bot-server`** is the primary AI host. The latest user selection uses OpenCode with GLM first and DeepSeek as fallback; speech, embeddings and memory stay local. Secure Wi-Fi plus **Bluetooth (BLE) provisioning/control fallback** remain the device transport target. **All device-local wake/behavior stays independent of Mac availability.**
 
 The **new physical target** is a good-looking enclosed **pan/tilt** head with integrated external loudspeakers using off-the-shelf mechanical parts. The *current* physical prototype remains unactuated until hardware has been chosen/installed. Korvo-1 already has **two integrated 3 W speaker amplifiers**; select compatible speakers and wiring rather than another audio amplifier.
 

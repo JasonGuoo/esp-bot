@@ -1,5 +1,7 @@
 # Mac OpenCode harness
 
+**2026-11-13 模型顺序更新：** 按用户选择，默认启用 **GLM Coding Plan → DeepSeek Flash**。Qwen Coding Plan 保留为默认停用的可选路线。这次仅修改源码与配置文档，没有运行测试、构建、模型请求或 CI；安装并重新打开更新后的 App 才会应用到运行实例。
+
 > 2026-11-06 后续本机状态：Rust release 与 Mac App 打包通过，官方 v2.2.5 已校验安装并从真实控制台完成启动、健康检查和停止。控制台已接入 macOS 钥匙串。没有请求真实模型或进行硬件联调，也未使用 CI。
 
 本模块让 Mac 的 `bot-server` 管理官方 OpenCode 服务，把已获授权的一轮文字输入交给模型和 MCP 工具，再把结果交回宿主验证。声音转写、说话人 / 人脸匹配、家长确认的记忆、语音合成与设备连接属于相邻模块，见 [Mac 本地模型](mac-local-models.md)、[Mac 记忆](mac-memory.md) 和 [本地优先混合大脑](local-first-hybrid-brain.md)。机器人本体仍然负责唤醒、行为、安全与身体执行。
@@ -86,15 +88,8 @@ macOS / Unix 的进程组清理用于正常停止与对象析构；它不承诺�
     "base_url": "http://127.0.0.1:4097",
     "inherit_config": "/Users/yourname/.config/opencode/opencode.jsonc",
     "working_directory": null,
+    "route_order_version": 1,
     "routes": [
-      {
-        "id": "qwen-coding-plan",
-        "label": "Qwen Coding Plan",
-        "provider_id": "xiaodai-qwen-plan",
-        "model_id": "qwen3.7-plus",
-        "base_url": "https://coding.dashscope.aliyuncs.com/v1",
-        "api_key_env": "QWEN_CODING_PLAN_API_KEY"
-      },
       {
         "id": "glm-coding-plan",
         "label": "GLM Coding Plan",
@@ -116,6 +111,15 @@ macOS / Unix 的进程组清理用于正常停止与对象析构；它不承诺�
         "base_url": "https://api.deepseek.com/v1",
         "api_key_env": "DEEPSEEK_API_KEY",
         "context_tokens": 131072
+      },
+      {
+        "id": "qwen-coding-plan",
+        "label": "Qwen Coding Plan",
+        "enabled": false,
+        "provider_id": "xiaodai-qwen-plan",
+        "model_id": "qwen3.7-plus",
+        "base_url": "https://coding.dashscope.aliyuncs.com/v1",
+        "api_key_env": "QWEN_CODING_PLAN_API_KEY"
       }
     ]
   }
@@ -125,6 +129,14 @@ macOS / Unix 的进程组清理用于正常停止与对象析构；它不承诺�
 省略字段采用源码默认值。`routes` 数组整体替换默认路线，按数组顺序执行；不能只在数组中放一项期待它和另外两项自动合并。删除 `inherit_config` 或设为 `null` 可只继承 OpenCode 的常规全局配置；该字段若存在，必须是实际存在的绝对路径。
 
 `working_directory = null` 会创建专用工作目录。若手动配置工作目录，它必须已经存在；程序不会修改那个现有目录的权限。对话 ID 和轮次 ID 使用 1–128 个英文字母、数字、下划线或连字符。
+
+#### 旧配置的模型顺序升级
+
+默认路线会被完整保存到 `brain.json`，因此只改变 Rust 默认值不能更新旧安装。更新后的 App 首次加载 `harness.route_order_version` 缺失或为 `0` 的旧配置时，仅将仍完全匹配原始内置 **Qwen → GLM → DeepSeek** 路线的配置改为 **GLM → DeepSeek → Qwen（停用）**。匹配包含全部路线字段；自定义模型、端点、标签、启用状态、请求参数、预算或顺序都会保留原样。所有旧配置在验证后通过现有原子保存流程记录版本 `1`，包括无需改变路线的自定义配置；其他应用设置、记忆和钥匙串不因路由升级而重置。
+
+版本标记用于避免反复覆盖后续手动选择。控制台明确保存配置时也会记录至少版本 `1`，因此之后主动恢复旧顺序会按用户选择保留。已自定义的安装可在 **模型与密钥** 中将 GLM 排第一、DeepSeek 排第二并停用 Qwen，再点击 **保存并重载** 和 **启动服务**。仓库更新不会替换当前正在运行的 App；需要安装并重新打开包含此次变更的版本。
+
+新默认配置不会先尝试 Qwen，因此不再经过该路线的等待后才选择 GLM。GLM 自身推理、工具执行和其他回合阶段仍有耗时；此次未测量切换后的响应速度。
 
 ### 3.4 凭据与现有 provider
 
@@ -176,15 +188,15 @@ Mac 控制台的 **模型与密钥 → API Key** 可直接保存、替换和移�
 
 此时不生成该 provider 定义，也不要求应用环境中存在专用 key；登录、OAuth、端点和模型定义全部由已有 OpenCode 配置负责。上面两个中文占位值必须换成真实标识，`provider_id` 只能使用英文字母、数字、`_`、`-`。不会根据品牌名称猜测用户已登录的 provider ID。
 
-## 4. 三个模型路线与账号条件
+## 4. 启用与可选模型路线
 
 以下默认值来自本次查阅的供应商官方文档，均允许在 `brain.json` 中改动。
 
 | 顺序 | 默认模型 | 默认端点 | 说明 |
 | --- | --- | --- | --- |
-| 1 | `qwen3.7-plus` | `https://coding.dashscope.aliyuncs.com/v1` | 阿里云中国站 Coding Plan 专用端点 |
-| 2 | `glm-5.3` | `https://api.z.ai/api/coding/paas/v4` | Z.AI Coding Plan 专用端点 |
-| 3 | `deepseek-flash` | `https://api.deepseek.com/v1` | 独立 DeepSeek API 账户，按其账户余额 / 计费规则使用 |
+| 1 | `glm-5.3` | `https://api.z.ai/api/coding/paas/v4` | 首选，Z.AI Coding Plan 专用端点 |
+| 2 | `deepseek-flash` | `https://api.deepseek.com/v1` | 备用，独立 DeepSeek API 账户，按其账户余额 / 计费规则使用 |
+| 默认停用 | `qwen3.7-plus` | `https://coding.dashscope.aliyuncs.com/v1` | 可选，阿里云中国站 Coding Plan 专用端点 |
 
 ### 模型连接与 Mac 网卡
 
@@ -198,7 +210,7 @@ Bot Server 启动托管 OpenCode 时，按已启用路线的实际 `base_url`，
 
 Coding Plan 使用专用的 `sk-sp-...` key；普通百炼 `sk-...` key 与这个专用端点不是同一类凭据。国际站使用 `https://coding-intl.dashscope.aliyuncs.com/v1`，需要对应站点的套餐、key 和可用模型，不能拿中国站地址或 key 想当然互换。官方资料见 [中国站 Coding Plan](https://help.aliyun.com/zh/model-studio/coding-plan)、[国际站 Coding Plan](https://www.alibabacloud.com/help/en/model-studio/coding-plan) 和 [官方 OpenCode 配置指南](https://www.alibabacloud.com/help/en/model-studio/opencode)。
 
-**部署前要注意账号用途边界**：阿里云当前 [Coding Plan FAQ](https://help.aliyun.com/zh/model-studio/coding-plan-faq) 限制将套餐 key 用于自建应用后端、自动脚本等场景。这个仓库按照要求实现了 Qwen 优先路线，但在后面包一层 OpenCode 不会改变套餐适用范围。机器人服务实际部署时，应使用供应商明确允许该用途的 API 凭据和端点，或禁用这一路线并配置适用的按量 API。代码不绕过套餐限制，也不宣称已经取得此用途授权。
+**部署前要注意账号用途边界**：阿里云当前 [Coding Plan FAQ](https://help.aliyun.com/zh/model-studio/coding-plan-faq) 限制将套餐 key 用于自建应用后端、自动脚本等场景。这个仓库保留默认停用的 Qwen 可选路线；在后面包一层 OpenCode 不会改变套餐适用范围。机器人服务实际部署时，应使用供应商明确允许该用途的 API 凭据和端点，或保持禁用这一路线并配置适用的按量 API。代码不绕过套餐限制，也不宣称已经取得此用途授权。
 
 ### GLM
 

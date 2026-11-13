@@ -34,6 +34,9 @@ pub struct HarnessConfig {
     pub max_steps: u32,
     /// Ordered, never sorted by model price or a fabricated remaining balance.
     pub routes: Vec<ModelRoute>,
+    /// Missing in older saved configurations; records the one-time default-order upgrade.
+    #[serde(default)]
+    pub route_order_version: u32,
     pub required_mcp: Vec<String>,
     /// Explicitly enabled built-in actions.
     pub native_actions: Vec<String>,
@@ -94,13 +97,6 @@ impl Default for HarnessConfig {
             max_reply_chars: 16_000, max_steps: 12,
             routes: vec![
                 ModelRoute {
-                    id: "qwen-coding-plan".into(), label: "Qwen Coding Plan".into(),
-                    provider_id: "xiaodai-qwen-plan".into(), model_id: "qwen3.7-plus".into(),
-                    base_url: Some("https://coding.dashscope.aliyuncs.com/v1".into()),
-                    api_key_env: Some("QWEN_CODING_PLAN_API_KEY".into()),
-                    ..ModelRoute::default()
-                },
-                ModelRoute {
                     id: "glm-coding-plan".into(), label: "GLM Coding Plan".into(),
                     provider_id: "xiaodai-glm-plan".into(), model_id: "glm-5.3".into(),
                     base_url: Some("https://api.z.ai/api/coding/paas/v4".into()),
@@ -117,7 +113,16 @@ impl Default for HarnessConfig {
                     context_tokens: 131_072,
                     ..ModelRoute::default()
                 },
+                ModelRoute {
+                    id: "qwen-coding-plan".into(), label: "Qwen Coding Plan".into(),
+                    enabled: false,
+                    provider_id: "xiaodai-qwen-plan".into(), model_id: "qwen3.7-plus".into(),
+                    base_url: Some("https://coding.dashscope.aliyuncs.com/v1".into()),
+                    api_key_env: Some("QWEN_CODING_PLAN_API_KEY".into()),
+                    ..ModelRoute::default()
+                },
             ],
+            route_order_version: Self::ROUTE_ORDER_VERSION,
             required_mcp: vec!["browser".into(), "deepseek-search".into()],
             native_actions: Vec::new(), native_execution_mode: "ask".into(), allow_external_directories: false,
             read_tools: vec![
@@ -132,6 +137,25 @@ impl Default for HarnessConfig {
 }
 
 impl HarnessConfig {
+    pub const ROUTE_ORDER_VERSION: u32 = 1;
+
+    /// Upgrade only the previous stock routes. Custom endpoints, models, flags,
+    /// budgets or ordering are intentional configuration and remain untouched.
+    /// Mark custom configurations too, so a later deliberate return to the old
+    /// order is never mistaken for an installation that still needs upgrading.
+    pub fn upgrade_route_order(&mut self) -> bool {
+        if self.route_order_version != 0 { return false; }
+        let defaults = Self::default();
+        let mut previous_routes = defaults.routes.clone();
+        previous_routes.rotate_right(1); // Previous default: Qwen, GLM, DeepSeek.
+        previous_routes[0].enabled = true;
+        if self.routes == previous_routes {
+            self.routes = defaults.routes;
+        }
+        self.route_order_version = Self::ROUTE_ORDER_VERSION;
+        true
+    }
+
     pub(super) fn provider_no_proxy(&self, inherited: &str) -> String {
         let mut entries: Vec<String> = inherited.split(',').map(str::trim)
             .filter(|entry| !entry.is_empty()).map(str::to_owned).collect();

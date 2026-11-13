@@ -80,6 +80,11 @@ pub fn load_or_create(dir: &Path, bundled_worker: Option<PathBuf>) -> Result<Bra
     }
     if config.models.model_dir.is_none() { config.models.model_dir = Some(dir.join("models/local")); }
     validate(&config)?;
+    if config.harness.upgrade_route_order() {
+        // Persist the revision with the route change in one atomic write. Do
+        // this before exposing the configuration to the console or harness.
+        save(dir, &config)?;
+    }
     Ok(config)
 }
 
@@ -118,7 +123,11 @@ pub fn validate(config: &BrainConfig) -> Result<(), String> {
 
 pub fn save(dir: &Path, config: &BrainConfig) -> Result<(), String> {
     validate(config)?;
-    let bytes = serde_json::to_vec_pretty(config).map_err(|e| e.to_string())?;
+    let mut config = config.clone();
+    // Explicit saves express the caller's chosen order, including pasted older
+    // JSON. Record that choice without applying the startup default migration.
+    config.harness.route_order_version = config.harness.route_order_version.max(HarnessConfig::ROUTE_ORDER_VERSION);
+    let bytes = serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?;
     private_write(&dir.join("brain.json"), &bytes)
 }
 
