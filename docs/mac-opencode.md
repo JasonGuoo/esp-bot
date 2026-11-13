@@ -246,6 +246,8 @@ Coding Plan 使用专用的 `sk-sp-...` key；普通百炼 `sk-...` key 与这�
 
 管理模式的 overlay **不含 `mcp.servers`**，不会把用户已有的 MCP 定义清空。OpenCode 仍按官方加载器读取全局配置，以及 `inherit_config` 指向的 JSON / JSONC 文件。现有的 `OPENCODE_CONFIG_CONTENT` 若为合法 JSON，会与应用 overlay 合并；应用安全配置与同名 provider / agent 字段优先。若这个环境变量使用 JSONC 注释，请把它移到配置文件，因为 Rust 端只对 inline JSON 做合并。
 
+托管子进程的数据、缓存、状态和临时目录仍放在小呆的 `runtime/xdg/` 下；全局配置入口在改写这些环境变量之前确定。已有 `OPENCODE_CONFIG_DIR` 会原样保留；未设置时，采用启动 Bot Server 的进程原有 `XDG_CONFIG_HOME/opencode`，再回退到当前账户的 `~/.config/opencode`。这个入口通过 `OPENCODE_CONFIG_DIR` 交给 OpenCode，因此 `inherit_config = null` 也能继续发现用户原有的全局 MCP / provider 定义。显式 `inherit_config` 仍作为额外文件加载。目录选择依据是官方 [global-roots.ts](https://github.com/anomalyco/opencode/blob/v2.2.5/packages/util/src/global-roots.ts) 与 [Global.Service](https://github.com/anomalyco/opencode/blob/v2.2.5/packages/util/src/global.ts)。这次目录继承修正仅做了源码检查，尚未重新构建或运行 Mac App。
+
 管理模式设置 `OPENCODE_DISABLE_PROJECT_CONFIG=true` 和 `OPENCODE_DISABLE_CLAUDE_CODE=true`，避免专用机器人工作目录的祖先项目指令和其他工具配置被偶然加载。需要复用某个项目中的 MCP 时，明确把其配置作为 `inherit_config`，而不是依赖当前工作目录恰好落在那个项目下。
 
 OpenCode 原生 V2 的 MCP 结构是：

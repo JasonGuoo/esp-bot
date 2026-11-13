@@ -35,4 +35,31 @@ gateway as its next hop. This handles the LAN observed on the first board, where
 the TCP SYN-ACK and subsequent packets arrived with different source addresses
 on the direct path. See the [board results](../../../docs/specs/server-voice-tasks/acceptance.md).
 
+## Display result failures and receipts
+
+Image-only failures preserve the accepted text reply and its caption. The current
+image's token and first failure code enter a fixed mailbox under the transport
+lock, so descriptor/chunk/JPEG/RGB565 allocation failures do not need another
+allocation to record an error. The worker posts `BOT_COMMAND_IMAGE_FAILED` for the
+runtime-owned notice and queues `display.report` with `status=unavailable` and a
+bounded `code`. Full command/report queues retry while the token remains current;
+they do not turn an image-only failure into a session-wide Stop.
+
+Covered paths include invalid descriptors/chunks, request send failure, server
+errors/expiry, exhausted chunk retry, SHA-256 mismatch, JPEG header/decode failure,
+allocation failure, image queue saturation and rejected LVGL mounting. The worker
+checks live authority after dequeuing image messages, since a WSS callback can
+finish the turn between two worker instructions. Stale images and notices cannot
+replace a new turn's result.
+
+Positive receipts come from the application only after the result widget's
+visible draw, refresh completion and the driver's following flush-wait fence.
+The Mac retains its existing current-token and 30-second result window. An image
+first scrolled into view after that window remains unconfirmed on the Mac. If a
+malformed descriptor has no valid asset identity, the local notice can still be
+shown, but the Mac cannot accept an image receipt for an unmatched asset.
+
+These changes are source-only as of 2026-11-13. No build, tests, lint, flashing,
+hardware interaction, model calls or CI were run for this correction.
+
 `lan_link` responses and events are bound to a connection generation and are dropped across reconnect. Enqueue errors remain explicit. The original source delivery was unbuilt; the first local build and hardware bring-up are recorded separately in [the bring-up log](../../../docs/board-bringup-2026-11-06.md). No CI is used. See also [integration guide](../../../docs/local-runtime.md).

@@ -31,7 +31,8 @@
 
 static const char *TAG = "brain_secure";
 enum { URL_SIZE = 256, CERT_SIZE = 2048, TOKEN_SIZE = 65, RX_SIZE = 8192,
-       PCM_SAMPLES = 320, PCM_QUEUE_FRAMES = 96, PLAIN_RX_SIZE = 4096, PLAIN_MAC_SIZE = 32 };
+       PCM_SAMPLES = 320, PCM_QUEUE_FRAMES = 96, PLAIN_RX_SIZE = 4096, PLAIN_MAC_SIZE = 32,
+       IMAGE_ERROR_CODE_BYTES = 40 };
 typedef struct { uint32_t version; char url[URL_SIZE], cert[CERT_SIZE], token[TOKEN_SIZE]; } provision_t;
 typedef struct { bot_session_token_t token; uint64_t timestamp_ms; uint16_t count; int16_t pcm[PCM_SAMPLES]; } pcm_frame_t;
 typedef enum { DOWN, WELCOME, READY, OPENING, OPEN, BEGINNING, PLAIN_CONNECTING, CAPTURING, COMMITTED, PLAYING, WAIT_NEXT } phase_t;
@@ -45,6 +46,7 @@ typedef struct {
     int64_t commit_started_us;
     char open_id[24], begin_id[24], commit_id[24];
     char image_request_id[24];
+    char image_asset_id[BOT_DISPLAY_ASSET_ID_BYTES];
     char plain_host[16];
     uint16_t plain_port;
     uint8_t plain_key[32];
@@ -75,7 +77,7 @@ static int s_plain_fd = -1;
 static uint8_t s_plain_key[32];
 static uint8_t *s_plain_rx;
 static size_t s_plain_used;
-typedef enum { IMAGE_DESCRIPTOR, IMAGE_CHUNK, IMAGE_FAILED } image_message_kind_t;
+typedef enum { IMAGE_DESCRIPTOR, IMAGE_CHUNK } image_message_kind_t;
 typedef struct {
     image_message_kind_t kind;
     bot_session_token_t token;
@@ -88,25 +90,73 @@ typedef struct {
 typedef struct {
     bot_session_token_t token;
     char part[8], asset_id[BOT_DISPLAY_ASSET_ID_BYTES];
+    char code[IMAGE_ERROR_CODE_BYTES];
     bool rendered;
 } display_report_t;
+typedef struct {
+    bot_session_token_t token;
+    char asset_id[BOT_DISPLAY_ASSET_ID_BYTES], code[IMAGE_ERROR_CODE_BYTES];
+    uint32_t generation;
+    bool pending, local_posted;
+} image_failure_t;
 static QueueHandle_t s_image_messages, s_image_results, s_display_reports;
+/* A single current image is supported. Keep failure reporting independent of
+ * image allocations and queue capacity, including after an allocation fails. */
+static image_failure_t s_image_failure; /* s_lock */
+static bool same(bot_session_token_t a, bot_session_token_t b);
+static bool asset_id_valid(const char *id);
+
+static bool image_error_code_valid(const char *code) {
+    if (!code || !*code || strlen(code)>=IMAGE_ERROR_CODE_BYTES) return false;
+    for (const char *p=code;*p;p++)
+        if (!((*p>='a'&&*p<='z')||(*p>='0'&&*p<='9')||*p=='_')) return false;
+    return true;
+}
 
 bool brain_secure_take_image(bot_display_image_t *image) {
     return image && s_image_results && xQueueReceive(s_image_results,image,0)==pdTRUE;
 }
-void brain_secure_display_report(bot_session_token_t token, const char *part,
-                                 const char *asset_id, bool rendered) {
-    if (!s_display_reports || !part) return;
+bool brain_secure_display_report(bot_session_token_t token, const char *part,
+                                 const char *asset_id, bool rendered, const char *code) {
+    if (!s_display_reports || !part || (strcmp(part,"text") && strcmp(part,"image")) ||
+        (asset_id && *asset_id && !asset_id_valid(asset_id)) ||
+        (!rendered && !image_error_code_valid(code))) return false;
     display_report_t report={.token=token,.rendered=rendered};
     snprintf(report.part,sizeof(report.part),"%s",part);
     if (asset_id) snprintf(report.asset_id,sizeof(report.asset_id),"%s",asset_id);
-    (void)xQueueSend(s_display_reports,&report,0);
+    if (code) snprintf(report.code,sizeof(report.code),"%s",code);
+    return xQueueSend(s_display_reports,&report,0)==pdTRUE;
 }
 
 static bool same(bot_session_token_t a, bot_session_token_t b) {
     return a.epoch == b.epoch && a.session_id == b.session_id && a.turn_id == b.turn_id &&
            a.focus_generation == b.focus_generation;
+}
+void brain_secure_image_failed(bot_session_token_t token, const char *asset_id, const char *code) {
+    image_failure_t failure={.token=token,.pending=true};
+    if (asset_id_valid(asset_id)) snprintf(failure.asset_id,sizeof(failure.asset_id),"%s",asset_id);
+    snprintf(failure.code,sizeof(failure.code),"%s",image_error_code_valid(code)?code:"image_request_failed");
+    portENTER_CRITICAL(&s_lock);
+    if (s.authenticated && s.active && same(token,s.desired) && same(token,s.remote) &&
+        (!s_image_failure.generation || !same(token,s_image_failure.token))) {
+        failure.generation=s_image_failure.generation+1;
+        if (!failure.generation) failure.generation=1;
+        s_image_failure=failure;
+    }
+    portEXIT_CRITICAL(&s_lock);
+}
+static bool image_failed_for(bot_session_token_t token) {
+    portENTER_CRITICAL(&s_lock);
+    bool failed=s_image_failure.generation && same(token,s_image_failure.token);
+    portEXIT_CRITICAL(&s_lock);
+    return failed;
+}
+static bool image_current(bot_session_token_t token) {
+    portENTER_CRITICAL(&s_lock);
+    bool current=s.authenticated && s.active && s.phase==WAIT_NEXT &&
+        same(token,s.desired) && same(token,s.remote);
+    portEXIT_CRITICAL(&s_lock);
+    return current;
 }
 static void link_event(bool online) {
     if (!s_bus) return;
@@ -211,7 +261,7 @@ void brain_secure_pcm(const bot_audio_pcm_t *frame) {
 static void command(bot_command_kind_t kind, bot_session_token_t token, const char *text) {
     bot_command_t c={.kind=kind,.token=token,.received_ms=(uint32_t)(esp_timer_get_time()/1000),.ttl_ms=2000};
     if (text && kind==BOT_COMMAND_SET_EXPRESSION) snprintf(c.data.expression,sizeof(c.data.expression),"%s",text);
-    if (text && (kind==BOT_COMMAND_SET_CAPTION || kind==BOT_COMMAND_REPLY_DONE)) {
+    if (text && (kind==BOT_COMMAND_SET_CAPTION || kind==BOT_COMMAND_FAILURE_CAPTION || kind==BOT_COMMAND_REPLY_DONE)) {
         size_t n=strlen(text); if (n>BOT_CAPTION_MAX_BYTES) n=BOT_CAPTION_MAX_BYTES;
         while (n && ((unsigned char)text[n]&0xc0)==0x80) --n;
         memcpy(c.data.caption,text,n); c.data.caption[n]=0;
@@ -248,7 +298,7 @@ static void finish_with_message(bot_session_token_t token, const char *message, 
     s.remote=token;
     s.phase=WAIT_NEXT;
     portEXIT_CRITICAL(&s_lock);
-    command(BOT_COMMAND_SET_CAPTION,token,message);
+    command(BOT_COMMAND_FAILURE_CAPTION,token,message);
     if (reply_done) command(BOT_COMMAND_REPLY_DONE,token,NULL);
 }
 static bool json_token(cJSON *value, bot_session_token_t *out) {
@@ -279,7 +329,10 @@ static bool asset_id_valid(const char *id) {
 }
 static void queue_image_message(image_message_t *message) {
     if (!message) return;
-    if (!s_image_messages || xQueueSend(s_image_messages,&message,0)!=pdTRUE) free(message);
+    if (!s_image_messages || xQueueSend(s_image_messages,&message,0)!=pdTRUE) {
+        brain_secure_image_failed(message->token,message->asset_id,"image_queue_full");
+        free(message);
+    }
 }
 static void queue_image_descriptor(cJSON *scene, bot_session_token_t token) {
     cJSON *cards=cJSON_GetObjectItemCaseSensitive(scene,"cards"), *card;
@@ -289,16 +342,27 @@ static void queue_image_descriptor(cJSON *scene, bot_session_token_t token) {
         cJSON *id=cJSON_GetObjectItemCaseSensitive(asset,"id"), *mime=cJSON_GetObjectItemCaseSensitive(asset,"mime");
         cJSON *digest=cJSON_GetObjectItemCaseSensitive(asset,"sha256");
         uint32_t width,height,total;
-        if (!cJSON_IsString(kind) || strcmp(kind->valuestring,"image") || !cJSON_IsString(id) ||
+        if (!cJSON_IsString(kind) || strcmp(kind->valuestring,"image")) continue;
+        const char *asset_id=cJSON_IsString(id) && asset_id_valid(id->valuestring)?id->valuestring:NULL;
+        if (!cJSON_IsString(id) ||
             !asset_id_valid(id->valuestring) || !cJSON_IsString(mime) || strcmp(mime->valuestring,"image/jpeg") ||
             !cJSON_IsString(digest) || strlen(digest->valuestring)!=64 ||
             !json_uint(cJSON_GetObjectItemCaseSensitive(asset,"width"),480,&width) || !width ||
             !json_uint(cJSON_GetObjectItemCaseSensitive(asset,"height"),272,&height) || !height ||
-            !json_uint(cJSON_GetObjectItemCaseSensitive(asset,"bytes"),65536,&total) || !total) continue;
+            !json_uint(cJSON_GetObjectItemCaseSensitive(asset,"bytes"),65536,&total) || !total) {
+            brain_secure_image_failed(token,asset_id,"image_descriptor_invalid");
+            return;
+        }
         uint8_t checked_digest[32];
-        if (!decode_key(digest->valuestring,checked_digest)) continue;
+        if (!decode_key(digest->valuestring,checked_digest)) {
+            brain_secure_image_failed(token,asset_id,"image_descriptor_invalid");
+            return;
+        }
         image_message_t *message=heap_caps_calloc(1,sizeof(*message),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
-        if (!message) return;
+        if (!message) {
+            brain_secure_image_failed(token,asset_id,"image_no_memory");
+            return;
+        }
         message->kind=IMAGE_DESCRIPTOR;message->token=token;message->width=width;message->height=height;message->total=total;
         snprintf(message->asset_id,sizeof(message->asset_id),"%s",id->valuestring);
         snprintf(message->digest,sizeof(message->digest),"%s",digest->valuestring);
@@ -349,33 +413,50 @@ static void text_message(const char *data,size_t n) {
             link_event(true); ESP_LOGI(TAG,"Authenticated Mac gateway connected");
         } else fail_session("Gateway welcome invalid");
     } else if (!strcmp(kind,"response") && cJSON_IsString(id)) {
+        char requested_asset[BOT_DISPLAY_ASSET_ID_BYTES]={0};
         portENTER_CRITICAL(&s_lock);
         phase_t phase=s.phase; bool opening=phase==OPENING&&!strcmp(id->valuestring,s.open_id);
         bool beginning=phase==BEGINNING&&!strcmp(id->valuestring,s.begin_id);
         bool completing=phase==COMMITTED&&!strcmp(id->valuestring,s.commit_id);
         bool image_reply=phase==WAIT_NEXT && *s.image_request_id && !strcmp(id->valuestring,s.image_request_id);
         bot_session_token_t current=s.remote; bool fresh=s.authenticated&&s.active&&same(s.desired,current);
-        if (image_reply) s.image_request_id[0]='\0';
+        if (image_reply) {
+            memcpy(requested_asset,s.image_asset_id,sizeof(requested_asset));
+            s.image_request_id[0]='\0';
+        }
         portEXIT_CRITICAL(&s_lock);
         if (fresh && image_reply) {
-            image_message_t *message=heap_caps_calloc(1,sizeof(*message),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
-            if (!message) goto done;
-            message->kind=IMAGE_FAILED;message->token=current;
+            if (!cJSON_IsTrue(ok)) {
+                cJSON *error=cJSON_GetObjectItemCaseSensitive(root,"error");
+                cJSON *code=cJSON_GetObjectItemCaseSensitive(error,"code");
+                brain_secure_image_failed(current,requested_asset,
+                    cJSON_IsString(code)?code->valuestring:"image_request_failed");
+                goto done;
+            }
             cJSON *payload=cJSON_GetObjectItemCaseSensitive(root,"payload");
             cJSON *asset=cJSON_GetObjectItemCaseSensitive(payload,"asset_id");
             cJSON *data=cJSON_GetObjectItemCaseSensitive(payload,"data_base64");
             cJSON *eof=cJSON_GetObjectItemCaseSensitive(payload,"eof");
             bot_session_token_t returned;
-            if (cJSON_IsTrue(ok) && json_token(cJSON_GetObjectItemCaseSensitive(root,"runtime"),&returned) &&
-                same(returned,current) && cJSON_IsString(asset) && asset_id_valid(asset->valuestring) &&
+            uint32_t offset,bytes;
+            bool valid=json_token(cJSON_GetObjectItemCaseSensitive(root,"runtime"),&returned) &&
+                same(returned,current) && cJSON_IsString(asset) && !strcmp(asset->valuestring,requested_asset) &&
                 cJSON_IsString(data) && strlen(data->valuestring)<=4096 && (cJSON_IsTrue(eof)||cJSON_IsFalse(eof)) &&
-                json_uint(cJSON_GetObjectItemCaseSensitive(payload,"offset"),65535,&message->offset) &&
-                json_uint(cJSON_GetObjectItemCaseSensitive(payload,"bytes"),3072,&message->bytes) && message->bytes) {
-                message->kind=IMAGE_CHUNK;
-                message->eof=cJSON_IsTrue(eof);
-                snprintf(message->asset_id,sizeof(message->asset_id),"%s",asset->valuestring);
-                snprintf(message->base64,sizeof(message->base64),"%s",data->valuestring);
+                json_uint(cJSON_GetObjectItemCaseSensitive(payload,"offset"),65535,&offset) &&
+                json_uint(cJSON_GetObjectItemCaseSensitive(payload,"bytes"),3072,&bytes) && bytes;
+            if (!valid) {
+                brain_secure_image_failed(current,requested_asset,"image_chunk_invalid");
+                goto done;
             }
+            image_message_t *message=heap_caps_calloc(1,sizeof(*message),MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+            if (!message) {
+                brain_secure_image_failed(current,requested_asset,"image_no_memory");
+                goto done;
+            }
+            message->kind=IMAGE_CHUNK;message->token=current;
+            message->offset=offset;message->bytes=bytes;message->eof=cJSON_IsTrue(eof);
+            snprintf(message->asset_id,sizeof(message->asset_id),"%s",requested_asset);
+            snprintf(message->base64,sizeof(message->base64),"%s",data->valuestring);
             queue_image_message(message);
         } else if (fresh && (opening||beginning||completing) && !cJSON_IsTrue(ok)) {
             finish_with_message(current,request_error(root),completing);
@@ -695,7 +776,9 @@ typedef struct {
 static void image_discard(image_download_t *download) {
     free(download->jpeg);
     memset(download,0,sizeof(*download));
-    portENTER_CRITICAL(&s_lock);s.image_request_id[0]='\0';portEXIT_CRITICAL(&s_lock);
+    portENTER_CRITICAL(&s_lock);
+    s.image_request_id[0]='\0';s.image_asset_id[0]='\0';
+    portEXIT_CRITICAL(&s_lock);
 }
 static bool image_request(image_download_t *download) {
     char id[24], runtime[180], message[440];
@@ -705,16 +788,24 @@ static bool image_request(image_download_t *download) {
         id,runtime,download->id,(unsigned long)download->offset);
     if (n<0 || n>=sizeof(message)) return false;
     portENTER_CRITICAL(&s_lock);
+    if (!s.authenticated || !s.active || s.phase!=WAIT_NEXT ||
+        !same(download->token,s.desired) || !same(download->token,s.remote)) {
+        portEXIT_CRITICAL(&s_lock);
+        return false;
+    }
     snprintf(s.image_request_id,sizeof(s.image_request_id),"%s",id);
+    snprintf(s.image_asset_id,sizeof(s.image_asset_id),"%s",download->id);
     portEXIT_CRITICAL(&s_lock);
     download->requested_us=esp_timer_get_time();
     return send_text(message);
 }
-static uint8_t *image_decode(const image_download_t *download) {
+static uint8_t *image_decode(const image_download_t *download, const char **failure_code) {
+    *failure_code="image_digest_mismatch";
     uint8_t expected[32], actual[32];
     const mbedtls_md_info_t *md=mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
     if (!decode_key(download->digest,expected) || !md ||
         mbedtls_md(md,download->jpeg,download->total,actual)!=0 || memcmp(expected,actual,sizeof(actual))) return NULL;
+    *failure_code="image_decode_failed";
     jpeg_dec_config_t config=DEFAULT_JPEG_DEC_CONFIG();
     config.output_type=JPEG_PIXEL_FORMAT_RGB565_LE;
     jpeg_dec_handle_t decoder=NULL;
@@ -729,18 +820,59 @@ static uint8_t *image_decode(const image_download_t *download) {
         if (pixels) {
             io.outbuf=pixels;
             if (jpeg_dec_process(decoder,&io)!=JPEG_ERR_OK) {free(pixels);pixels=NULL;}
-        }
+        } else *failure_code="image_no_memory";
     }
     jpeg_dec_close(decoder);
     return pixels;
 }
-static void image_poll(image_download_t *download, const secure_state_t *state) {
-    if (download->jpeg && (!state->authenticated || !state->active || state->phase!=WAIT_NEXT ||
-        !same(download->token,state->desired) || !same(download->token,state->remote))) image_discard(download);
+static const char *image_failure_notice(const char *code) {
+    if (!strcmp(code,"asset_expired")) return "图片已过期，请重新获取";
+    if (!strcmp(code,"image_no_memory")) return "图片内存不足，文字仍可阅读";
+    if (!strcmp(code,"image_digest_mismatch") || !strcmp(code,"image_chunk_invalid") ||
+        !strcmp(code,"image_descriptor_invalid")) return "图片校验失败，文字仍可阅读";
+    if (!strcmp(code,"image_decode_failed")) return "图片无法解码，文字仍可阅读";
+    if (!strcmp(code,"display_unavailable")) return "图片暂时无法显示，文字仍可阅读";
+    return "图片下载失败，文字仍可阅读";
+}
+static void image_failure_poll(image_download_t *download) {
+    image_failure_t failure;
+    portENTER_CRITICAL(&s_lock);
+    failure=s_image_failure;
+    bool fresh=s.authenticated && s.active && s.phase==WAIT_NEXT &&
+        same(failure.token,s.desired) && same(failure.token,s.remote);
+    portEXIT_CRITICAL(&s_lock);
+    if (!failure.pending) return;
+    if (fresh) {
+        if (download->jpeg && same(download->token,failure.token)) image_discard(download);
+        if (!failure.local_posted) {
+            bot_command_t notice={.kind=BOT_COMMAND_IMAGE_FAILED,.token=failure.token,
+                .received_ms=(uint32_t)(esp_timer_get_time()/1000),.ttl_ms=2000};
+            snprintf(notice.data.caption,sizeof(notice.data.caption),"%s",image_failure_notice(failure.code));
+            /* Unlike a lost conversation command, an image notice must not
+             * close the session or erase the answer when this queue is full. */
+            if (bot_bus_submit_command(s_bus,&notice,0)!=ESP_OK) return;
+            portENTER_CRITICAL(&s_lock);
+            if (s_image_failure.generation==failure.generation) s_image_failure.local_posted=true;
+            portEXIT_CRITICAL(&s_lock);
+        }
+        if (!brain_secure_display_report(failure.token,"image",failure.asset_id,false,failure.code)) return;
+    }
+    portENTER_CRITICAL(&s_lock);
+    if (s_image_failure.generation==failure.generation) s_image_failure.pending=false;
+    portEXIT_CRITICAL(&s_lock);
+}
+static void image_download_failed(image_download_t *download, const char *code) {
+    brain_secure_image_failed(download->token,download->id,code);
+    image_discard(download);
+}
+static void image_poll(image_download_t *download) {
+    if (download->jpeg && !image_current(download->token)) image_discard(download);
+    image_failure_poll(download);
     image_message_t *message=NULL;
     if (s_image_messages && xQueueReceive(s_image_messages,&message,0)==pdTRUE) {
-        bool fresh=state->authenticated && state->active && state->phase==WAIT_NEXT &&
-            same(message->token,state->desired) && same(message->token,state->remote);
+        /* Read authority after dequeue: the WSS callback may just have moved
+         * COMMITTED to WAIT_NEXT and enqueued this result in the same interval. */
+        bool fresh=image_current(message->token) && !image_failed_for(message->token);
         if (fresh && message->kind==IMAGE_DESCRIPTOR) {
             image_discard(download);
             download->jpeg=heap_caps_malloc(message->total,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
@@ -749,50 +881,58 @@ static void image_poll(image_download_t *download, const secure_state_t *state) 
                 download->width=message->width;download->height=message->height;
                 snprintf(download->id,sizeof(download->id),"%s",message->asset_id);
                 snprintf(download->digest,sizeof(download->digest),"%s",message->digest);
-                if (!image_request(download)) image_discard(download);
-            } else brain_secure_display_report(message->token,"image",message->asset_id,false);
+                if (!image_request(download)) image_download_failed(download,"image_request_failed");
+            } else brain_secure_image_failed(message->token,message->asset_id,"image_no_memory");
         } else if (fresh && download->jpeg && message->kind==IMAGE_CHUNK &&
-                   same(download->token,message->token) && !strcmp(download->id,message->asset_id) &&
-                   message->offset==download->offset && message->bytes<=download->total-download->offset) {
+                   same(download->token,message->token)) {
             size_t decoded=0;
-            bool valid=mbedtls_base64_decode(download->jpeg+download->offset,download->total-download->offset,&decoded,
+            bool valid=!strcmp(download->id,message->asset_id) && message->offset==download->offset &&
+                message->bytes<=download->total-download->offset &&
+                mbedtls_base64_decode(download->jpeg+download->offset,download->total-download->offset,&decoded,
                 (const unsigned char *)message->base64,strlen(message->base64))==0 && decoded==message->bytes;
             if (valid) download->offset+=(uint32_t)decoded;
             if (!valid || message->eof!=(download->offset==download->total)) {
-                brain_secure_display_report(download->token,"image",download->id,false);
-                image_discard(download);
+                image_download_failed(download,"image_chunk_invalid");
             } else if (message->eof) {
                 bot_display_image_t result={.token=download->token,.width=download->width,.height=download->height};
                 snprintf(result.asset_id,sizeof(result.asset_id),"%s",download->id);
-                result.pixels=image_decode(download);
-                if (!result.pixels || xQueueSend(s_image_results,&result,0)!=pdTRUE) {
+                const char *failure_code;
+                result.pixels=image_decode(download,&failure_code);
+                if (!result.pixels) brain_secure_image_failed(download->token,download->id,failure_code);
+                else if (!image_current(result.token)) free(result.pixels);
+                else if (!s_image_results || xQueueSend(s_image_results,&result,0)!=pdTRUE) {
                     free(result.pixels);
-                    brain_secure_display_report(download->token,"image",download->id,false);
+                    brain_secure_image_failed(download->token,download->id,"image_queue_full");
                 }
                 image_discard(download);
             } else {
                 download->retries=0;
-                if (!image_request(download)) image_discard(download);
+                if (!image_request(download)) image_download_failed(download,"image_request_failed");
             }
-        } else if (fresh && download->jpeg && message->kind==IMAGE_FAILED) {
-            brain_secure_display_report(download->token,"image",download->id,false);
-            image_discard(download);
         }
         free(message);
     }
     if (download->jpeg && esp_timer_get_time()-download->requested_us>3000000) {
-        if (download->retries++==0 && image_request(download)) return;
-        brain_secure_display_report(download->token,"image",download->id,false);
-        image_discard(download);
+        if (download->retries++==0) {
+            if (!image_request(download)) image_download_failed(download,"image_request_failed");
+        } else image_download_failed(download,"image_timeout");
     }
+    image_failure_poll(download);
     display_report_t report;
-    if (s_display_reports && xQueueReceive(s_display_reports,&report,0)==pdTRUE &&
-        state->authenticated && state->active && same(report.token,state->desired) && same(report.token,state->remote)) {
-        char id[24],runtime[180],out[440];
+    if (s_display_reports && xQueuePeek(s_display_reports,&report,0)==pdTRUE) {
+        portENTER_CRITICAL(&s_lock);
+        bool fresh=s.authenticated && s.active && same(report.token,s.desired) && same(report.token,s.remote);
+        portEXIT_CRITICAL(&s_lock);
+        if (!fresh || (report.rendered && !strcmp(report.part,"image") && image_failed_for(report.token))) {
+            (void)xQueueReceive(s_display_reports,&report,0);
+            return;
+        }
+        char id[24],runtime[180],out[512];
         request_id(id,sizeof(id));runtime_json(runtime,sizeof(runtime),report.token);
-        int n=snprintf(out,sizeof(out),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"display.report\",\"payload\":{\"runtime\":%s,\"part\":\"%s\",\"asset_id\":\"%s\",\"status\":\"%s\"}}",
-            id,runtime,report.part,report.asset_id,report.rendered?"rendered":"unavailable");
-        if (n>0 && n<sizeof(out)) (void)send_text(out);
+        int n=snprintf(out,sizeof(out),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"display.report\",\"payload\":{\"runtime\":%s,\"part\":\"%s\",\"asset_id\":\"%s\",\"status\":\"%s\",\"code\":\"%s\"}}",
+            id,runtime,report.part,report.asset_id,report.rendered?"rendered":"unavailable",report.code);
+        /* Retain a failed send in the fixed queue while its authority is valid. */
+        if (n>0 && n<sizeof(out) && send_text(out)) (void)xQueueReceive(s_display_reports,&report,0);
     }
 }
 static bool send_packet(const pcm_frame_t *packet,uint32_t stream,uint32_t sequence) {
@@ -818,7 +958,7 @@ static void secure_task(void *unused) {
     for (;;) {
         secure_state_t state;
         portENTER_CRITICAL(&s_lock); state=s; portEXIT_CRITICAL(&s_lock);
-        image_poll(&download,&state);
+        image_poll(&download);
         if (state.authenticated && !state.active && diagnostic_paused) {
             if (bot_lan_resume_auto()==ESP_OK) diagnostic_paused=false;
         }

@@ -168,6 +168,8 @@ static void dismiss_result(bot_runtime_snapshot_t *state)
 {
     state->reading_token = (bot_session_token_t){0};
     state->reading_text[0] = 0;
+    state->reading_notice[0] = 0;
+    state->image_notice[0] = 0;
 }
 
 static void end_session(bot_runtime_t *runtime, uint32_t now_ms, session_end_reason_t reason)
@@ -175,6 +177,13 @@ static void end_session(bot_runtime_t *runtime, uint32_t now_ms, session_end_rea
     bot_session_token_t old = runtime->state.token;
     runtime->state.critical_fault |= reason == SESSION_FAULT;
     if (reason != SESSION_INACTIVE) dismiss_result(&runtime->state);
+    else if (runtime->state.reading_token.session_id &&
+             !token_matches(runtime, &runtime->state.reading_token, false) &&
+             !runtime->state.reading_notice[0]) {
+        const char *notice = runtime->state.conversation == BOT_CONVERSATION_THINKING ?
+            "处理已超时，请再试一次" : "本次收音已结束，点一下可再问";
+        memcpy(runtime->state.reading_notice, notice, strlen(notice) + 1);
+    }
     runtime->waiting_for_approval = false;
     advance_epoch(runtime);
     runtime->state.token.session_id = 0;
@@ -208,6 +217,8 @@ static bool begin_turn(bot_runtime_t *runtime, uint32_t now_ms)
     runtime->state.utterance_active = false;
     runtime->state.playback_id = 0;
     runtime->state.caption[0] = '\0';
+    runtime->state.reading_notice[0] = '\0';
+    runtime->state.image_notice[0] = '\0';
     invalidate_output(runtime, &old);
     runtime->state.conversation = BOT_CONVERSATION_LISTENING;
     runtime->state.last_interaction_ms = now_ms;
@@ -235,6 +246,8 @@ static bool begin_session(bot_runtime_t *runtime, uint32_t now_ms)
     runtime->state.last_interaction_ms = now_ms;
     bot_passive_cycle_reset(&runtime->passive_cycle, now_ms);
     runtime->state.caption[0] = '\0';
+    runtime->state.reading_notice[0] = '\0';
+    runtime->state.image_notice[0] = '\0';
     runtime->waking_since_ms = now_ms;
     /* A new authorization starts with a new visual focus as well. */
     attention_manager_set_policy(&runtime->attention, false, false);
@@ -599,10 +612,20 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
         memcpy(state->expression, command->data.expression, strlen(command->data.expression));
         break;
     case BOT_COMMAND_SET_CAPTION:
+    case BOT_COMMAND_FAILURE_CAPTION:
         if (!valid_text(command->data.caption, sizeof(command->data.caption)))
             return BOT_COMMAND_REJECTED_INVALID;
         memset(state->caption, 0, sizeof(state->caption));
         memcpy(state->caption, command->data.caption, strlen(command->data.caption));
+        if (command->kind == BOT_COMMAND_FAILURE_CAPTION && state->reading_token.session_id &&
+            !token_matches(runtime, &state->reading_token, false))
+            memcpy(state->reading_notice, state->caption, sizeof(state->reading_notice));
+        break;
+    case BOT_COMMAND_IMAGE_FAILED:
+        if (!token_matches(runtime, &state->reading_token, false)) return BOT_COMMAND_REJECTED_STALE;
+        if (!valid_text(command->data.caption, sizeof(command->data.caption)))
+            return BOT_COMMAND_REJECTED_INVALID;
+        memcpy(state->image_notice, command->data.caption, sizeof(state->image_notice));
         break;
     case BOT_COMMAND_THINKING:
         if (state->utterance_active ||
@@ -624,10 +647,15 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
                 return BOT_COMMAND_REJECTED_INVALID;
             memcpy(state->reading_text, command->data.caption, sizeof(state->reading_text));
             state->reading_token = state->token;
-        } else if (state->reading_token.session_id == state->token.session_id &&
-                   state->reading_token.turn_id != state->token.turn_id) {
+            state->reading_notice[0] = '\0';
+            state->image_notice[0] = '\0';
+        } else if (state->reading_token.session_id &&
+                   !token_matches(runtime, &state->reading_token, false)) {
             /* A failed follow-up while reading must not rearm the microphone
-             * on room noise. A deliberate touch can start a new question. */
+             * on room noise. Keep its error above the old answer after the
+             * microphone session closes; a deliberate touch starts a new task. */
+            if (state->caption[0])
+                memcpy(state->reading_notice, state->caption, sizeof(state->reading_notice));
             end_session(runtime, now_ms, SESSION_INACTIVE);
             break;
         }

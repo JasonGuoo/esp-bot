@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LocalCamera, PcmRecorder, base64ToBuffer, readImageFile, readWavFile, type CapturedWav } from "./capture";
 import { CONSOLE_PANELS, consoleTemplate, type ConsolePanel } from "./console-layout";
-import { deviceDeliveryText, deviceReplyMetrics, renderActivity, renderCapabilities, renderDeviceStatus, renderRuntimeMetrics, type DeviceDisplayReport } from "./console-presenters";
+import { deviceDeliveryText, deviceReplyMetrics, renderActivity, renderCapabilities, renderDeviceStatus, renderRuntimeMetrics, renderTurnTimings, turnStageMetric, harnessTimingMetric, type DeviceDisplayReport } from "./console-presenters";
 import "./companion.css";
 import "./console.css";
 
@@ -21,6 +21,7 @@ type Scene = { speech: string; expression: string; cards: Card[] };
 type TurnResult = {
   turn_id: string; conversation_id: string; transcript: string; scene: Scene;
   provider_id: string; model_id: string; audio: unknown; identity_candidate: unknown; warnings: string[];
+  timings?: unknown;
 };
 type IdentityKind = "face" | "speaker";
 type CapturePurpose = "chat" | "enroll" | "recognize";
@@ -219,13 +220,13 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     memberFocus.disabled = blocked;
     $<HTMLButtonElement>("#cc-record").disabled = blocked || (recordPurpose !== null && recordPurpose !== "chat");
     $<HTMLButtonElement>("#cc-choose-wav").disabled = blocked || recordPurpose !== null;
-    $<HTMLButtonElement>("#cc-record").textContent = recordPurpose === "chat" ? "■ 结束录音" : "● 录一段";
+    $<HTMLButtonElement>("#cc-record").textContent = recordPurpose === "chat" ? recorder.starting ? "取消打开麦克风" : "■ 结束录音" : "● 录一段";
     $<HTMLButtonElement>("#cc-enroll").disabled = blocked || recordPurpose !== null || !selectedProfile
       || samples.length < minSamples || !$<HTMLInputElement>("#cc-enroll-consent").checked;
     $<HTMLButtonElement>("#cc-sample-camera").disabled = blocked || !selectedProfile || identityKind.value !== "face" || recordPurpose !== null;
     $<HTMLButtonElement>("#cc-sample-record").disabled = blocked || !selectedProfile || identityKind.value !== "speaker"
       || (recordPurpose !== null && recordPurpose !== "enroll");
-    $<HTMLButtonElement>("#cc-sample-record").textContent = recordPurpose === "enroll" ? "■ 结束样本录音" : "录一段样本";
+    $<HTMLButtonElement>("#cc-sample-record").textContent = recordPurpose === "enroll" ? recorder.starting ? "取消打开麦克风" : "■ 结束样本录音" : "录一段样本";
     $<HTMLButtonElement>("#cc-add-samples").disabled = blocked || !selectedProfile || recordPurpose !== null;
     $<HTMLButtonElement>("#cc-clear-samples").disabled = blocked || recordPurpose !== null;
     for (const control of Array.from(container.querySelectorAll<HTMLButtonElement>("#cc-sample-list button"))) control.disabled = blocked || recordPurpose !== null;
@@ -233,7 +234,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     $<HTMLButtonElement>("#cc-recognize-camera").disabled = blocked || recognizeKind.value !== "face" || recordPurpose !== null;
     $<HTMLButtonElement>("#cc-recognize-record").disabled = blocked || recognizeKind.value !== "speaker"
       || (recordPurpose !== null && recordPurpose !== "recognize");
-    $<HTMLButtonElement>("#cc-recognize-record").textContent = recordPurpose === "recognize" ? "■ 结束并识别" : "录音识别";
+    $<HTMLButtonElement>("#cc-recognize-record").textContent = recordPurpose === "recognize" ? recorder.starting ? "取消打开麦克风" : "■ 结束并识别" : "录音识别";
     $("#cc-sample-camera").hidden = identityKind.value !== "face";
     $("#cc-sample-record").hidden = identityKind.value !== "speaker";
     $("#cc-recognize-camera").hidden = recognizeKind.value !== "face";
@@ -398,6 +399,8 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       for (const card of result.scene.cards.slice(0, 4)) reply.row.append(renderCard(card));
       const meta = element("div", "cc-reply-meta", `${result.provider_id} · ${result.model_id}`);
       reply.row.append(meta);
+      const timingDetails = renderTurnTimings(result.timings);
+      if (timingDetails) reply.row.append(timingDetails);
       const wav = string(object(result.audio).wav_base64);
       if (wav) {
         const audioHost = element("div", "cc-audio-host");
@@ -438,9 +441,9 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     if (purpose === "enroll" && !selectedProfile) { notice("请先选择要登记的家庭成员。", true); return; }
     stopPlayback(); closeCamera();
     const generation = ++mediaGeneration;
-    recordPurpose = purpose; phase("listening"); updateControls();
+    recordPurpose = purpose; phase("listening", "正在打开麦克风；再次点击可取消。"); updateControls();
     try {
-      await recorder.start({
+      const started = recorder.start({
         progress: (seconds) => {
           if (generation !== mediaGeneration) return;
           const text = `正在录音 ${seconds.toFixed(1)} / 30 秒 · 再按一次结束`;
@@ -448,13 +451,20 @@ export function mountCompanion(container: HTMLElement): CompanionController {
         },
         limit: () => { if (generation === mediaGeneration) void finishRecording(); },
       });
+      updateControls();
+      await started;
+      if (generation === mediaGeneration) updateControls();
     } catch (error) {
       if (generation === mediaGeneration) { cancelCapture(); notice(errorText(error), true); phase("idle"); }
     }
   }
   async function finishRecording(): Promise<void> {
     const purpose = recordPurpose;
-    if (!purpose || !recorder.recording) return;
+    if (!purpose || captureConverting) return;
+    if (recorder.starting) {
+      cancelCapture(); notice("已取消打开麦克风。"); return;
+    }
+    if (!recorder.recording) { cancelCapture(); return; }
     const generation = mediaGeneration;
     captureConverting = true; updateControls();
     try {
@@ -470,7 +480,12 @@ export function mountCompanion(container: HTMLElement): CompanionController {
         await perform("正在本地识别声纹…", () => recognize("speaker", wav.base64));
       }
       phase("idle");
-    } catch (error) { if (generation === mediaGeneration) notice(errorText(error), true); }
+    } catch (error) {
+      if (generation === mediaGeneration) {
+        recorder.cancel();
+        notice(errorText(error), true);
+      }
+    }
     finally {
       if (generation === mediaGeneration) {
         recordPurpose = null; captureConverting = false;
@@ -1305,6 +1320,12 @@ export function mountCompanion(container: HTMLElement): CompanionController {
         }
       } else if (eventTurn && activeDeviceTurn?.id === eventTurn) {
         const status = $("#cc-device-turn-status");
+        const routeMetric = harnessTimingMetric(data);
+        if (routeMetric) $("#cc-device-tool-events").append(element("p", "cc-caption", routeMetric));
+        if (kind === "turn.stage_completed") {
+          const metric = turnStageMetric(data.payload);
+          if (metric) $("#cc-device-tool-events").append(element("p", "cc-caption", metric));
+        }
         if (kind === "harness_tool_activity") {
           const call = string(data.call_id), phase = string(data.phase), tool = string(data.tool);
           const labels: Record<string, string> = { "session.tool.called": "开始", "session.tool.success": "返回", "session.tool.failed": "失败" };
@@ -1343,6 +1364,8 @@ export function mountCompanion(container: HTMLElement): CompanionController {
           }
           const metrics = deviceReplyMetrics(payload);
           if (metrics) result.append(element("p", "cc-caption", metrics));
+          const timingDetails = renderTurnTimings(payload.timings);
+          if (timingDetails) result.append(timingDetails);
           resultDelivery.textContent = deviceDeliveryText(activeDeviceTurn.text, activeDeviceTurn.image);
           resultDelivery.hidden = true;
           result.append(resultDelivery);
@@ -1350,6 +1373,8 @@ export function mountCompanion(container: HTMLElement): CompanionController {
         }
       }
       if (!eventTurn || eventTurn !== activeTurn) return;
+      const routeMetric = harnessTimingMetric(data);
+      if (routeMetric) addActivity(routeMetric);
       if (kind === "turn.transcribing") phase("thinking", "先在 Mac 上听懂这句话…");
       else if (kind === "turn.thinking") phase("thinking");
       else if (kind === "turn.synthesizing") phase("thinking", "正在用本地声音准备回复…");

@@ -40,8 +40,9 @@ typedef struct {
     bot_audio_t *audio;
     bot_vision_t *vision;
     face_view_t *face;
-    atomic_uint text_requested, text_started, text_ready;
-    atomic_uint image_requested, image_started, image_ready;
+    atomic_uint text_requested, text_started, text_flushing, text_ready;
+    atomic_uint image_requested, image_started, image_flushing, image_ready;
+    bool display_refresh_active; /* LVGL lock only; excludes diagnostic snapshots */
     unsigned text_generation, image_generation;
     bot_session_token_t result_token, image_token;
     char image_asset_id[BOT_DISPLAY_ASSET_ID_BYTES];
@@ -95,14 +96,50 @@ static bool same_runtime_token(bot_session_token_t a, bot_session_token_t b) {
 static void display_refresh(lv_event_t *event) {
     app_t *app=lv_event_get_user_data(event);
     if (lv_event_get_code(event)==LV_EVENT_REFR_START) {
-        atomic_store(&app->text_started,atomic_exchange(&app->text_requested,0));
-        atomic_store(&app->image_started,atomic_exchange(&app->image_requested,0));
+        app->display_refresh_active=true;
+        atomic_store(&app->text_started,0);
+        atomic_store(&app->image_started,0);
     } else if (lv_event_get_code(event)==LV_EVENT_REFR_READY) {
+        app->display_refresh_active=false;
         unsigned text=atomic_exchange(&app->text_started,0);
         unsigned image=atomic_exchange(&app->image_started,0);
+        unsigned expected=text;
+        bool await_flush=false;
+        if (text && atomic_compare_exchange_strong(&app->text_requested,&expected,0))
+            { atomic_store(&app->text_flushing,text); await_flush=true; }
+        expected=image;
+        if (image && atomic_compare_exchange_strong(&app->image_requested,&expected,0))
+            { atomic_store(&app->image_flushing,image); await_flush=true; }
+        /* REFR_READY and FLUSH_FINISH can precede asynchronous DMA completion.
+         * One further invalidation makes LVGL wait for this refresh's final
+         * flush even when the result is otherwise completely static. */
+        if (await_flush) lv_obj_invalidate(face_root(app->face));
+    } else if (lv_event_get_code(event)==LV_EVENT_FLUSH_WAIT_FINISH) {
+        unsigned text=atomic_exchange(&app->text_flushing,0);
+        unsigned image=atomic_exchange(&app->image_flushing,0);
         if (text) atomic_store(&app->text_ready,text);
         if (image) atomic_store(&app->image_ready,image);
     }
+}
+static void result_drawn(face_result_part_t part, void *context) {
+    app_t *app=context;
+    if (!app->display_refresh_active) return;
+    /* DRAW_MAIN_END is delivered only for a widget intersecting LVGL's clip.
+     * Keep the request armed if the image is below the scroll viewport. */
+    if (part==FACE_RESULT_TEXT)
+        atomic_store(&app->text_started,atomic_load(&app->text_requested));
+    else if (part==FACE_RESULT_IMAGE)
+        atomic_store(&app->image_started,atomic_load(&app->image_requested));
+}
+static void clear_display_receipts(app_t *app) {
+    atomic_store(&app->text_requested,0);
+    atomic_store(&app->text_started,0);
+    atomic_store(&app->text_flushing,0);
+    atomic_store(&app->text_ready,0);
+    atomic_store(&app->image_requested,0);
+    atomic_store(&app->image_started,0);
+    atomic_store(&app->image_flushing,0);
+    atomic_store(&app->image_ready,0);
 }
 static bot_audio_token_t audio_token(bot_session_token_t t) {
     return (bot_audio_token_t){t.epoch, t.session_id, t.turn_id, t.focus_generation};
@@ -599,7 +636,9 @@ static void reconcile(app_t *app, uint32_t now_ms) {
             face_set_result_text(app->face,"");
             app->result_token=(bot_session_token_t){0};
             app->image_token=(bot_session_token_t){0};
+            clear_display_receipts(app);
         } else if (!same_runtime_token(app->result_token,s->reading_token)) {
+            clear_display_receipts(app);
             face_set_result_text(app->face,"");
             face_set_result_text(app->face,s->reading_text);
             app->result_token=s->reading_token;
@@ -607,6 +646,16 @@ static void reconcile(app_t *app, uint32_t now_ms) {
             if (!++app->text_generation) ++app->text_generation;
             atomic_store(&app->text_requested,app->text_generation);
             lv_obj_invalidate(face_root(app->face));
+        }
+        if (showing_result) {
+            const char *status=s->reading_notice;
+            if (s->token.session_id && !same_runtime_token(s->reading_token,s->token)) {
+                status=caption;
+                if (!*status && s->conversation==BOT_CONVERSATION_LISTENING) status="我在听";
+                if (!*status && s->conversation==BOT_CONVERSATION_THINKING) status="正在处理";
+            }
+            face_set_result_status(app->face,status,s->image_notice);
+            if (!same_runtime_token(s->reading_token,s->token)) clear_display_receipts(app);
         }
         bot_display_image_t image;
         if (brain_secure_take_image(&image)) {
@@ -619,15 +668,17 @@ static void reconcile(app_t *app, uint32_t now_ms) {
                 lv_obj_invalidate(face_root(app->face));
             } else {
                 free(image.pixels);
-                if (current) brain_secure_display_report(image.token,"image",image.asset_id,false);
+                if (current) brain_secure_image_failed(image.token,image.asset_id,"display_unavailable");
             }
         }
         unsigned text_ready=atomic_exchange(&app->text_ready,0);
         unsigned image_ready=atomic_exchange(&app->image_ready,0);
-        if (text_ready && text_ready==app->text_generation && showing_result && same_runtime_token(app->result_token,s->token) &&
-            face_result_visible(app->face)) brain_secure_display_report(s->token,"text",NULL,true);
-        if (image_ready && image_ready==app->image_generation && showing_result && same_runtime_token(app->image_token,s->token) &&
-            face_result_visible(app->face)) brain_secure_display_report(s->token,"image",app->image_asset_id,true);
+        if (text_ready && text_ready==app->text_generation && showing_result && platform.display_awake &&
+            same_runtime_token(app->result_token,s->token) && face_result_visible(app->face) &&
+            !brain_secure_display_report(s->token,"text",NULL,true,NULL)) atomic_store(&app->text_ready,text_ready);
+        if (image_ready && image_ready==app->image_generation && showing_result && platform.display_awake &&
+            same_runtime_token(app->image_token,s->token) && face_result_visible(app->face) &&
+            !brain_secure_display_report(s->token,"image",app->image_asset_id,true,NULL)) atomic_store(&app->image_ready,image_ready);
         bot_platform_display_unlock();
     }
     if (expression_changed)
@@ -756,10 +807,12 @@ void app_main(void) {
     if (platform.display_available && bot_platform_display_lock(0)) {
         app->face = face_create(bot_platform_screen(app->platform));
         if (app->face) {
+            face_on_result_draw(app->face,result_drawn,app);
             lv_display_t *display=lv_display_get_default();
             if (display) {
                 lv_display_add_event_cb(display,display_refresh,LV_EVENT_REFR_START,app);
                 lv_display_add_event_cb(display,display_refresh,LV_EVENT_REFR_READY,app);
+                lv_display_add_event_cb(display,display_refresh,LV_EVENT_FLUSH_WAIT_FINISH,app);
             }
             char theme[32];
             if (bot_platform_load_theme(app->platform, theme, sizeof(theme)) == ESP_OK)

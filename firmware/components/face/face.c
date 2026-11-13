@@ -20,10 +20,12 @@ struct face_view {
     face_renderer_t *eyes;
     lv_obj_t *caption_bar, *caption;
     lv_obj_t *result_panel, *result_body, *result_text, *result_close;
+    lv_obj_t *result_status, *result_image_notice;
     lv_obj_t *result_image;
     lv_image_dsc_t result_image_dsc;
     uint8_t *result_pixels;
     char result_value[384];
+    char result_status_value[384], result_image_notice_value[384];
     lv_obj_t *gear_button, *gear_icon;
     lv_obj_t *stop_button, *stop_icon;
     face_settings_t *settings;
@@ -37,6 +39,8 @@ struct face_view {
     void *on_applied_context;
     face_event_cb_t on_event;
     void *event_context;
+    face_result_draw_cb_t on_result_draw;
+    void *result_draw_context;
     bool settings_was_open;
     bool animation_active;
     bool blink_anim_running;
@@ -83,6 +87,8 @@ static void paint_chrome(face_view_t *f) {
     if (f->result_panel) {
         lv_obj_set_style_bg_color(f->result_panel, lv_color_hex(t->subtitle_bg), 0);
         lv_obj_set_style_text_color(f->result_text, lv_color_hex(t->subtitle_text), 0);
+        lv_obj_set_style_text_color(f->result_status, lv_color_hex(t->subtitle_text), 0);
+        lv_obj_set_style_text_color(f->result_image_notice, lv_color_hex(t->subtitle_text), 0);
         lv_obj_set_style_bg_color(f->result_close, lv_color_hex(t->subtitle_bg), 0);
         lv_obj_set_style_text_color(f->result_close, lv_color_hex(t->chrome_text), 0);
     }
@@ -108,8 +114,17 @@ static void draw_face(face_view_t *f) {
     const int margin = w / 50;
     lv_obj_set_pos(f->result_panel, margin, 8);
     lv_obj_set_size(f->result_panel, w - 2 * margin, h - 16);
-    lv_obj_set_pos(f->result_body, 14, 60);
-    lv_obj_set_size(f->result_body, w - 2 * margin - 28, h - 86);
+    const int body_w = w - 2 * margin - 28;
+    const int status_h = h >= 320 ? 72 : 36;
+    int body_y = 60;
+    lv_obj_set_pos(f->result_status, 14, body_y);
+    lv_obj_set_size(f->result_status, body_w, status_h);
+    if (f->result_status_value[0]) body_y += status_h;
+    lv_obj_set_pos(f->result_image_notice, 14, body_y);
+    lv_obj_set_size(f->result_image_notice, body_w, 36);
+    if (f->result_image_notice_value[0]) body_y += 36;
+    lv_obj_set_pos(f->result_body, 14, body_y);
+    lv_obj_set_size(f->result_body, body_w, h - body_y - 26);
     lv_obj_align(f->result_close, LV_ALIGN_TOP_RIGHT, -12, 6);
     lv_obj_align(f->gear_button, LV_ALIGN_TOP_RIGHT, -24, 22);
     lv_obj_align(f->stop_button, LV_ALIGN_TOP_LEFT, 24, 22);
@@ -203,6 +218,22 @@ static void close_result(lv_event_t *event) {
         clear_result_image(f);
         visible(f->result_panel, false);
         emit(f, FACE_EVENT_RESULT_DISMISSED);
+    }
+}
+
+static void result_drawn(lv_event_t *event) {
+    face_view_t *f = lv_event_get_user_data(event);
+    lv_obj_t *target = lv_event_get_target_obj(event);
+    if (!f || !f->on_result_draw || !f->animation_active ||
+        face_settings_is_open(f->settings) || !face_result_visible(f)) return;
+    lv_area_t visible_area;
+    lv_obj_get_coords(target, &visible_area);
+    if (!lv_obj_area_is_visible(target, &visible_area)) return;
+    if (target == f->result_image) {
+        if (!f->result_pixels || lv_image_get_src(target) != &f->result_image_dsc) return;
+        f->on_result_draw(FACE_RESULT_IMAGE, f->result_draw_context);
+    } else if (target == f->result_text && f->result_value[0]) {
+        f->on_result_draw(FACE_RESULT_TEXT, f->result_draw_context);
     }
 }
 
@@ -300,8 +331,20 @@ face_view_t *face_create(lv_obj_t *parent) {
     lv_obj_set_width(f->result_text, lv_pct(100));
     lv_label_set_long_mode(f->result_text, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_set_style_text_font(f->result_text, &xiaodai_font_sc_30, 0);
+    lv_obj_add_event_cb(f->result_text, result_drawn, LV_EVENT_DRAW_MAIN_END, f);
     f->result_image = lv_image_create(f->result_body);
+    lv_obj_add_event_cb(f->result_image, result_drawn, LV_EVENT_DRAW_MAIN_END, f);
     visible(f->result_image, false);
+    f->result_status = lv_label_create(f->result_panel);
+    lv_label_set_long_mode(f->result_status, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_style_text_font(f->result_status, &xiaodai_font_sc_30, 0);
+    lv_label_set_text_static(f->result_status, f->result_status_value);
+    visible(f->result_status, false);
+    f->result_image_notice = lv_label_create(f->result_panel);
+    lv_label_set_long_mode(f->result_image_notice, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_style_text_font(f->result_image_notice, &xiaodai_font_sc_30, 0);
+    lv_label_set_text_static(f->result_image_notice, f->result_image_notice_value);
+    visible(f->result_image_notice, false);
     f->result_close = lv_button_create(f->result_panel);
     lv_obj_set_size(f->result_close, 86, 46);
     lv_obj_set_style_border_width(f->result_close, 0, 0);
@@ -475,6 +518,7 @@ void face_set_result_text(face_view_t *f, const char *text) {
     if (!f) return;
     if (!text || !*text) {
         f->result_value[0] = '\0';
+        face_set_result_status(f, "", "");
         clear_result_image(f);
         visible(f->result_panel, false);
         return;
@@ -491,11 +535,34 @@ void face_set_result_text(face_view_t *f, const char *text) {
     visible(f->result_panel, true);
 }
 
+static bool set_result_status_label(lv_obj_t *label, char *value, size_t capacity, const char *text) {
+    if (!text) text = "";
+    if (!strcmp(value, text)) return false;
+    size_t n = strlen(text);
+    if (n >= capacity) n = capacity - 1;
+    while (n && (((unsigned char)text[n]) & 0xc0) == 0x80) --n;
+    memcpy(value, text, n);
+    value[n] = '\0';
+    /* This buffer belongs to the view, so an image allocation failure does not
+     * require another allocation just to store its readable notice. */
+    lv_label_set_text_static(label, value);
+    visible(label, n != 0);
+    return true;
+}
+
+void face_set_result_status(face_view_t *f, const char *status, const char *image_notice) {
+    if (!f) return;
+    bool changed = set_result_status_label(f->result_status, f->result_status_value,
+        sizeof(f->result_status_value), status);
+    changed |= set_result_status_label(f->result_image_notice, f->result_image_notice_value,
+        sizeof(f->result_image_notice_value), image_notice);
+    if (changed) draw_face(f);
+}
+
 bool face_set_result_image(face_view_t *f, uint8_t *pixels, uint16_t width, uint16_t height) {
     if (!f || !pixels || !width || !height || width > 480 || height > 272 ||
         lv_obj_has_flag(f->result_panel, LV_OBJ_FLAG_HIDDEN)) return false;
     clear_result_image(f);
-    f->result_pixels = pixels;
     f->result_image_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     f->result_image_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
     f->result_image_dsc.header.w = width;
@@ -504,12 +571,23 @@ bool face_set_result_image(face_view_t *f, uint8_t *pixels, uint16_t width, uint
     f->result_image_dsc.data_size = (uint32_t)width * height * 2;
     f->result_image_dsc.data = pixels;
     lv_image_set_src(f->result_image, &f->result_image_dsc);
+    if (lv_image_get_src(f->result_image) != &f->result_image_dsc) {
+        memset(&f->result_image_dsc, 0, sizeof(f->result_image_dsc));
+        return false;
+    }
+    f->result_pixels = pixels;
     visible(f->result_image, true);
     return true;
 }
 
 bool face_result_visible(const face_view_t *f) {
-    return f && !lv_obj_has_flag(f->result_panel, LV_OBJ_FLAG_HIDDEN);
+    return f && !face_settings_is_open(f->settings) && lv_obj_is_visible(f->result_panel);
+}
+
+void face_on_result_draw(face_view_t *f, face_result_draw_cb_t callback, void *context) {
+    if (!f) return;
+    f->on_result_draw = callback;
+    f->result_draw_context = context;
 }
 
 void face_reveal_settings(face_view_t *f) {

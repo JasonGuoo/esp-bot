@@ -40,6 +40,60 @@ const find = (root: HTMLElement, selector: string): HTMLElement => {
   return result;
 };
 
+const TIMING_LABELS: Record<string, string> = {
+  memory_register: "会话登记", asr: "语音识别", speaker_identification: "声纹匹配",
+  memory_enqueue: "记忆排队", memory_context: "记忆检索", harness: "OpenCode 回复",
+  image_prepare: "图片准备", tts: "语音合成", history: "会话保存",
+};
+const TIMING_SKIP_LABELS: Record<string, string> = {
+  text_input: "文字输入", no_enrolled_speakers: "尚未登记声纹", audio_under_3_seconds: "录音不足 3 秒",
+  enrollment_lookup_failed: "登记信息读取失败", no_device_image: "本轮无需设备图片", output_disabled: "未开启语音输出",
+};
+
+export function turnStageMetric(value: unknown): string {
+  const stage = object(value);
+  const label = TIMING_LABELS[text(stage.stage)];
+  const duration = stage.elapsed_ms;
+  if (!label || typeof duration !== "number" || !Number.isFinite(duration) || duration < 0) return "";
+  const status = stage.status === "failed" ? " · 失败" : stage.status === "interrupted" ? " · 已中断" : "";
+  return `${label} · ${Math.round(duration).toLocaleString("zh-CN")} ms${status}`;
+}
+
+export function harnessTimingMetric(value: unknown): string {
+  const event = object(value);
+  const route = text(event.route_id, "当前路线");
+  const duration = event.kind === "harness_route_selected" ? event.prepare_ms : event.elapsed_ms;
+  const elapsed = typeof duration === "number" && Number.isFinite(duration) && duration >= 0
+    ? ` · ${(duration / 1000).toFixed(1)} 秒` : "";
+  switch (event.kind) {
+    case "harness_route_selected": return `${route} · 已选择，准备完成${elapsed}`;
+    case "harness_route_failed": return `${route} · ${text(event.code, "调用未完成")}${elapsed} · ${event.safe_to_fallback === true ? "可继续候补路线" : "本轮不自动重做"}`;
+    case "harness_turn_completed": return `${route} · 完整回复已接收${elapsed}`;
+    case "harness_first_text": return `${route} · 收到首段模型文字${elapsed}（等待完整回复）`;
+    case "harness_upstream_retry": return `上游正在重试 · ${text(event.code, "原因待确认")}`;
+    default: return "";
+  }
+}
+
+/** Parent-console diagnostics; never included in the child's device scene. */
+export function renderTurnTimings(value: unknown): HTMLElement | null {
+  const timing = object(value);
+  const stages = object(timing.stages_ms), skipped = object(timing.skipped);
+  if (!Object.keys(stages).length && !Object.keys(skipped).length) return null;
+  const details = node("details", "cc-reply-timings");
+  const total = typeof timing.total_ms === "number" && Number.isFinite(timing.total_ms) && timing.total_ms >= 0
+    ? ` · ${(timing.total_ms / 1000).toFixed(1)} 秒` : "";
+  details.append(node("summary", "cc-caption", `查看 Mac 分段耗时${total}`));
+  for (const [stage, label] of Object.entries(TIMING_LABELS)) {
+    const metric = turnStageMetric({ stage, elapsed_ms: stages[stage] });
+    if (metric) details.append(node("p", "cc-caption", metric));
+    else if (TIMING_SKIP_LABELS[text(skipped[stage])])
+      details.append(node("p", "cc-caption", `${label} · 已跳过：${TIMING_SKIP_LABELS[text(skipped[stage])]}`));
+  }
+  details.append(node("p", "cc-caption", "OpenCode 耗时包含模型、工具、路线回退及人工确认等待；不包含设备判停、上传和屏幕绘制。"));
+  return details;
+}
+
 export function renderCapabilities(root: HTMLElement, value?: unknown): void {
   const report = object(value);
   const models = object(object(report.models).models);

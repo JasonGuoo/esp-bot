@@ -36,6 +36,32 @@ their explicit Classic Outline selection until they choose EVE.
 
 Added local expressions: `bored`, `drowsy`, `sleeping`, `speaking`. Reapplying an unchanged expression is idempotent, so the 20 ms runtime reconciliation does not continually restart blinking. `happy` also uses the existing automatic blink timer, allowing the runtime's close-face smile to blink. Speaking's session state is driven by actual audio events; it does not claim phoneme lip sync.
 
+## Retained result view
+
+`face_set_result_status()` keeps the current task status and a separate image
+failure notice above the scrollable answer. Progress, Mac approval prompts and
+errors stay visible while an earlier answer remains open. The application supplies
+runtime-owned text; Face does not infer task state or overwrite the answer. Notice
+labels use fixed view-owned buffers with `lv_label_set_text_static()` so storing
+an image memory-failure message requires no new text allocation.
+
+`face_on_result_draw()` records `DRAW_MAIN_END` only for the visible text/image
+widget, with a visible-area check and the mounted image source. Main accepts these
+callbacks only inside a normal display refresh; a USB snapshot is not a receipt.
+The sequence is widget draw → `REFR_READY` → a subsequent
+`FLUSH_WAIT_FINISH` → current token/generation check → queued receipt. Main requests
+one further refresh to reach the flush wait even for a static result. An image
+below the scroll viewport stays unconfirmed until it actually draws. Closing,
+replacing or revoking the current result clears pending receipt generations.
+
+This reuses the official [LVGL v9.6.0 draw-event example](https://github.com/lvgl/lvgl/blob/v9.6.0/examples/event/lv_example_event_draw.c),
+[visibility API](https://github.com/lvgl/lvgl/blob/v9.6.0/include/lvgl/core/lv_obj_pos.h),
+[label API](https://github.com/lvgl/lvgl/blob/v9.6.0/include/lvgl/widgets/lv_label.h) and
+[refresh/flush event implementation](https://github.com/lvgl/lvgl/blob/v9.6.0/src/core/lv_refr.c).
+`REFR_READY` and `FLUSH_FINISH` alone can precede an asynchronous driver's final
+flush completion. The new status layout and receipt fence are source-only changes
+as of 2026-11-13; they have not been built or exercised on the board.
+
 ## Eye contact integration
 
 The face must never receive separate left/right pupil targets. A separate Attention module owns the common target direction. The current fixed-head path uses camera-relative observations without a pose measurement; future actuated paths require actual measured/estimated head angles. Rendering styles must respect this shared direction. See `firmware/components/attention/` and `docs/eye-contact.md`.

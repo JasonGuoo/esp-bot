@@ -128,6 +128,15 @@ impl Store {
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)
     }
 
+    /// Avoid loading an embedding model when there is nobody to match. This
+    /// queries metadata only; it neither exposes templates nor selects a person.
+    pub fn has_enrollment(&self, kind: IdentityKind) -> Result<bool, String> {
+        self.connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM enrollments WHERE kind = ?1)",
+            [kind.as_str()], |row| row.get(0),
+        ).map_err(db_error)
+    }
+
     pub fn revoke_enrollment(&self, profile_id: &str, kind: IdentityKind) -> Result<(), String> {
         validate_id(profile_id)?;
         let mut db = self.connection()?;

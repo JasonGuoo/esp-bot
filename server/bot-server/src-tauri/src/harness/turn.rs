@@ -1,7 +1,7 @@
 //! Native V2 session and event lifecycle. The event stream is connected before
 //! prompt admission, and any broken stream ends the turn without replay.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::{Duration, Instant}};
 
 use reqwest::Method;
 use serde_json::{json, Value};
@@ -107,6 +107,7 @@ impl Harness {
         let mut last_error: Option<String> = None;
         for (index, route) in routes.iter().enumerate() {
             if *active.cancel.borrow() { return Err("turn_cancelled".into()); }
+            let route_started = Instant::now();
             if session.is_empty() {
                 session = self.create_session(&api, request, route, &fingerprint).await?;
             } else if let Some(before) = previous_input.take() {
@@ -157,7 +158,7 @@ impl Harness {
             self.emit(json!({
                 "kind":"harness_route_selected","turn_id":request.turn_id,
                 "route_id":route.id,"provider_id":route.provider_id,"model_id":route.model_id,
-                "attempt":index + 1
+                "attempt":index + 1,"prepare_ms":route_started.elapsed().as_millis() as u64
             }));
             match self.attempt(&api, request, route, &session, &input_id).await {
                 Ok((raw, evidence)) => {
@@ -172,7 +173,8 @@ impl Harness {
                     if text.chars().count() > self.config.max_reply_chars {
                         return Err("reply_too_large: validated response exceeds the text budget".into());
                     }
-                    self.emit(json!({"kind":"harness_turn_completed","turn_id":request.turn_id,"route_id":route.id}));
+                    self.emit(json!({"kind":"harness_turn_completed","turn_id":request.turn_id,"route_id":route.id,
+                        "elapsed_ms":route_started.elapsed().as_millis() as u64}));
                     return Ok(HarnessReply {
                         text, provider_id: route.provider_id.clone(), model_id: route.model_id.clone(),
                         session_id: session, structured, evidence,
@@ -192,7 +194,8 @@ impl Harness {
                         && self.prove_no_output(&api, &session, &input_id).await;
                     self.emit(json!({
                         "kind":"harness_route_failed","turn_id":request.turn_id,"route_id":route.id,
-                        "code":failure.error.kind.code(),"safe_to_fallback":clean
+                        "code":failure.error.kind.code(),"safe_to_fallback":clean,
+                        "elapsed_ms":route_started.elapsed().as_millis() as u64
                     }));
                     let message = failure.error.public_message();
                     if !may_change { return Err(message); }
@@ -248,6 +251,8 @@ impl Harness {
     }
 
     async fn attempt(&self, api: &Api, request: &TurnRequest, route: &ModelRoute, session: &str, input: &str) -> Result<(String, Vec<ToolEvidence>), AttemptFailure> {
+        let attempt_started = Instant::now();
+        let mut first_text_seen = false;
         let mut events = api.events().await.map_err(|error| AttemptFailure::api(error, route, false))?;
         // HTTP headers alone do not prove subscription registration has completed.
         tokio::time::timeout(Duration::from_millis(self.config.request_timeout_ms), async {
@@ -299,7 +304,16 @@ impl Harness {
                 }
                 "session.text.delta" => {
                     let delta = data["delta"].as_str().unwrap_or("");
-                    if !delta.is_empty() { observed_output = true; }
+                    if !delta.is_empty() {
+                        observed_output = true;
+                        if !first_text_seen {
+                            first_text_seen = true;
+                            // A model-text milestone, not a validated answer or
+                            // provider HTTP time-to-first-byte. Include no text.
+                            self.emit(json!({"kind":"harness_first_text","turn_id":request.turn_id,
+                                "route_id":route.id,"elapsed_ms":attempt_started.elapsed().as_millis() as u64}));
+                        }
+                    }
                     text_chars = text_chars.saturating_add(delta.chars().count());
                     if text_chars > self.config.max_reply_chars.saturating_mul(4) {
                         return Err(AttemptFailure::transport("streamed text exceeded the turn output budget"));

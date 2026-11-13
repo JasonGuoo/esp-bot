@@ -34,9 +34,13 @@ typedef struct {
 } bot_display_image_t;
 /** Transfer a decoded image to the caller. Caller owns pixels on success. */
 bool brain_secure_take_image(bot_display_image_t *image);
-/** Queue a display receipt for the authenticated session. */
-void brain_secure_display_report(bot_session_token_t token, const char *part,
-                                 const char *asset_id, bool rendered);
+/** Queue a display receipt for the authenticated session. False means the
+ * bounded queue could not accept it; callers may retry while the token is current. */
+bool brain_secure_display_report(bot_session_token_t token, const char *part,
+                                 const char *asset_id, bool rendered, const char *code);
+/** Record a terminal image-only failure without allocating. The transport task
+ * posts a runtime notice and an unavailable receipt; neither replaces the answer. */
+void brain_secure_image_failed(bot_session_token_t token, const char *asset_id, const char *code);
 #ifdef __cplusplus
 }
 #endif

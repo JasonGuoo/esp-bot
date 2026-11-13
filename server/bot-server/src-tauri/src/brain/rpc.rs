@@ -21,6 +21,7 @@ impl BrainHost {
         }
         if method == "service.reload" { return self.reload().await; }
         if method == "api_key.save" || method == "api_key.delete" {
+            self.suppress_auto_start();
             let _lock = self.lifecycle.lock().await;
             let brain = self.get()?;
             let route_id = required(&payload, "route_id")?.to_owned();
@@ -43,12 +44,8 @@ impl BrainHost {
             brain.harness.reset_route(&route_id).await?;
             return Ok(json!({"saved":method == "api_key.save","restart_required":true}));
         }
-        if method == "service.start" || method == "service.stop" {
-            let _lock = self.lifecycle.lock().await;
-            let brain = self.get()?;
-            return if method == "service.start" { brain.start().await }
-                else { brain.stop().await?; Ok(json!({"stopped":true})) };
-        }
+        if method == "service.start" { return self.start().await; }
+        if method == "service.stop" { self.stop().await?; return Ok(json!({"stopped":true})); }
         let brain = self.get()?;
         match method {
             "models.status" => Ok(brain.models.health().await),
@@ -93,11 +90,12 @@ impl BrainHost {
                 Ok(json!({"forgotten":true}))
             },
             "conversation.forget_all" => {brain.forget_all().await?;Ok(json!({"forgotten":true}))},
-            // Editing/revoking a note also removes its old copies from harness sessions.
+            // Editing/revoking a note removes its old injected copies without
+            // deleting local history, conversation ownership or extraction jobs.
             "memory.save" | "memory.delete" | "profile.delete" | "profile.update" | "memory.purge" => {
                 brain.cancel(None).await?;
                 let _gate = brain.turn_gate.lock().await;
-                brain.forget_all_locked(false).await?;
+                brain.invalidate_contexts_locked().await?;
                 // Finish the short mutation while the turn gate is held.
                 // A cancelled IPC future must not leave a detached writer.
                 memory_dispatch_now(&brain.memory,method,payload)
@@ -120,14 +118,15 @@ impl Brain {
     async fn forget_all(&self) -> Result<(), String> {
         self.cancel(None).await?;
         let _gate = self.turn_gate.lock().await;
-        self.forget_all_locked(true).await
+        self.invalidate_contexts_locked().await?;
+        self.memory.forget_all_conversations(true)?;
+        Ok(())
     }
 
-    async fn forget_all_locked(&self, delete_observations:bool) -> Result<(), String> {
+    async fn invalidate_contexts_locked(&self) -> Result<(), String> {
         let ids = self.memory.conversation_ids()?;
         // Fail honestly and retain the ledger if an external session could not be deleted.
         for id in ids { self.harness.forget_conversation(&id).await?; }
-        self.memory.forget_all_conversations(delete_observations)?;
         Ok(())
     }
 }

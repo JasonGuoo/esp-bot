@@ -41,10 +41,19 @@ void face_set_subtitle(face_view_t *view, const char *text);
 /** Show the current text reply in a scrollable view. Call with an empty string
  * when the reply is no longer current. Must be called under the display lock. */
 void face_set_result_text(face_view_t *view, const char *text);
+/** Fixed status lines above the scrollable answer. They never replace its text
+ * or image, and remain visible while the person scrolls through the result. */
+void face_set_result_status(face_view_t *view, const char *status, const char *image_notice);
 /** Transfer ownership of an RGB565 buffer to the current result view.
  * Returns false without taking ownership when that view is no longer open. */
 bool face_set_result_image(face_view_t *view, uint8_t *pixels, uint16_t width, uint16_t height);
 bool face_result_visible(const face_view_t *view);
+typedef enum { FACE_RESULT_TEXT, FACE_RESULT_IMAGE } face_result_part_t;
+/** Called when a visible result widget finishes its LVGL draw event. This alone
+ * is not a display receipt: the application must match the normal display
+ * refresh, current runtime token and mounted generation. Only record work here. */
+typedef void (*face_result_draw_cb_t)(face_result_part_t part, void *context);
+void face_on_result_draw(face_view_t *view, face_result_draw_cb_t callback, void *context);
 
 /** Reveal the top-right gear for five seconds; opens Settings -> Appearance. */
 void face_reveal_settings(face_view_t *view);

@@ -424,6 +424,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                 "outcome":output.device_outcome,"tts_calls":output.tts_calls,
                                 "reply_pcm_bytes":pcm.as_ref().map_or(0, Vec::len),
                                 "processing_ms":completed.processing_time.as_millis() as u64,
+                                "timings":output.timings,
                                 "image_base64":output.display_image.as_ref().map(|image|STANDARD.encode(&image.bytes))
                             }));
                             let stream_id=u32::from_le_bytes(uuid::Uuid::new_v4().as_bytes()[..4].try_into().map_err(|_|"stream_id")?).max(1);
@@ -542,7 +543,12 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         "image" if result.image.as_ref().is_some_and(|(id,_)|frame.payload["asset_id"].as_str()==Some(id.as_str()))=>{},
                                         _=>return Err("display_part_invalid".into()),
                                     }
-                                    brain.emit("device.display",Some(&result.turn_id),json!({"device_id":device_id,"part":part,"status":status,"runtime":token}));
+                                    // Optional bounded diagnostic code from newer firmware;
+                                    // older clients omit it. Never forward arbitrary payloads.
+                                    let code=frame.payload["code"].as_str().filter(|code|status=="unavailable"
+                                        && !code.is_empty() && code.len()<=64
+                                        && code.bytes().all(|byte|byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte==b'_'));
+                                    brain.emit("device.display",Some(&result.turn_id),json!({"device_id":device_id,"part":part,"status":status,"code":code,"runtime":token}));
                                     Ok(json!({"recorded":true}))
                                 },
                                 "assistant.text"|"audio.commit"=>{
@@ -696,7 +702,7 @@ mod tests {
             turn_id:"new".into(), conversation_id:"device-test".into(), transcript:"private".into(),
             scene:super::super::scene::Scene { speech:"字".repeat(200), expression:"happy".into(), cards:vec![] },
             provider_id:"provider".into(), model_id:"model".into(), harness_session_id:"session".into(),
-            audio:None, identity_candidate:None, warnings:vec![], tts_calls:0, display_image:None, device_outcome:"answered".into(),
+            audio:None, identity_candidate:None, warnings:vec![], timings:Default::default(), tts_calls:0, display_image:None, device_outcome:"answered".into(),
         };
         let scene=device_scene(&output);
         let speech=scene["scene"]["speech"].as_str().unwrap();

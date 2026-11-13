@@ -62,6 +62,10 @@ typedef struct {
     /* Last completed visual reply. Its lifetime is independent of microphone permission. */
     bot_session_token_t reading_token;
     char reading_text[BOT_CAPTION_MAX_BYTES + 1];
+    /* Terminal notices survive automatic session expiry with the retained reply.
+     * A new user task or explicit dismissal clears them. Neither grants audio permission. */
+    char reading_notice[BOT_CAPTION_MAX_BYTES + 1];
+    char image_notice[BOT_CAPTION_MAX_BYTES + 1];
 } bot_runtime_snapshot_t;
 
 typedef struct {

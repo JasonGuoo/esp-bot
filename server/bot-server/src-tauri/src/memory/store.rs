@@ -9,6 +9,7 @@ use std::{
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::types::*;
@@ -53,7 +54,7 @@ impl Store {
                 tx.execute_batch(include_str!("schema.sql")).map_err(db_error)?;
                 tx.commit().map_err(db_error)?;
             }
-            1 | 2 | 3 => {}
+            1 | 2 | 3 | 4 => {}
             _ => return Err(format!("unsupported memory database schema version {version}")),
         }
         if version < 2 {
@@ -83,6 +84,19 @@ impl Store {
                 INSERT INTO unattributed_observations SELECT * FROM unattributed_observations_v2;
                 DROP TABLE unattributed_observations_v2;
                 PRAGMA user_version = 3; COMMIT;").map_err(db_error)?;
+        }
+        if version < 4 {
+            // A deleted/replaced fact must not be recreated by an older job.
+            // Retain only a digest, owned by the exact jobs that were pending;
+            // completion/Forget cascades it away without a permanent tombstone.
+            db.execute_batch("BEGIN IMMEDIATE;
+                CREATE TABLE memory_job_suppressions (
+                    job_id TEXT NOT NULL REFERENCES memory_jobs(id) ON DELETE CASCADE,
+                    scope TEXT NOT NULL CHECK (scope IN ('household', 'profile', 'unattributed')),
+                    content_sha256 BLOB NOT NULL CHECK (length(content_sha256) = 32),
+                    PRIMARY KEY (job_id, scope, content_sha256)
+                );
+                PRAGMA user_version = 4; COMMIT;").map_err(db_error)?;
         }
         let store = Arc::new(Self { config, db: Mutex::new(db), path });
         store.purge_expired()?;
@@ -188,6 +202,9 @@ impl Store {
                 if previous.scope != input.scope || previous.profile_id != input.profile_id {
                     return Err("cannot move a memory between people/scopes; save a new explicitly reviewed record".into());
                 }
+                if previous.content != content {
+                    suppress_pending_fact(&tx, previous.scope.as_str(), previous.profile_id.as_deref(), None, &previous.content)?;
+                }
                 previous.created_at_ms
             }
             None => {
@@ -235,6 +252,13 @@ impl Store {
         validate_id(id)?;
         let mut db = self.connection()?;
         let tx = db.transaction().map_err(db_error)?;
+        let previous: Option<(String, Option<String>, String)> = tx.query_row(
+            "SELECT scope, profile_id, content FROM memories WHERE id = ?1", [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).optional().map_err(db_error)?;
+        if let Some((scope, profile, content)) = previous {
+            suppress_pending_fact(&tx, &scope, profile.as_deref(), None, &content)?;
+        }
         tx.execute("DELETE FROM memories WHERE id = ?1", [id]).map_err(db_error)?;
         bump_revision(&tx)?;
         tx.commit().map_err(db_error)
@@ -392,7 +416,8 @@ impl Store {
     }
 
     /// Check the still-live job and apply its result in one transaction. A
-    /// concurrent Forget cascades the job, preventing late resurrection.
+    /// concurrent Forget cascades the job; individual deletion/replacement
+    /// suppresses only that fact for this already-pending job.
     pub fn complete_memory_job(&self, id:&str, facts:&[ExtractedFact]) -> Result<bool,String> {
         let mut db=self.connection()?; let tx=db.transaction().map_err(db_error)?;
         let job:Option<(String,Option<String>,String)>=tx.query_row(
@@ -407,6 +432,11 @@ impl Store {
             let category=if ["preference","routine","relationship","project","fact"].contains(&fact.category.as_str()) {fact.category.as_str()} else {"fact"};
             let household=fact.scope=="household" && ["我们家","全家","家里人","家人们"].iter().any(|word|quote.contains(word));
             let (scope,owner)=if household {("household",None)} else if profile.is_some() {("profile",profile.as_deref())} else {("unattributed",None)};
+            let suppressed:bool=tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM memory_job_suppressions WHERE job_id=?1 AND scope=?2 AND content_sha256=?3)",
+                params![id,scope,content_digest(&content)],|r|r.get(0),
+            ).map_err(db_error)?;
+            if suppressed {continue;}
             if scope=="unattributed" {
                 let count:i64=tx.query_row("SELECT count(*) FROM unattributed_observations",[],|r|r.get(0)).map_err(db_error)?;
                 if count>=5000 {break;}
@@ -449,13 +479,23 @@ impl Store {
         tx.execute("INSERT INTO memories(id,scope,profile_id,content,category,source,source_ref,confirmed,allow_cloud,created_at_ms,updated_at_ms)
             VALUES(?1,'profile',?2,?3,?4,'user_statement',?5,1,1,?6,?6)",
             params![format!("memory_{}",Uuid::new_v4().simple()),profile,content,category,format!("auto:{conversation}"),now]).map_err(db_error)?;
+        suppress_pending_fact(&tx, "unattributed", None, Some(&conversation), &content)?;
         tx.execute("DELETE FROM unattributed_observations WHERE id=?1",[id]).map_err(db_error)?;
         bump_revision(&tx)?;tx.commit().map_err(db_error)
     }
 
     pub fn delete_unattributed(&self,id:&str)->Result<(),String> {
-        validate_id(id)?;let db=self.connection()?;
-        db.execute("DELETE FROM unattributed_observations WHERE id=?1",[id]).map_err(db_error)?;Ok(())
+        validate_id(id)?;
+        let mut db=self.connection()?;let tx=db.transaction().map_err(db_error)?;
+        let previous:Option<(String,String)>=tx.query_row(
+            "SELECT conversation_id,content FROM unattributed_observations WHERE id=?1",[id],
+            |r|Ok((r.get(0)?,r.get(1)?)),
+        ).optional().map_err(db_error)?;
+        if let Some((conversation,content))=previous {
+            suppress_pending_fact(&tx,"unattributed",None,Some(&conversation),&content)?;
+        }
+        tx.execute("DELETE FROM unattributed_observations WHERE id=?1",[id]).map_err(db_error)?;
+        tx.commit().map_err(db_error)
     }
 
     pub fn recent_turns(&self, conversation_id: &str, profile_id: Option<&str>) -> Result<Vec<StoredTurn>, String> {
@@ -522,6 +562,17 @@ impl Store {
         let mut db = self.connection()?;
         let tx = db.transaction().map_err(db_error)?;
         let now = now_ms();
+        let expired = {
+            let mut stmt = tx.prepare(
+                "SELECT scope, profile_id, content FROM memories WHERE expires_at_ms IS NOT NULL AND expires_at_ms <= ?1",
+            ).map_err(db_error)?;
+            let rows = stmt.query_map([now], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?)))
+                .map_err(db_error)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?
+        };
+        for (scope, profile, content) in expired {
+            suppress_pending_fact(&tx, &scope, profile.as_deref(), None, &content)?;
+        }
         let mut count = tx.execute(
             "DELETE FROM memories WHERE expires_at_ms IS NOT NULL AND expires_at_ms <= ?1", [now],
         ).map_err(db_error)?;
@@ -546,7 +597,7 @@ impl Store {
         };
         Ok(json!({
             "path": self.path,
-            "schema_version": 3,
+            "schema_version": 4,
             "revision": count("SELECT revision FROM data_revision WHERE singleton = 1")?,
             "profiles": count("SELECT count(*) FROM profiles")?,
             "memories": count("SELECT count(*) FROM memories")?,
@@ -565,6 +616,29 @@ impl Store {
             "thresholds_calibrated": false
         }))
     }
+}
+
+// Normalization deliberately matches stored content/dedup: trim only. A digest
+// is not anonymization and does not recognize paraphrases of the same fact.
+fn content_digest(content: &str) -> Vec<u8> {
+    Sha256::digest(content.trim().as_bytes()).to_vec()
+}
+
+/// Snapshot existing job IDs under the mutation's transaction, including a
+/// job whose extraction is in flight. Its profile owner cannot change. Every
+/// job may produce household facts; personal facts match only that owner, and
+/// unattributed notes remain local to their originating conversation.
+fn suppress_pending_fact(
+    db: &Connection, scope: &str, profile: Option<&str>, conversation: Option<&str>, content: &str,
+) -> Result<(), String> {
+    db.execute(
+        "INSERT OR IGNORE INTO memory_job_suppressions(job_id, scope, content_sha256)
+         SELECT id, ?1, ?2 FROM memory_jobs
+         WHERE (?1 = 'household' OR profile_id IS ?3)
+         AND (?4 IS NULL OR conversation_id = ?4)",
+        params![scope, content_digest(content), profile, conversation],
+    ).map_err(db_error)?;
+    Ok(())
 }
 
 pub(super) fn db_error(error: rusqlite::Error) -> String {

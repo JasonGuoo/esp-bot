@@ -11,7 +11,7 @@
   "models": {
     "python": "/absolute/path/esp-bot/server/bot-server/local-models/.venv/bin/python",
     "script": "/absolute/path/esp-bot/server/bot-server/local-models/worker.py",
-    "model_dir": "/Users/YOUR_USER/Library/Application Support/ai.reasonia.espbot.server/models",
+    "model_dir": "/Users/YOUR_USER/小呆 Server/models/local",
     "request_timeout_seconds": 120,
     "voice": "Tingting"
   },

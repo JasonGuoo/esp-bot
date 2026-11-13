@@ -26,11 +26,13 @@ export class PcmRecorder {
   private deadline: number | null = null;
   private flushDone: (() => void) | null = null;
   private active = false;
+  private initializing = false;
   private finishing = false;
   private reachedLimit = false;
   private workletLimited = false;
 
-  get recording(): boolean { return this.active && !this.finishing; }
+  get starting(): boolean { return this.active && this.initializing; }
+  get recording(): boolean { return this.active && !this.initializing && !this.finishing; }
 
   async start(callbacks: CaptureCallbacks): Promise<void> {
     if (this.active) throw new Error("录音已开始，请先结束这一段。");
@@ -39,6 +41,7 @@ export class PcmRecorder {
     }
     const generation = ++this.generation;
     this.active = true;
+    this.initializing = true;
     this.finishing = false;
     this.reachedLimit = false;
     this.workletLimited = false;
@@ -98,6 +101,7 @@ export class PcmRecorder {
       this.gain.connect(context.destination);
       await context.resume();
       if (generation !== this.generation) throw new Error("capture_cancelled");
+      this.initializing = false;
       callbacks.progress(0);
       this.timer = window.setInterval(() => callbacks.progress(this.frames / context.sampleRate), 200);
       this.deadline = window.setTimeout(limit, MAX_SECONDS * 1000);
@@ -108,6 +112,12 @@ export class PcmRecorder {
   }
 
   async finish(): Promise<CapturedWav> {
+    // Ending capture while permission or worklet setup is pending is a cancel.
+    // The generation check in start() will stop any stream delivered later.
+    if (this.starting) {
+      this.cancel();
+      throw new Error("capture_cancelled");
+    }
     if (!this.active || this.finishing || !this.context || !this.node) {
       throw new Error("当前没有可结束的录音。");
     }
@@ -155,6 +165,7 @@ export class PcmRecorder {
     this.chunks = [];
     this.frames = 0;
     this.active = false;
+    this.initializing = false;
     this.finishing = false;
     this.releaseDevices();
   }

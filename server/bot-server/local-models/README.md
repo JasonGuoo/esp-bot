@@ -30,19 +30,22 @@ ASR 默认是多语言 Whisper small 的 MLX 转换，权重 revision 为 `45f39
 
 ## 2. Mac 环境准备
 
+以下命令使用当前数据目录 `~/小呆 Server/`。已有旧版数据时，先按
+[Mac Server 迁移说明](../../../docs/mac-bot-server.md) 迁移，再准备或修改模型目录。
+
 使用原生 Apple Silicon 的 Python 3.11 或 3.12，避免在 Rosetta 的 x86_64 Python 中安装 MLX。在仓库的 `server/bot-server/local-models` 目录执行：
 
 ```bash
 python3.11 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 
-XIAODAI_MODEL_DIR="$HOME/Library/Application Support/ai.reasonia.espbot.server/models"
+XIAODAI_MODEL_DIR="$HOME/小呆 Server/models/local"
 .venv/bin/python provision_models.py --model-dir "$XIAODAI_MODEL_DIR" --only asr speaker face
 ```
 
 `requirements.txt` 固定三个模型适配库的版本，其他直接依赖给出兼容范围。它不是已解析的完整环境锁；PyTorch 与 torchaudio 需要由安装器解析为匹配版本。没有为用户的 Mac 声称依赖已安装成功。Whisper 的 NumPy 输入绕过文件解码器，因此本适配路径不需要为了输入 WAV 另装 ffmpeg。
 
-模型路径必须与控制台 `brain.json` 的 `models.model_dir` 相同；上例对应当前应用标识的默认 Mac 路径。把 `models.python` 配成这个 venv 中 Python 的**绝对路径**，不能继续指向另一个没有安装依赖的 `python3`。开发时 `models.script` 指向本目录 `worker.py` 的绝对路径；打包时可使用应用已解析的资源路径。
+模型路径必须与 `~/小呆 Server/brain.json` 的 `models.model_dir` 相同；上例对应新配置默认的 `models/local`。已有配置可以保留自选路径。把 `models.python` 配成这个 venv 中 Python 的**绝对路径**，不能继续指向另一个没有安装依赖的 `python3`。开发时 `models.script` 指向本目录 `worker.py` 的绝对路径；打包时可使用应用已解析的资源路径。
 
 下载器仅在上述显式命令中联网。下载到固定 revision，先写临时文件，检查大小及已有上游 SHA256，再原子替换文件，最后写 `installation.json`。它不运行网络返回的模型代码或音视频样例。已有文件只有与固定摘要或安装收据一致才会复用。更新模型前停止本地模型进程；不要并发运行两个下载器。
 

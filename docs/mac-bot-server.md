@@ -1,5 +1,10 @@
 # 小呆 Mac bot-server：OpenCode、多模型、本地声音与记忆
 
+**2026-11-13 源码修正：** 九项审查问题、分段耗时和语音匹配优化见
+[修正与延迟说明](review-fixes-2026-11-13.md)。本次没有运行测试、构建或设备验证。
+当前设备 WSS、静默连续问答及图文显示的既有实板记录见
+[11 月 12 日验收](specs/server-voice-tasks/acceptance.md)，下方较早日期的记录保留其当时范围。
+
 **2026-11-06 后续本机构建。** 初次交付只包含源码；之后按用户明确要求，已在
 Apple Silicon Mac 完成 TypeScript / Vite、Rust release、依赖锁文件解析与 App 打包，
 并实际打开控制台、读取用户保存的钥匙串密钥、启动和停止官方 OpenCode v2.2.5。
@@ -25,7 +30,7 @@ GLM 和 DeepSeek 仅完成无凭据的网络连通性检查。Mac 控制台现�
 ```mermaid
 flowchart TB
   Console["Mac 家长控制台"] --> Brain["Rust 回合协调器"]
-  Device["S31 运行时"] -. "待接 WSS v3 客户端" .-> Brain
+  Device["S31 运行时"] -->|"WSS v3 控制 / 文字"| Brain
   Brain --> Harness["OpenCode v2"]
   Brain --> Local["本地 ASR / 身份 / TTS"]
   Brain --> Memory["本地 SQLite"]
@@ -84,13 +89,17 @@ DeepSeek 当前正式 Flash 名称以 [官方 API 文档](https://api-docs.deeps
 
 ### 3.2 本地模型
 
+以下命令用于首次安装，配置默认写入 `~/小呆 Server/brain.json`。如果旧目录
+`~/Library/Application Support/ai.reasonia.espbot.server/` 已有 `brain.json`，
+先按第 8.1 节迁移原有数据，再修改配置。
+
 在 `server/bot-server` 目录中：
 
 ```bash
 python3.11 -m venv local-models/.venv
 local-models/.venv/bin/python -m pip install -r local-models/requirements.txt
 
-XIAODAI_MODEL_DIR="$HOME/Library/Application Support/ai.reasonia.espbot.server/models"
+XIAODAI_MODEL_DIR="$HOME/小呆 Server/models/local"
 local-models/.venv/bin/python local-models/provision_models.py \
   --model-dir "$XIAODAI_MODEL_DIR" --only asr speaker face
 
@@ -98,7 +107,8 @@ python3 scripts/configure_mac.py
 ```
 
 `configure_mac.py` 只写应用配置中的绝对路径、已安装的 OpenCode 可执行文件和系统声音，
-保留其他字段并备份已有配置；不会启动模型、录音、摄像头或测试。需要继承指定配置时：
+保留其他字段并备份已有配置；已有 `models.model_dir` 在未提供 `--model-dir` 时保留，
+新配置默认使用 `models/local`。它不会启动模型、录音、摄像头或测试。需要继承指定配置时：
 
 ```bash
 python3 scripts/configure_mac.py --inherit-config /absolute/path/opencode.jsonc
@@ -222,6 +232,27 @@ Mac 新增独立 **WSS v3** 入口，使用 rustls、每台设备的随机 beare
 
 Server 管理的 OpenCode 运行与工作数据位于该目录下；继承的 MCP、OAuth 与既有全局
 OpenCode 配置不会被项目复制进 git。私密运行目录、模型、venv、数据库和 `.env` 都已忽略。
+
+### 8.1 迁移旧安装与恢复未完成的迁移
+
+先退出旧 App，在 `server/bot-server` 目录执行：
+
+```bash
+python3 scripts/migrate_data_root.py
+```
+
+默认源目录为 `~/Library/Application Support/ai.reasonia.espbot.server/`，目标为
+`~/小呆 Server/`。目标目录必须尚不存在。迁移保留原始文件和钥匙串项目，复制本地数据、
+模型与引擎，并通过 OpenCode 的 export/import 转移本机器人跟踪的会话。
+`inherit_config` 支持 JSON 和含行注释、块注释、末尾逗号的 JSONC；脚本先读取这些
+配置，再创建目标目录。路径调整后的副本写成目标目录中的 JSON，原配置文件保持原样。
+
+迁移完成前，目标目录内保留 `.migration-in-progress`。App 和配置助手会拒绝使用该
+目录，避免把未迁移完整的数据当成新安装。如果旧版迁移已失败并留下目标目录，先退出
+App，将整个未完成目录改名为一个尚未存在的备份名称（例如 `小呆 Server.migration-incomplete`），
+然后用修正后的脚本从原始源目录重新迁移。不要只删除标记来强行启动；保留备份，直到
+确认新目录的成员、记忆、会话和模型路径符合预期。配置预检查失败且尚未创建目标目录时，
+修正提示中的配置后即可直接重试。
 
 ## 9. 后续接硬件前的实际缺口
 

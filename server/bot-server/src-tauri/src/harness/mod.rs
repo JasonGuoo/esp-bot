@@ -356,6 +356,10 @@ impl Harness {
             };
             if !effective.is_object() { return Err("opencode_config: inline configuration must be an object".into()); }
             merge(&mut effective, overlay);
+            // Resolve the user's global config before replacing the child's
+            // XDG roots. OpenCode's config directory is independent of its
+            // private data/cache/state directories.
+            let global_config = inherited_global_config_dir()?;
             let mut command = Command::new(&self.config.executable);
             let routes = self.config.routes.clone();
             let uses_deepseek_search = self.config.required_mcp.iter().any(|name| name == "deepseek-search");
@@ -385,6 +389,7 @@ impl Harness {
                 // memory instead of sharing the user's global OpenCode store.
                 .env("XDG_DATA_HOME", self.data_root.join("runtime/xdg/data"))
                 .env("XDG_CONFIG_HOME", self.data_root.join("runtime/xdg/config"))
+                .env("OPENCODE_CONFIG_DIR", global_config)
                 .env("XDG_CACHE_HOME", self.data_root.join("runtime/xdg/cache"))
                 .env("XDG_STATE_HOME", self.data_root.join("runtime/xdg/state"))
                 .env("TMPDIR", self.data_root.join("runtime/xdg/tmp"))
@@ -762,6 +767,23 @@ fn location_path(path: &str, directory: &Path) -> String {
     url.set_path(path);
     url.query_pairs_mut().append_pair("directory", &directory.to_string_lossy());
     format!("{}?{}", url.path(), url.query().unwrap_or(""))
+}
+
+fn inherited_global_config_dir() -> Result<PathBuf, String> {
+    // Match OpenCode v2.2.5 Global.Service: an explicit OPENCODE_CONFIG_DIR
+    // wins, otherwise use the parent process's XDG config root or home.
+    // Preserve an explicitly supplied value instead of silently replacing it.
+    if let Some(path) = std::env::var_os("OPENCODE_CONFIG_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").filter(|path| !path.is_empty()) {
+        return Ok(PathBuf::from(path).join("opencode"));
+    }
+    // On the supported Unix hosts this also covers a GUI process without
+    // HOME by looking up the current account, as Node's os.homedir() does.
+    #[allow(deprecated)]
+    let home = std::env::home_dir().ok_or("opencode_config: cannot locate the user's global configuration directory")?;
+    Ok(home.join(".config/opencode"))
 }
 
 fn private_dir(path: &Path) -> Result<(), String> {

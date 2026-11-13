@@ -109,9 +109,17 @@ Mac 场景使用 `speech / expression / cards`。协商图文能力的设备另�
 
 文字一旦接纳即可结束静默语音回合，图片下载/绘制可在该令牌的 `WAITING` 期间继续。当前固件的 `WAIT_NEXT` 会关闭音频 TCP，图片仍经 WSS。等待表情重置时保留已呈现的文字与结果视图。用户收起卡片时立即取消该视图的待绘图回调，避免迟到图片把视图弹回来。开始新一轮即撤销旧令牌的下载和绘制权；本机已经绘制的完整结果可以继续阅读，直到用户关闭、停止，或下一份有效结果替换它。收音超时结束会话并释放上行权限。已有结果后，如果追问只收到空输入或其他失败结果，也结束当前会话，保留已呈现的内容。已绘制的结果没有阅读倒计时。
 
+保留旧答案时，结果视图上方的固定状态区显示当前收音、处理进度、Mac 确认请求和错误，滚动答案不会把状态移出屏幕。runtime 单独保存追问失败提示；自动结束收音后仍能看到该提示，下一次用户任务、关闭或停止时清除。图片失败使用另一条提示，不覆盖正文、图注或当前任务状态。
+
+图片失败覆盖描述/块校验、请求发送、服务端拒绝或过期、块超时重试耗尽、SHA-256、JPEG 头/解码、描述/块/JPEG/RGB565 分配、传递队列和 LVGL 挂载失败。transport 用固定邮箱记录当前令牌的首个失败，向 runtime 投递提示并上报 `unavailable`。记录失败本身无需申请内存；命令或回执队列满时在当前令牌有效期间重试，不以图片错误关闭整个会话。正常的新任务、停止和掉线仍按既有会话撤权规则处理。
+
 ## 6. 结果送达、失败和停止
 
 新设备用 `display.report` 单独上报文字与图片。在当前场景挂载、相关区域实际重绘并完成该次 LVGL 刷新后才报 `rendered`。Mac 分别保存该轮的文字和图片回执，两者的到达顺序不影响最终状态。USB 预览独立刷新，核验内容时等待带有该轮实际文字或像素的新帧。
+
+当前固件源码将回执绑定到具体文字/图片控件的可见 `LV_EVENT_DRAW_MAIN_END`、同次 `LV_EVENT_REFR_READY` 和之后的 `LV_EVENT_FLUSH_WAIT_FINISH`，最后复核挂载代次、完整运行时令牌及视图可见状态。`REFR_READY` 或 `FLUSH_FINISH` 本身可能早于异步驱动最后一次传输完成，所以挂载代次会等待后续 flush-wait fence；固件为此仅追加一次刷新。图片完全位于滚动视口之外时不产生绘制回执，需滚动至实际可见后再确认。关闭、替换和新任务撤权会清除所有待回执代次。实现依据为 [LVGL v9.6.0 官方绘制事件示例](https://github.com/lvgl/lvgl/blob/v9.6.0/examples/event/lv_example_event_draw.c)和[刷新/flush 源码](https://github.com/lvgl/lvgl/blob/v9.6.0/src/core/lv_refr.c)。
+
+Mac 的资源和回执授权仍限定为同连接、当前结果的完整令牌和交付后 30 秒。设备上保留的结果不延长这个窗口；超过窗口才首次滚动到图片，Mac 可以继续显示“未确认”。无法识别有效资源 ID 的畸形描述会触发本机图片错误，但不能伪造一个可被 Mac 接纳的资源回执。
 
 Mac 设备页分别显示当前请求的状态和同一设备最近一次已完成的回复。下一次收音、空转写或工具等待时仍能阅读之前的结果。换设备或停止服务时清除旧结果。若存在多个合理的指代对象，返回 `needs_input`，屏幕提出一个具体问题。用户补充后沿用同一对话，Mac 根据新的明确请求取图。
 
@@ -121,7 +129,9 @@ Mac 设备页分别显示当前请求的状态和同一设备最近一次已完�
 {"v":3,"type":"request","id":"r-display-2","method":"display.report","payload":{"runtime":{"epoch":7,"session_id":12,"turn_id":1,"focus_generation":0},"part":"image","asset_id":"img-01","status":"rendered","elapsed_since_commit_ms":8700}}
 ```
 
-`part=text|image`，`status=rendered|unavailable`。失败带稳定 `code`，例如 `asset_expired`、`image_digest_mismatch`、`image_decode_failed` 或 `display_unavailable`。Server 对同连接、令牌、part 和资源做幂等更新，响应普通 v3 确认。尚无回执显示“未确认”。回执只更新展示记录，不刷新会话、不启动下一轮。
+`part=text|image`，`status=rendered|unavailable`。失败带稳定 `code`，包括 `asset_expired`、`image_descriptor_invalid`、`image_request_failed`、`image_no_memory`、`image_queue_full`、`image_chunk_invalid`、`image_timeout`、`image_digest_mismatch`、`image_decode_failed` 和 `display_unavailable`；服务端已返回的合法有界错误码也可保留。Server 对同连接、令牌、part 和资源做幂等更新，响应普通 v3 确认，并在 `device.display` 记录原因。尚无回执显示“未确认”。回执只更新展示记录，不刷新会话、不启动下一轮。
+
+**2026-11-13 修正状态：** 上述固定状态区、图片错误提示和实际绘制/flush 回执已修改源码，仅做静态源码审阅；本次没有运行构建、测试、lint、刷机、硬件操作、模型调用或 CI。新布局、内存压力下的提示及驱动回执顺序仍待另行真机观察。
 
 设备按本地停止优先级先关上行、禁止旧画面、解除媒体引用，再由工作任务发送 `assistant.cancel` 或 `session.close`。Server 取消模型/工具的未完成部分，清除该轮待批请求和资源。外部副作用已经发生时保留已知结果，无法判定时提示检查。重连沿用新会话，不重放旧语音命令。异常与边界的演练见[验收矩阵](acceptance.md)。
 

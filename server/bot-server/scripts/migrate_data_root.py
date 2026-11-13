@@ -22,6 +22,61 @@ OLD_DEFAULT = Path.home() / "Library/Application Support/ai.reasonia.espbot.serv
 DEST_DEFAULT = Path.home() / "小呆 Server"
 
 
+def read_jsonc_object(path: Path) -> dict:
+    """Accept JSON comments/trailing commas while keeping JSON strings intact.
+
+    The standard decoder finds string boundaries, including escaped quotes and
+    backslashes. Replace only syntax outside strings; URLs and command arguments
+    containing comment-like text must reach OpenCode unchanged. Retaining spaces
+    and line breaks also preserves useful JSON error locations.
+    """
+    text = path.read_text(encoding="utf-8-sig")
+    decoder = json.JSONDecoder()
+    characters = list(text)
+    index = 0
+    while index < len(text):
+        if text[index] == '"':
+            _, index = decoder.raw_decode(text, index)
+            continue
+        if text.startswith("//", index):
+            end = index + 2
+            while end < len(text) and text[end] not in "\r\n":
+                end += 1
+        elif text.startswith("/*", index):
+            closing = text.find("*/", index + 2)
+            if closing < 0:
+                raise ValueError(f"Unterminated JSONC block comment in {path}")
+            end = closing + 2
+        else:
+            index += 1
+            continue
+        for position in range(index, end):
+            if text[position] not in "\r\n":
+                characters[position] = " "
+        index = end
+
+    text = "".join(characters)
+    index = 0
+    while index < len(text):
+        if text[index] == '"':
+            _, index = decoder.raw_decode(text, index)
+            continue
+        if text[index] == ",":
+            following, preceding = index + 1, index - 1
+            while following < len(text) and text[following] in " \t\r\n":
+                following += 1
+            while preceding >= 0 and text[preceding] in " \t\r\n":
+                preceding -= 1
+            if (following < len(text) and text[following] in "]}" and preceding >= 0
+                    and text[preceding] not in "[{,:"):
+                characters[index] = " "
+        index += 1
+    value = json.loads("".join(characters))
+    if not isinstance(value, dict):
+        raise ValueError(f"OpenCode configuration must contain a JSON object: {path}")
+    return value
+
+
 def copy_tree(source: Path, destination: Path) -> None:
     if not source.is_dir():
         raise RuntimeError(f"Required directory is missing: {source}")
@@ -137,6 +192,11 @@ def main() -> None:
         raise RuntimeError(f"Destination already exists; nothing was overwritten: {root}")
     if not (legacy / "brain.json").is_file():
         raise RuntimeError("Existing brain.json not found; this helper only migrates an existing installation")
+    # Validate the small configuration inputs before creating an incomplete
+    # destination or copying models. The original JSON/JSONC file stays intact.
+    legacy_config = json.loads((legacy / "brain.json").read_text(encoding="utf-8"))
+    inherited = legacy_config.get("harness", {}).get("inherit_config")
+    inherited_config = read_jsonc_object(Path(inherited)) if inherited else None
     root.mkdir(mode=0o700, parents=False)
     marker = root / ".migration-in-progress"
     marker.write_text("Migration incomplete; do not start the app until it succeeds.\n")
@@ -146,7 +206,7 @@ def main() -> None:
         copy_legacy(legacy, root)
         (root / "runtime/tmp").mkdir(mode=0o700, parents=True, exist_ok=True)
         config_path = root / "brain.json"
-        config = replace_prefix(json.loads(config_path.read_text()), legacy, root)
+        config = replace_prefix(legacy_config, legacy, root)
         models = config["models"]
         source_models = Path(models["model_dir"])
         copy_tree(source_models, root / "models/local")
@@ -180,10 +240,7 @@ def main() -> None:
         shutil.copy2(APP / "tools/deepseek_search.py", root / "engines/tools/deepseek_search.py")
         harness = config["harness"]
         harness["executable"] = str(root / "engines/opencode-bin/opencode")
-        inherited = harness.get("inherit_config")
-        if inherited:
-            original = Path(inherited)
-            inherited_config = json.loads(original.read_text())
+        if inherited_config is not None:
             mappings = [(APP / "runtime/tooling", root / "engines/tooling"),
                         (APP / ".venv-tools", root / "engines/tools-python"),
                         (APP / "tools", root / "engines/tools")]

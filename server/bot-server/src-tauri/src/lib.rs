@@ -43,15 +43,7 @@ pub fn run() {
                 });
             let brain_host = brain::BrainHost::new(config_dir, resource_worker, brain_sink, diagnostics);
             app.manage(Arc::clone(&brain_host));
-            if let Ok(runtime) = brain_host.get() {
-                if runtime.config.auto_start {
-                    tauri::async_runtime::spawn(async move {
-                        if let Err(error) = runtime.start().await {
-                            runtime.emit("service.start_failed", None, serde_json::json!({"error":error}));
-                        }
-                    });
-                }
-            }
+            tauri::async_runtime::spawn(async move { brain_host.auto_start().await; });
 
             // Window/webview diagnostics: a blank window must never be
             // silent — log what each webview loaded (or failed to).
