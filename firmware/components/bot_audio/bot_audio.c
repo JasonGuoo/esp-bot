@@ -90,11 +90,14 @@ struct bot_audio {
     uint32_t gate_epoch;
     bot_audio_token_t session;
     uint32_t afe_reset_requested, afe_epoch;
+    uint32_t keyword_epoch; /* capture worker's last recognizer permission fence */
     bot_audio_token_t afe_token;
     bool afe_speech, waiting_for_followup;
     uint32_t afe_speech_epoch;
     unsigned afe_failures;
     bool playback_requested, playback_cancelled, playback_end_enqueued;
+    bool echo_reset_pending;
+    uint32_t echo_discard_frames;
     uint32_t next_playback_id;
     bot_audio_token_t playback_token;
     int64_t playback_begin_us, last_queued_us, echo_tail_until_us, last_wake_us;
@@ -137,12 +140,21 @@ static bool running(bot_audio_t *a)
     return result;
 }
 
+/* Called with the owner lock held. The post-playback RX/AFE fence prevents
+ * buffered speaker audio from becoming eligible just because wall time passed. */
+static bool echo_blocked_locked(const bot_audio_t *a, int64_t now)
+{
+    return a->playback_requested || now < a->echo_tail_until_us ||
+           a->echo_reset_pending || a->echo_discard_frames != 0;
+}
+
 static void publish_wake_status(bot_audio_t *a)
 {
     bot_audio_status_t status;
     bot_audio_get_status(a, &status);
     emit(a, (bot_audio_event_t){.kind = BOT_AUDIO_EVENT_WAKE_STATUS,
         .wake_status = status.wake_status, .available = status.wake_available,
+        .wake_backend = status.wake_backend,
         .error = status.last_error, .reason = status.reason});
 }
 
@@ -271,7 +283,7 @@ static void process_ambient(bot_audio_t *a, int64_t now, uint16_t peak0, uint16_
     LOCK(a);
     bool usable = a->run && a->capture_good && a->status.afe_running && now >= a->ambient_ready_us &&
                   now - a->status.last_afe_result_us < 500000 &&
-                  !a->status.playback_running && now >= a->echo_tail_until_us;
+                  !echo_blocked_locked(a, now);
     bool vad_speech = a->passive_speech;
     UNLOCK(a);
     const float level = mean0 > mean1 ? mean0 : mean1;
@@ -336,6 +348,29 @@ static void capture_worker(void *context)
     UNLOCK(a);
     while (running(a)) {
         apply_afe_fence(a);
+        /* A local response can outlive a transport session transition. Both
+         * streams use this same microphone/speaker suppression boundary. */
+        LOCK(a);
+        bool reset_echo = a->echo_reset_pending && !a->playback_requested &&
+                          esp_timer_get_time() >= a->echo_tail_until_us && !a->echo_discard_frames;
+        bool reset_afe = a->status.afe_running;
+        UNLOCK(a);
+        if (reset_echo && xSemaphoreTake(a->feed_lock, 0) == pdTRUE) {
+            int reset = 1, vad_reset = 1;
+            if (reset_afe) {
+                reset = a->afe.iface->reset_buffer ? a->afe.iface->reset_buffer(a->afe.data) : -1;
+                vad_reset = a->afe.iface->reset_vad ? a->afe.iface->reset_vad(a->afe.data) : -1;
+            }
+            bot_audio_keyword_reset(&a->afe.keyword);
+            a->afe_speech = false;
+            if (reset != 1 || vad_reset != 1)
+                afe_failed(a, ESP_FAIL, "Official AFE post-playback reset failed; local detector disabled");
+            LOCK(a);
+            if (!a->playback_requested && esp_timer_get_time() >= a->echo_tail_until_us &&
+                !a->echo_discard_frames) a->echo_reset_pending = false;
+            UNLOCK(a);
+            xSemaphoreGive(a->feed_lock);
+        }
         LOCK(a);
         uint32_t read_epoch = a->gate_epoch;
         uint64_t sequence = ++a->capture_sequence;
@@ -345,6 +380,7 @@ static void capture_worker(void *context)
         esp_err_t err = esp_codec_dev_read(a->codec, a->stereo_capture, (int)bytes);
         int64_t observed = esp_timer_get_time();
         if (err != ESP_OK) {
+            bot_audio_keyword_reset(&a->afe.keyword);
             LOCK(a);
             bool changed = a->capture_good;
             a->capture_good = false;
@@ -384,6 +420,13 @@ static void capture_worker(void *context)
         a->status.vad_available = afe_fresh;
         a->status.wake_available = afe_fresh &&
                                   a->status.wake_status == BOT_AUDIO_WAKE_READY;
+        if (a->playback_requested || observed < a->echo_tail_until_us) {
+            a->echo_reset_pending = true;
+            a->echo_discard_frames = a->dma_frames + a->capture_samples;
+        } else if (a->echo_discard_frames) {
+            a->echo_discard_frames = a->echo_discard_frames > a->capture_samples ?
+                                    a->echo_discard_frames - a->capture_samples : 0;
+        }
         bool eligible = a->run && a->status.session_open && read_epoch == a->gate_epoch;
         if (eligible && a->status.rx_discard_frames) {
             uint32_t remaining = a->status.rx_discard_frames;
@@ -394,7 +437,8 @@ static void capture_worker(void *context)
         if (eligible && a->afe_epoch != a->gate_epoch) a->afe_reset_requested = a->gate_epoch;
         bool feed_allowed = a->status.afe_running &&
                             (!a->afe_reset_requested || a->afe_epoch == a->afe_reset_requested);
-        bool deliver = eligible && a->status.pcm_delivery_enabled && a->config.on_pcm != NULL;
+        bool deliver = eligible && a->status.pcm_delivery_enabled && a->config.on_pcm != NULL &&
+                       !echo_blocked_locked(a, observed);
         bot_audio_token_t token = a->session;
         UNLOCK(a);
         if (health_changed) {
@@ -424,7 +468,8 @@ static void capture_worker(void *context)
         if (deliver && a->config.on_pcm) {
             LOCK(a);
             deliver = a->run && a->status.session_open && a->status.pcm_delivery_enabled &&
-                      a->gate_epoch == read_epoch && same_token(&a->session, &token);
+                      a->gate_epoch == read_epoch && same_token(&a->session, &token) &&
+                      !echo_blocked_locked(a, esp_timer_get_time());
             if (deliver) a->status.delivered_pcm_frames++;
             UNLOCK(a);
             if (deliver) {
@@ -469,6 +514,7 @@ static void apply_afe_fence(bot_audio_t *a)
      * acknowledge a new permission epoch if old AFE state could remain. */
     int reset = a->afe.iface->reset_buffer ? a->afe.iface->reset_buffer(a->afe.data) : -1;
     int vad_reset = a->afe.iface->reset_vad ? a->afe.iface->reset_vad(a->afe.data) : -1;
+    bot_audio_keyword_reset(&a->afe.keyword);
     if (reset != 1 || vad_reset != 1) {
         xSemaphoreGive(a->feed_lock);
         afe_failed(a, ESP_FAIL, "Official AFE session reset failed; local detector disabled");
@@ -512,15 +558,36 @@ static void fetch_frame(bot_audio_t *a)
     LOCK(a);
     a->status.afe_frames++;
     a->status.last_afe_result_us = now;
-    bool echo_block = a->status.playback_running || now < a->echo_tail_until_us;
+    uint32_t detection_gate = a->gate_epoch;
+    bot_audio_wake_backend_t backend = a->status.wake_backend;
+    bool detector_allowed = a->run && a->capture_good &&
+        a->status.wake_status == BOT_AUDIO_WAKE_READY && !echo_blocked_locked(a, now) &&
+        (!a->last_wake_us || now - a->last_wake_us >= (int64_t)a->config.wake_debounce_ms * 1000);
+    UNLOCK(a);
+    bool wake = backend == BOT_AUDIO_WAKE_BACKEND_WAKENET &&
+                result->wakeup_state == WAKENET_DETECTED &&
+                result->wakenet_model_index == 1 && result->wake_word_index == 1;
+    if (backend == BOT_AUDIO_WAKE_BACKEND_MULTINET7) {
+        if (a->keyword_epoch != detection_gate) {
+            bot_audio_keyword_reset(&a->afe.keyword);
+            a->keyword_epoch = detection_gate;
+        }
+        size_t count = result->data_size > 0 && result->data_size % sizeof(int16_t) == 0 ?
+                       (size_t)result->data_size / sizeof(int16_t) : 0;
+        /* Inference stays on the single audio owner, outside the spinlock.
+         * The permission/playback gate is checked again after native inference. */
+        wake = bot_audio_keyword_detect(&a->afe.keyword, result->data, count,
+                                        result->data_volume, detector_allowed);
+    }
+    now = esp_timer_get_time();
+    LOCK(a);
+    bool echo_block = echo_blocked_locked(a, now);
     a->passive_speech = a->run && a->capture_good && !echo_block && result->vad_state == VAD_SPEECH;
     bool vad_allowed = a->run && a->capture_good && a->status.session_open && epoch != 0 &&
                        epoch == a->gate_epoch && a->status.rx_discard_frames == 0 && !echo_block;
     const bool waiting_for_followup = a->waiting_for_followup;
-    bool wake = a->run && a->capture_good && a->status.wake_status == BOT_AUDIO_WAKE_READY &&
-                result->wakeup_state == WAKENET_DETECTED &&
-                result->wakenet_model_index == 1 && result->wake_word_index == 1;
-    bool wake_allowed = wake && !echo_block &&
+    bool wake_allowed = wake && a->run && a->capture_good &&
+        a->status.wake_status == BOT_AUDIO_WAKE_READY && detection_gate == a->gate_epoch && !echo_block &&
         (!a->last_wake_us || now - a->last_wake_us >= (int64_t)a->config.wake_debounce_ms * 1000);
     if (wake_allowed) {
         a->last_wake_us = now;
@@ -529,8 +596,9 @@ static void fetch_frame(bot_audio_t *a)
     UNLOCK(a);
     if (wake_allowed) emit(a, (bot_audio_event_t){.kind = BOT_AUDIO_EVENT_WAKE_DETECTED,
         .observed_us = now, .wake_phrase = BOT_AUDIO_WAKE_PHRASE,
-        .wake_word_index = result->wake_word_index, .echo_safe = true,
-        .confidence_available = false, .confidence = 0.0f});
+        .wake_word_index = 1, .wake_backend = backend, .echo_safe = true,
+        .confidence_available = backend == BOT_AUDIO_WAKE_BACKEND_MULTINET7,
+        .confidence = backend == BOT_AUDIO_WAKE_BACKEND_MULTINET7 ? a->afe.keyword.last_score : 0.0f});
     if (epoch != a->afe_speech_epoch || !vad_allowed) {
         a->afe_speech = false;
         a->afe_speech_epoch = epoch;
@@ -572,6 +640,7 @@ static void finish_playback(bot_audio_t *a, uint32_t id, bot_audio_token_t token
     xSemaphoreTake(a->command_lock, portMAX_DELAY);
     xQueueReset(a->output_queue);
     LOCK(a);
+    bot_audio_playback_source_t source = a->status.playback_source;
     if (a->status.playback_id == id) {
         if (a->playback_cancelled && error == ESP_OK) kind = BOT_AUDIO_EVENT_PLAYBACK_CANCELLED;
         /* A failed purge must never be followed by unmuting another stream. */
@@ -589,6 +658,7 @@ static void finish_playback(bot_audio_t *a, uint32_t id, bot_audio_token_t token
     UNLOCK(a);
     xSemaphoreGive(a->command_lock);
     emit(a, (bot_audio_event_t){.kind = kind, .token = token, .playback_id = id,
+        .playback_source = source,
         .error = error, .reason = error == ESP_OK ? NULL : "Local playback or DMA drain failed"});
 }
 
@@ -604,6 +674,7 @@ static void playback_worker(void *context)
         bool cancelled = a->playback_cancelled || !run;
         bool started = a->status.playback_running;
         uint32_t id = a->status.playback_id;
+        bot_audio_playback_source_t source = a->status.playback_source;
         bot_audio_token_t token = a->playback_token;
         int64_t queued_at = a->last_queued_us;
         UNLOCK(a);
@@ -664,7 +735,8 @@ static void playback_worker(void *context)
                 clear_audio(&frame, sizeof(frame));
                 continue;
             }
-            emit(a, (bot_audio_event_t){.kind = BOT_AUDIO_EVENT_PLAYBACK_STARTED, .token = token, .playback_id = id});
+            emit(a, (bot_audio_event_t){.kind = BOT_AUDIO_EVENT_PLAYBACK_STARTED, .token = token,
+                .playback_id = id, .playback_source = source});
         }
         for (size_t i = 0; i < frame.count; ++i) stereo[2 * i] = stereo[2 * i + 1] = frame.samples[i];
         esp_err_t err = esp_codec_dev_write(a->codec, stereo, frame.count * 2 * sizeof(int16_t));
@@ -809,18 +881,22 @@ esp_err_t bot_audio_start(bot_audio_t *a)
     a->status.direction_available = a->doa != NULL;
     a->status.night_wake_supported = true;
     a->status.wake_status = a->afe.wake_status;
+    a->status.wake_backend = a->afe.wake_backend;
     a->status.last_error = afe_error;
-    snprintf(a->status.model_name, sizeof(a->status.model_name), "%s", a->model_name);
+    snprintf(a->status.model_name, sizeof(a->status.model_name), "%s", a->afe.model_name);
     snprintf(a->status.reason, sizeof(a->status.reason), "%s", a->afe.reason);
     a->run = true;
     a->capture_good = false;
     a->output_fault = false;
     a->capture_sequence = 0;
     a->afe_epoch = a->afe_reset_requested = 0;
+    a->keyword_epoch = 0;
     if (++a->gate_epoch == 0) ++a->gate_epoch;
     a->session = (bot_audio_token_t){0};
     a->afe_token = (bot_audio_token_t){0};
     a->playback_requested = a->playback_cancelled = a->playback_end_enqueued = false;
+    a->echo_reset_pending = false;
+    a->echo_discard_frames = 0;
     a->last_wake_us = a->echo_tail_until_us = 0;
     a->last_sound_event_us = a->last_direction_us = a->last_loud_us = a->last_impulse_us = 0;
     a->ambient_ready_us = esp_timer_get_time() + INT64_C(1000000);
@@ -882,7 +958,8 @@ static esp_err_t set_session(bot_audio_t *a, const bot_audio_token_t *token,
     a->session = token ? *token : (bot_audio_token_t){0};
     a->status.rx_discard_frames = token ? a->dma_frames + a->capture_samples : 0;
     a->afe_reset_requested = 0; /* fetch acknowledges only after fresh RX fence */
-    if (!same_playback_session && a->playback_requested) {
+    if (!same_playback_session && a->playback_requested &&
+        a->status.playback_source == BOT_AUDIO_PLAYBACK_SESSION) {
         a->playback_cancelled = true;
         /* This GPIO write is bounded and independent of codec I2C/queue locks. */
         (void)gpio_set_level(BSP_POWER_AMP_IO, 0);
@@ -901,27 +978,42 @@ esp_err_t bot_audio_wait_for_followup(bot_audio_t *a, const bot_audio_token_t *t
     return set_session(a, token, false, true);
 }
 
-esp_err_t bot_audio_playback_begin(bot_audio_t *a, const bot_audio_token_t *token, uint32_t *out_id)
+static esp_err_t playback_begin(bot_audio_t *a, const bot_audio_token_t *token,
+                                 bot_audio_playback_source_t source, uint32_t *out_id)
 {
-    if (!a || !token || !out_id) return ESP_ERR_INVALID_ARG;
+    if (!a || !token || !token->epoch || !token->session_id || !out_id) return ESP_ERR_INVALID_ARG;
     *out_id = 0;
     if (xSemaphoreTake(a->command_lock, 0) != pdTRUE) return ESP_ERR_TIMEOUT;
     LOCK(a);
-    bool allowed = a->run && a->codec_open && !a->output_fault && a->status.session_open &&
-        same_token(token, &a->session) && !a->playback_requested;
+    bool authorized = source == BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE ||
+                      (a->status.session_open && same_token(token, &a->session));
+    bool allowed = a->run && a->codec_open && !a->output_fault && authorized && !a->playback_requested;
     if (allowed) {
         if (++a->next_playback_id == 0) ++a->next_playback_id;
         a->status.playback_id = a->next_playback_id;
+        a->status.playback_source = source;
         a->playback_token = *token;
         a->playback_requested = true;
         a->playback_cancelled = false;
         a->playback_end_enqueued = false;
+        a->echo_reset_pending = true;
+        a->echo_discard_frames = a->dma_frames + a->capture_samples;
         a->playback_begin_us = a->last_queued_us = esp_timer_get_time();
         *out_id = a->status.playback_id;
     }
     UNLOCK(a);
     xSemaphoreGive(a->command_lock);
     return allowed ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+esp_err_t bot_audio_playback_begin(bot_audio_t *a, const bot_audio_token_t *token, uint32_t *out_id)
+{
+    return playback_begin(a, token, BOT_AUDIO_PLAYBACK_SESSION, out_id);
+}
+
+esp_err_t bot_audio_playback_begin_local(bot_audio_t *a, const bot_audio_token_t *token, uint32_t *out_id)
+{
+    return playback_begin(a, token, BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE, out_id);
 }
 
 static esp_err_t enqueue_playback(bot_audio_t *a, const playback_frame_t *frame)
@@ -1045,5 +1137,6 @@ void bot_audio_get_status(bot_audio_t *a, bot_audio_status_t *out)
     }
     LOCK(a);
     *out = a->status;
+    out->self_playback_blocked = echo_blocked_locked(a, esp_timer_get_time());
     UNLOCK(a);
 }

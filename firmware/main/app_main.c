@@ -31,6 +31,7 @@
 #endif
 #include "head_motion.h"
 #include "night_schedule.h"
+#include "wake_response_player.h"
 
 static const char *TAG = "xiaodai";
 typedef struct {
@@ -38,6 +39,7 @@ typedef struct {
     bot_bus_t *bus;
     bot_runtime_t *runtime;
     bot_audio_t *audio;
+    bot_response_player_t *response_player;
     bot_vision_t *vision;
     face_view_t *face;
     atomic_uint text_requested, text_started, text_flushing, text_ready;
@@ -74,6 +76,7 @@ typedef struct {
     bool ambient_reported, last_ambient_dark, last_ambient_probe;
     bool near_face_reported, last_near_face;
     bool night_sent, last_night, last_clock_valid;
+    uint8_t last_local_hour;
     uint32_t last_clock_poll_ms, last_diagnostic_ms, last_light_poll_ms;
     char rendered_caption[BOT_CAPTION_MAX_BYTES + 1];
     char rendered_expression[BOT_EXPRESSION_MAX_BYTES + 1];
@@ -174,6 +177,8 @@ static void audio_event(void *context, const bot_audio_event_t *source) {
         event.data.wake.confidence_available = source->confidence_available;
         event.data.wake.confidence = source->confidence;
         event.data.wake.echo_safe = source->echo_safe;
+        ESP_LOGI(TAG, "Full wake phrase detected: backend=%d score_available=%d score=%.3f",
+                 source->wake_backend, source->confidence_available, (double)source->confidence);
         break;
     case BOT_AUDIO_EVENT_VAD_STARTED:
         event.kind = BOT_EVENT_UTTERANCE_STARTED;
@@ -195,15 +200,18 @@ static void audio_event(void *context, const bot_audio_event_t *source) {
     case BOT_AUDIO_EVENT_PLAYBACK_STARTED:
         event.kind = BOT_EVENT_PLAYBACK_STARTED;
         event.data.playback.id = source->playback_id;
+        event.data.playback.local_response = source->playback_source == BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE;
         break;
     case BOT_AUDIO_EVENT_PLAYBACK_DONE:
         event.kind = BOT_EVENT_PLAYBACK_DONE;
         event.data.playback.id = source->playback_id;
+        event.data.playback.local_response = source->playback_source == BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE;
         break;
     case BOT_AUDIO_EVENT_PLAYBACK_CANCELLED:
     case BOT_AUDIO_EVENT_PLAYBACK_FAILED:
         event.kind = BOT_EVENT_PLAYBACK_FAILED;
         event.data.playback.id = source->playback_id;
+        event.data.playback.local_response = source->playback_source == BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE;
         break;
     default: return;
     }
@@ -405,8 +413,20 @@ static void apply_state(void *context, const bot_runtime_snapshot_t *state) {
 }
 static void stop_output(void *context) {
     app_t *app = context;
+    bot_response_player_cancel(app->response_player);
     if (app->audio) bot_audio_playback_cancel(app->audio, 0);
     head_motion_emergency_stop();
+}
+static bool play_wake_response(void *context, const bot_session_token_t *token,
+                                const bot_response_entry_t *entry) {
+    app_t *app = context;
+    return bot_response_player_queue(app->response_player, token, entry);
+}
+static bool wake_response_tail_clear(void *context) {
+    app_t *app = context;
+    bot_audio_status_t status;
+    bot_audio_get_status(app->audio, &status);
+    return !status.self_playback_blocked;
 }
 static void cancel_remote(void *context, const bot_session_token_t *token) {
     (void)context; (void)token;
@@ -426,22 +446,25 @@ static void poll_night(app_t *app, uint32_t now_ms) {
     if (app->night_sent && (uint32_t)(now_ms - app->last_clock_poll_ms) < 30000) return;
     app->last_clock_poll_ms = now_ms;
     bool valid = false, night = false;
-#if CONFIG_ESPBOT_NIGHT_SCHEDULE
     time_t wall = time(NULL);
     struct tm local;
     valid = wall >= (time_t)1704067200 && localtime_r(&wall, &local) != NULL;
+    uint8_t hour = valid ? (uint8_t)local.tm_hour : 0;
+#if CONFIG_ESPBOT_NIGHT_SCHEDULE
     if (valid) {
         int minute = local.tm_hour * 60 + local.tm_min;
         int start = CONFIG_ESPBOT_NIGHT_START_MINUTE, end = CONFIG_ESPBOT_NIGHT_END_MINUTE;
         night = bot_night_contains(minute, start, end);
     }
 #endif
-    if (!app->night_sent || app->last_night != night || app->last_clock_valid != valid) {
+    if (!app->night_sent || app->last_night != night || app->last_clock_valid != valid ||
+        app->last_local_hour != hour) {
         ESP_LOGI(TAG, "Night policy clock_valid=%d night=%d", valid, night);
         bot_event_t event = { .kind = BOT_EVENT_NIGHT_POLICY, .source = BOT_SOURCE_PLATFORM,
-            .observed_ms = now_ms, .data.night = { .clock_valid = valid, .night = night } };
+            .observed_ms = now_ms, .data.night = { .clock_valid = valid, .night = night, .local_hour = hour } };
         post(app, &event);
         app->night_sent = true; app->last_night = night; app->last_clock_valid = valid;
+        app->last_local_hour = hour;
     }
 }
 
@@ -588,7 +611,7 @@ static void reconcile(app_t *app, uint32_t now_ms) {
         gaze_source = "manual_eye";
     } else app->debug_eye_until_ms = 0;
 #endif
-    const char *expression = near_face ? "happy" : s->expression;
+    const char *expression = near_face && !s->local_response_active ? "happy" : s->expression;
 #if CONFIG_ESPBOT_USB_DEBUG_PREVIEW
     const bool face_test_allowed = bot_debug_preview_enabled() && platform.display_awake &&
         !s->critical_fault && !s->settings_open && s->behavior != BOT_BEHAVIOR_NIGHT_DARK;
@@ -827,7 +850,8 @@ void app_main(void) {
     config.allow_barge_in = false; /* no measured AEC reference */
     bot_runtime_ops_t ops = { .apply_state = apply_state, .stop_output = stop_output,
         .cancel_remote = cancel_remote, .command_result = command_result,
-        .now_ms = runtime_now_ms };
+        .now_ms = runtime_now_ms, .play_wake_response = play_wake_response,
+        .wake_response_tail_clear = wake_response_tail_clear };
     ESP_ERROR_CHECK(bot_runtime_create(app->bus, &config, &ops, app, bot_platform_now_ms(), &app->runtime));
     bot_runtime_get_snapshot(app->runtime, &app->desired);
 #if CONFIG_ESPBOT_NIGHT_SCHEDULE
@@ -843,6 +867,12 @@ void app_main(void) {
         bot_event_t event = { .kind = BOT_EVENT_AUDIO_HEALTH, .source = BOT_SOURCE_AUDIO,
             .observed_ms = bot_platform_now_ms(), .data.health = { .available = false, .error = err } };
         post(app, &event);
+    }
+    if (app->audio) {
+        esp_err_t reply_error = bot_response_player_create(app->bus, app->audio, &app->response_player);
+        if (reply_error != ESP_OK)
+            ESP_LOGW(TAG, "Local wake speech unavailable: %s", esp_err_to_name(reply_error));
+        else ESP_LOGI(TAG, "Embedded wake responses ready: %u", (unsigned)bot_responses_count());
     }
     /* Reserve the persistent authenticated client task while internal RAM is
      * contiguous. Camera, USB preview and Bonjour must not be able to displace it. */

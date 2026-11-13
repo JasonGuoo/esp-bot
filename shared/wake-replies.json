@@ -1,0 +1,1376 @@
+{
+  "schema_version": 1,
+  "language": "zh-CN",
+  "production_wake_phrase": "小呆小呆",
+  "purpose": "Only selected AFTER bot_runtime accepts an explicit acoustic wake. Never triggered by time, darkness, a face, gaze, or ordinary speech.",
+  "content_provenance": "Original project-authored Chinese response text; no third-party dialogue or character imitation.",
+  "audio_provenance_file": "../firmware/components/bot_responses/assets-manifest.json",
+  "gain_semantics": "Percentage of the current user volume; never increase the user setting or bypass mute.",
+  "unknown_context": "No time greeting without valid local time; no missing-face remark without fresh usable vision; offline means known brain service unavailable, not Wi-Fi unavailable.",
+  "scene_rules": {
+    "night": "Established night policy OR valid local hour >=22 or <5; quiet-only pool.",
+    "repeat": "Runtime marks another explicit wake within its repeat window; no exact count claimed.",
+    "waking": "Runtime state before wake was sleeping/drowsy.",
+    "dark": "Fresh ambient sample confirms darkness, independently of time.",
+    "offline": "Brain service status is known unavailable; does not assert internet or Wi-Fi failure.",
+    "no_face": "A fresh usable camera observation found no face; inactive/dark camera is not sufficient.",
+    "morning": "Valid local hour 05:00–10:59.",
+    "day": "Valid local hour 11:00–16:59.",
+    "evening": "Valid local hour 17:00–21:59.",
+    "general": "No external readiness/identity/weather claims; mixed into non-night contexts for variety."
+  },
+  "entries": [
+    {
+      "id": "general_01",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "我在呢。",
+      "expression": "happy",
+      "suggested_caption_ms": 1200,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "general_02",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "小呆在这儿。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1490,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "general_03",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "嗯，你说。",
+      "expression": "listening",
+      "suggested_caption_ms": 1300,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "general_04",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "听见啦。",
+      "expression": "happy",
+      "suggested_caption_ms": 1200,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "general_05",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "叫我啦？我在。",
+      "expression": "curious",
+      "suggested_caption_ms": 1680,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "general_06",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "收到你的呼唤啦。",
+      "expression": "happy",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "general_07",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "小呆报到。",
+      "expression": "wink",
+      "suggested_caption_ms": 1300,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "general_08",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "我在，慢慢说。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1680,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "general_09",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "嗯，小呆听着呢。",
+      "expression": "listening",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "general_10",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "嗨，我在这里。",
+      "expression": "happy",
+      "suggested_caption_ms": 1680,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "general_11",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "你一叫，我就来啦。",
+      "expression": "excited",
+      "suggested_caption_ms": 2060,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "general_12",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "我在，有什么新鲜事？",
+      "expression": "curious",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "general_13",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "小呆准备听啦。",
+      "expression": "listening",
+      "suggested_caption_ms": 1680,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "general_14",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "听到我的名字啦。",
+      "expression": "surprised",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "general_15",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "我在，轮到你说啦。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2060,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "general_16",
+      "scene": "general",
+      "tags": [
+        "explicit_acoustic_wake",
+        "general"
+      ],
+      "text": "小呆收到啦。",
+      "expression": "wink",
+      "suggested_caption_ms": 1490,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "morning_01",
+      "scene": "morning",
+      "tags": [
+        "explicit_acoustic_wake",
+        "morning"
+      ],
+      "text": "早呀，我在呢。",
+      "expression": "happy",
+      "suggested_caption_ms": 1680,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "morning_02",
+      "scene": "morning",
+      "tags": [
+        "explicit_acoustic_wake",
+        "morning"
+      ],
+      "text": "早上好，小呆在。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "morning_03",
+      "scene": "morning",
+      "tags": [
+        "explicit_acoustic_wake",
+        "morning"
+      ],
+      "text": "早安，听你说。",
+      "expression": "listening",
+      "suggested_caption_ms": 1680,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "morning_04",
+      "scene": "morning",
+      "tags": [
+        "explicit_acoustic_wake",
+        "morning"
+      ],
+      "text": "新的一天，小呆报到。",
+      "expression": "excited",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "morning_05",
+      "scene": "morning",
+      "tags": [
+        "explicit_acoustic_wake",
+        "morning"
+      ],
+      "text": "早呀，今天想聊什么？",
+      "expression": "curious",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "morning_06",
+      "scene": "morning",
+      "tags": [
+        "explicit_acoustic_wake",
+        "morning"
+      ],
+      "text": "早上好，慢慢说。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "morning_07",
+      "scene": "morning",
+      "tags": [
+        "explicit_acoustic_wake",
+        "morning"
+      ],
+      "text": "早安，我听着呢。",
+      "expression": "listening",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "morning_08",
+      "scene": "morning",
+      "tags": [
+        "explicit_acoustic_wake",
+        "morning"
+      ],
+      "text": "早呀，你叫我啦？",
+      "expression": "curious",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "morning_09",
+      "scene": "morning",
+      "tags": [
+        "explicit_acoustic_wake",
+        "morning"
+      ],
+      "text": "小呆在，早上好。",
+      "expression": "happy",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "morning_10",
+      "scene": "morning",
+      "tags": [
+        "explicit_acoustic_wake",
+        "morning"
+      ],
+      "text": "早安，给你一个微笑。",
+      "expression": "happy",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "morning_11",
+      "scene": "morning",
+      "tags": [
+        "explicit_acoustic_wake",
+        "morning"
+      ],
+      "text": "早呀，我已经竖起耳朵啦。",
+      "expression": "curious",
+      "suggested_caption_ms": 2630,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "morning_12",
+      "scene": "morning",
+      "tags": [
+        "explicit_acoustic_wake",
+        "morning"
+      ],
+      "text": "早上好，有什么新鲜事？",
+      "expression": "excited",
+      "suggested_caption_ms": 2440,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "day_01",
+      "scene": "day",
+      "tags": [
+        "explicit_acoustic_wake",
+        "day"
+      ],
+      "text": "我在，今天过得怎么样？",
+      "expression": "curious",
+      "suggested_caption_ms": 2440,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "day_02",
+      "scene": "day",
+      "tags": [
+        "explicit_acoustic_wake",
+        "day"
+      ],
+      "text": "小呆在，想聊点什么？",
+      "expression": "happy",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "day_03",
+      "scene": "day",
+      "tags": [
+        "explicit_acoustic_wake",
+        "day"
+      ],
+      "text": "听见啦，有新发现吗？",
+      "expression": "discovery",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "day_04",
+      "scene": "day",
+      "tags": [
+        "explicit_acoustic_wake",
+        "day"
+      ],
+      "text": "我在，来听你的故事。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "day_05",
+      "scene": "day",
+      "tags": [
+        "explicit_acoustic_wake",
+        "day"
+      ],
+      "text": "小呆报到，今天也精神满满。",
+      "expression": "excited",
+      "suggested_caption_ms": 2820,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "day_06",
+      "scene": "day",
+      "tags": [
+        "explicit_acoustic_wake",
+        "day"
+      ],
+      "text": "叫我啦？让我听听。",
+      "expression": "curious",
+      "suggested_caption_ms": 2060,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "day_07",
+      "scene": "day",
+      "tags": [
+        "explicit_acoustic_wake",
+        "day"
+      ],
+      "text": "我在，有什么好玩的？",
+      "expression": "happy",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "day_08",
+      "scene": "day",
+      "tags": [
+        "explicit_acoustic_wake",
+        "day"
+      ],
+      "text": "嗯，今天想问什么？",
+      "expression": "curious",
+      "suggested_caption_ms": 2060,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "day_09",
+      "scene": "day",
+      "tags": [
+        "explicit_acoustic_wake",
+        "day"
+      ],
+      "text": "我在，听你慢慢讲。",
+      "expression": "listening",
+      "suggested_caption_ms": 2060,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "day_10",
+      "scene": "day",
+      "tags": [
+        "explicit_acoustic_wake",
+        "day"
+      ],
+      "text": "小呆收到，耳朵准备好啦。",
+      "expression": "wink",
+      "suggested_caption_ms": 2630,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "day_11",
+      "scene": "day",
+      "tags": [
+        "explicit_acoustic_wake",
+        "day"
+      ],
+      "text": "我在，带来什么新消息？",
+      "expression": "curious",
+      "suggested_caption_ms": 2440,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "day_12",
+      "scene": "day",
+      "tags": [
+        "explicit_acoustic_wake",
+        "day"
+      ],
+      "text": "听见啦，小呆认真听。",
+      "expression": "determined",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 85,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "evening_01",
+      "scene": "evening",
+      "tags": [
+        "explicit_acoustic_wake",
+        "evening"
+      ],
+      "text": "晚上好，小呆在。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 70,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "evening_02",
+      "scene": "evening",
+      "tags": [
+        "explicit_acoustic_wake",
+        "evening"
+      ],
+      "text": "我在，今天辛苦啦。",
+      "expression": "affection",
+      "suggested_caption_ms": 2060,
+      "gain_percent": 70,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "evening_03",
+      "scene": "evening",
+      "tags": [
+        "explicit_acoustic_wake",
+        "evening"
+      ],
+      "text": "晚上好，慢慢聊。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 70,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "evening_04",
+      "scene": "evening",
+      "tags": [
+        "explicit_acoustic_wake",
+        "evening"
+      ],
+      "text": "小呆在，听你说。",
+      "expression": "listening",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 70,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "evening_05",
+      "scene": "evening",
+      "tags": [
+        "explicit_acoustic_wake",
+        "evening"
+      ],
+      "text": "晚上好，今天有什么故事？",
+      "expression": "curious",
+      "suggested_caption_ms": 2630,
+      "gain_percent": 70,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "evening_06",
+      "scene": "evening",
+      "tags": [
+        "explicit_acoustic_wake",
+        "evening"
+      ],
+      "text": "我在，陪你聊一会儿。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 70,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "evening_07",
+      "scene": "evening",
+      "tags": [
+        "explicit_acoustic_wake",
+        "evening"
+      ],
+      "text": "晚上好，给你一个微笑。",
+      "expression": "happy",
+      "suggested_caption_ms": 2440,
+      "gain_percent": 70,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "evening_08",
+      "scene": "evening",
+      "tags": [
+        "explicit_acoustic_wake",
+        "evening"
+      ],
+      "text": "听见啦，今晚想聊什么？",
+      "expression": "curious",
+      "suggested_caption_ms": 2440,
+      "gain_percent": 70,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "night_01",
+      "scene": "night",
+      "tags": [
+        "explicit_acoustic_wake",
+        "night"
+      ],
+      "text": "嗯，我在。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1300,
+      "gain_percent": 30,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "night_02",
+      "scene": "night",
+      "tags": [
+        "explicit_acoustic_wake",
+        "night"
+      ],
+      "text": "我在，慢慢说。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1680,
+      "gain_percent": 30,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "night_03",
+      "scene": "night",
+      "tags": [
+        "explicit_acoustic_wake",
+        "night"
+      ],
+      "text": "轻轻叫，我也在。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 30,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "night_04",
+      "scene": "night",
+      "tags": [
+        "explicit_acoustic_wake",
+        "night"
+      ],
+      "text": "我会小声一点。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1680,
+      "gain_percent": 30,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "night_05",
+      "scene": "night",
+      "tags": [
+        "explicit_acoustic_wake",
+        "night"
+      ],
+      "text": "嗯，陪你一会儿。",
+      "expression": "affection",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 30,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "night_06",
+      "scene": "night",
+      "tags": [
+        "explicit_acoustic_wake",
+        "night"
+      ],
+      "text": "小呆醒着呢。",
+      "expression": "sleepy",
+      "suggested_caption_ms": 1490,
+      "gain_percent": 30,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "night_07",
+      "scene": "night",
+      "tags": [
+        "explicit_acoustic_wake",
+        "night"
+      ],
+      "text": "我在这儿，别急。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 30,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "night_08",
+      "scene": "night",
+      "tags": [
+        "explicit_acoustic_wake",
+        "night"
+      ],
+      "text": "晚上好，我在。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1680,
+      "gain_percent": 30,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "night_09",
+      "scene": "night",
+      "tags": [
+        "explicit_acoustic_wake",
+        "night"
+      ],
+      "text": "夜里也听见啦。",
+      "expression": "sleepy",
+      "suggested_caption_ms": 1680,
+      "gain_percent": 30,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "night_10",
+      "scene": "night",
+      "tags": [
+        "explicit_acoustic_wake",
+        "night"
+      ],
+      "text": "轻声说，我听着。",
+      "expression": "listening",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 30,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "night_11",
+      "scene": "night",
+      "tags": [
+        "explicit_acoustic_wake",
+        "night"
+      ],
+      "text": "嗯，小呆在呢。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1680,
+      "gain_percent": 30,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "night_12",
+      "scene": "night",
+      "tags": [
+        "explicit_acoustic_wake",
+        "night"
+      ],
+      "text": "我在，轻轻回应你。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2060,
+      "gain_percent": 30,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "waking_01",
+      "scene": "waking",
+      "tags": [
+        "explicit_acoustic_wake",
+        "waking"
+      ],
+      "text": "醒啦，我在。",
+      "expression": "sleepy",
+      "suggested_caption_ms": 1490,
+      "gain_percent": 65,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "waking_02",
+      "scene": "waking",
+      "tags": [
+        "explicit_acoustic_wake",
+        "waking"
+      ],
+      "text": "刚才打了个小盹。",
+      "expression": "sleepy",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 65,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "waking_03",
+      "scene": "waking",
+      "tags": [
+        "explicit_acoustic_wake",
+        "waking"
+      ],
+      "text": "嗯，我醒了。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1490,
+      "gain_percent": 65,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "waking_04",
+      "scene": "waking",
+      "tags": [
+        "explicit_acoustic_wake",
+        "waking"
+      ],
+      "text": "小呆醒来报到。",
+      "expression": "happy",
+      "suggested_caption_ms": 1680,
+      "gain_percent": 65,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "waking_05",
+      "scene": "waking",
+      "tags": [
+        "explicit_acoustic_wake",
+        "waking"
+      ],
+      "text": "听见啦，困意先放一边。",
+      "expression": "sleepy",
+      "suggested_caption_ms": 2440,
+      "gain_percent": 65,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "waking_06",
+      "scene": "waking",
+      "tags": [
+        "explicit_acoustic_wake",
+        "waking"
+      ],
+      "text": "我醒啦，慢慢说。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 65,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "waking_07",
+      "scene": "waking",
+      "tags": [
+        "explicit_acoustic_wake",
+        "waking"
+      ],
+      "text": "小盹结束，我在呢。",
+      "expression": "happy",
+      "suggested_caption_ms": 2060,
+      "gain_percent": 65,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "waking_08",
+      "scene": "waking",
+      "tags": [
+        "explicit_acoustic_wake",
+        "waking"
+      ],
+      "text": "刚醒，先听你说。",
+      "expression": "listening",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 65,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "waking_09",
+      "scene": "waking",
+      "tags": [
+        "explicit_acoustic_wake",
+        "waking"
+      ],
+      "text": "你叫我，我就醒啦。",
+      "expression": "happy",
+      "suggested_caption_ms": 2060,
+      "gain_percent": 65,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "waking_10",
+      "scene": "waking",
+      "tags": [
+        "explicit_acoustic_wake",
+        "waking"
+      ],
+      "text": "嗯，从小盹里回来啦。",
+      "expression": "sleepy",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 65,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "waking_11",
+      "scene": "waking",
+      "tags": [
+        "explicit_acoustic_wake",
+        "waking"
+      ],
+      "text": "小呆醒着了，你说。",
+      "expression": "listening",
+      "suggested_caption_ms": 2060,
+      "gain_percent": 65,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "waking_12",
+      "scene": "waking",
+      "tags": [
+        "explicit_acoustic_wake",
+        "waking"
+      ],
+      "text": "让我眨眨眼，我在呢。",
+      "expression": "wink",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 65,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "dark_01",
+      "scene": "dark",
+      "tags": [
+        "explicit_acoustic_wake",
+        "dark"
+      ],
+      "text": "我在，光线有点暗。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2060,
+      "gain_percent": 45,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "dark_02",
+      "scene": "dark",
+      "tags": [
+        "explicit_acoustic_wake",
+        "dark"
+      ],
+      "text": "听见啦，暗一点也能回应你。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2820,
+      "gain_percent": 45,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "dark_03",
+      "scene": "dark",
+      "tags": [
+        "explicit_acoustic_wake",
+        "dark"
+      ],
+      "text": "我在，这会儿看不太清。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2440,
+      "gain_percent": 45,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "dark_04",
+      "scene": "dark",
+      "tags": [
+        "explicit_acoustic_wake",
+        "dark"
+      ],
+      "text": "小呆在，先听你说。",
+      "expression": "listening",
+      "suggested_caption_ms": 2060,
+      "gain_percent": 45,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "dark_05",
+      "scene": "dark",
+      "tags": [
+        "explicit_acoustic_wake",
+        "dark"
+      ],
+      "text": "这里有点暗，我在呢。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 45,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "dark_06",
+      "scene": "dark",
+      "tags": [
+        "explicit_acoustic_wake",
+        "dark"
+      ],
+      "text": "我在，不用急着开灯。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 45,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "dark_07",
+      "scene": "dark",
+      "tags": [
+        "explicit_acoustic_wake",
+        "dark"
+      ],
+      "text": "听见啦，我会轻声回应。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2440,
+      "gain_percent": 45,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "dark_08",
+      "scene": "dark",
+      "tags": [
+        "explicit_acoustic_wake",
+        "dark"
+      ],
+      "text": "小呆在，声音收到啦。",
+      "expression": "happy",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 45,
+      "tts_speed": 0.96
+    },
+    {
+      "id": "offline_01",
+      "scene": "offline",
+      "tags": [
+        "explicit_acoustic_wake",
+        "offline"
+      ],
+      "text": "我在，聊天连接还没好。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2440,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "offline_02",
+      "scene": "offline",
+      "tags": [
+        "explicit_acoustic_wake",
+        "offline"
+      ],
+      "text": "小呆在，聊天还要等一等。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2630,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "offline_03",
+      "scene": "offline",
+      "tags": [
+        "explicit_acoustic_wake",
+        "offline"
+      ],
+      "text": "听见啦，我还在等聊天连接。",
+      "expression": "listening",
+      "suggested_caption_ms": 2820,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "offline_04",
+      "scene": "offline",
+      "tags": [
+        "explicit_acoustic_wake",
+        "offline"
+      ],
+      "text": "我在，这会儿先陪你待着。",
+      "expression": "affection",
+      "suggested_caption_ms": 2630,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "offline_05",
+      "scene": "offline",
+      "tags": [
+        "explicit_acoustic_wake",
+        "offline"
+      ],
+      "text": "我在，暂时还不能回答长问题。",
+      "expression": "gentle",
+      "suggested_caption_ms": 3010,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "offline_06",
+      "scene": "offline",
+      "tags": [
+        "explicit_acoustic_wake",
+        "offline"
+      ],
+      "text": "我在，连接恢复再好好聊。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2630,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "offline_07",
+      "scene": "offline",
+      "tags": [
+        "explicit_acoustic_wake",
+        "offline"
+      ],
+      "text": "小呆收到，先眨个眼。",
+      "expression": "wink",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "offline_08",
+      "scene": "offline",
+      "tags": [
+        "explicit_acoustic_wake",
+        "offline"
+      ],
+      "text": "我在，先给你一个微笑。",
+      "expression": "happy",
+      "suggested_caption_ms": 2440,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "repeat_01",
+      "scene": "repeat",
+      "tags": [
+        "explicit_acoustic_wake",
+        "repeat"
+      ],
+      "text": "还在呢，你说。",
+      "expression": "gentle",
+      "suggested_caption_ms": 1680,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "repeat_02",
+      "scene": "repeat",
+      "tags": [
+        "explicit_acoustic_wake",
+        "repeat"
+      ],
+      "text": "听见啦，不用着急。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2060,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "repeat_03",
+      "scene": "repeat",
+      "tags": [
+        "explicit_acoustic_wake",
+        "repeat"
+      ],
+      "text": "小呆在，没走开。",
+      "expression": "happy",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "repeat_04",
+      "scene": "repeat",
+      "tags": [
+        "explicit_acoustic_wake",
+        "repeat"
+      ],
+      "text": "嗯，又听见你啦。",
+      "expression": "curious",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "repeat_05",
+      "scene": "repeat",
+      "tags": [
+        "explicit_acoustic_wake",
+        "repeat"
+      ],
+      "text": "我在，又收到你的呼唤啦。",
+      "expression": "wink",
+      "suggested_caption_ms": 2630,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "repeat_06",
+      "scene": "repeat",
+      "tags": [
+        "explicit_acoustic_wake",
+        "repeat"
+      ],
+      "text": "在呢，接着说。",
+      "expression": "listening",
+      "suggested_caption_ms": 1680,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "repeat_07",
+      "scene": "repeat",
+      "tags": [
+        "explicit_acoustic_wake",
+        "repeat"
+      ],
+      "text": "收到啦，我一直在这儿。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2440,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "repeat_08",
+      "scene": "repeat",
+      "tags": [
+        "explicit_acoustic_wake",
+        "repeat"
+      ],
+      "text": "小呆在，认真听。",
+      "expression": "determined",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "no_face_01",
+      "scene": "no_face",
+      "tags": [
+        "explicit_acoustic_wake",
+        "no_face"
+      ],
+      "text": "我在，还没找到你的脸。",
+      "expression": "curious",
+      "suggested_caption_ms": 2440,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "no_face_02",
+      "scene": "no_face",
+      "tags": [
+        "explicit_acoustic_wake",
+        "no_face"
+      ],
+      "text": "听见啦，我这会儿没看见你。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2820,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "no_face_03",
+      "scene": "no_face",
+      "tags": [
+        "explicit_acoustic_wake",
+        "no_face"
+      ],
+      "text": "小呆在，镜头里还没找到你。",
+      "expression": "curious",
+      "suggested_caption_ms": 2820,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "no_face_04",
+      "scene": "no_face",
+      "tags": [
+        "explicit_acoustic_wake",
+        "no_face"
+      ],
+      "text": "我在，暂时没看清你。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "no_face_05",
+      "scene": "no_face",
+      "tags": [
+        "explicit_acoustic_wake",
+        "no_face"
+      ],
+      "text": "听见你的呼唤啦，先说吧。",
+      "expression": "listening",
+      "suggested_caption_ms": 2630,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "no_face_06",
+      "scene": "no_face",
+      "tags": [
+        "explicit_acoustic_wake",
+        "no_face"
+      ],
+      "text": "我在，不用等我看清。",
+      "expression": "gentle",
+      "suggested_caption_ms": 2250,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "no_face_07",
+      "scene": "no_face",
+      "tags": [
+        "explicit_acoustic_wake",
+        "no_face"
+      ],
+      "text": "小呆在，声音已经收到啦。",
+      "expression": "happy",
+      "suggested_caption_ms": 2630,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    },
+    {
+      "id": "no_face_08",
+      "scene": "no_face",
+      "tags": [
+        "explicit_acoustic_wake",
+        "no_face"
+      ],
+      "text": "我在，先听你说。",
+      "expression": "listening",
+      "suggested_caption_ms": 1870,
+      "gain_percent": 75,
+      "tts_speed": 1.04
+    }
+  ]
+}

@@ -48,6 +48,7 @@ typedef enum {
     BOT_EVENT_FAULT,
     BOT_EVENT_SOUND_ACTIVITY,
     BOT_EVENT_RESULT_DISMISSED,
+    BOT_EVENT_LOCAL_RESPONSE_FAILED, /* local queue/decoder failure before hardware completion */
     BOT_EVENT_COUNT
 } bot_event_kind_t;
 
@@ -69,12 +70,12 @@ typedef struct {
         struct { bot_wake_phrase_t phrase; float confidence; bool echo_safe; bool confidence_available; } wake;
         struct { bool intentional; } touch;
         struct { bool echo_safe; } utterance;
-        struct { uint32_t id; } playback; /* nonzero bot_audio playback_id, never synthesized */
+        struct { uint32_t id; bool local_response; } playback; /* real bot_audio operation */
         struct { bool connected, authenticated, encrypted; } link;
         struct { bool available; esp_err_t error; } health;
         struct { bool awake; bool sleep_supported; bool full_blackout_verified; esp_err_t error; } display;
         struct { bot_wake_status_t status; } wake_status;
-        struct { bool clock_valid; bool night; } night;
+        struct { bool clock_valid; bool night; uint8_t local_hour; } night;
         struct { uint32_t code; } fault;
         struct { bool direction_valid; float azimuth_deg, quality; } sound;
     } data;

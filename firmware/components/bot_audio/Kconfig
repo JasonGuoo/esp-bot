@@ -6,8 +6,41 @@ config BOT_AUDIO_WAKE_MODEL_NAME
     help
         Provision an Espressif-compatible ESP32-S31 WakeNet model for the entire
         phrase 小呆小呆. Runtime requires both an exact entry-name match and exact
-        full wake-word metadata. Empty/missing/wrong models report
-        WAKE_MODEL_MISSING; no stock keyword or VAD fallback is substituted.
+        full wake-word metadata. A valid dedicated model takes priority over
+        the complete-phrase MultiNet7 fallback below. No stock keyword,
+        split-name counter or VAD wake is substituted.
+
+config BOT_AUDIO_MULTINET_WAKE_FALLBACK
+    bool "Recognize complete xiao dai xiao dai locally with MultiNet7"
+    depends on IDF_TARGET_ESP32S31
+    default y
+    help
+        Uses ESP-SR's Chinese mn7_cn engine continuously when a matching
+        dedicated WakeNet is unavailable. Exactly one full command is installed
+        through the official API; no custom training or cloud service is needed.
+        Also select SR_MN_CN_MULTINET7_QUANT and SR_MN_EN_NONE in ESP Speech
+        Recognition so the pinned component packages the actual model. The
+        build rejects a missing model selection instead of shipping a placeholder.
+        CPU/RAM cost and acoustic accuracy need validation on this S31 board.
+
+config BOT_AUDIO_MULTINET_THRESHOLD_PERCENT
+    int "MultiNet full-command score threshold (percent, uncalibrated)"
+    depends on BOT_AUDIO_MULTINET_WAKE_FALLBACK
+    range 10 99
+    default 80
+    help
+        Applied both to the model and to the highest-scoring result. This is a
+        model score, not a measured confidence or a false-accept probability.
+        Higher values can reduce false wakes but also miss genuine calls.
+
+config BOT_AUDIO_MULTINET_WINDOW_MS
+    int "MultiNet detection window (ms)"
+    depends on BOT_AUDIO_MULTINET_WAKE_FALLBACK
+    range 1000 6000
+    default 3000
+    help
+        Native recognizer timeout. Detection, timeout, playback suppression,
+        permission fences and 600 ms of low-energy silence clear partial state.
 
 config BOT_AUDIO_MODEL_PARTITION
     string "Model data partition label"
@@ -41,7 +74,8 @@ config BOT_AUDIO_PLAYBACK_TAIL_MS
     default 800
     help
         Until reference synchronization is measured, wake events and VAD are
-        suppressed while the speaker plays and during this tail. Intentional
+        suppressed from playback BEGIN, while the speaker plays and during
+        this tail. PCM uplink is also withheld. Intentional
         touch/local stop can always cancel playback. Not a substitute for AEC.
 
 config BOT_AUDIO_PLAYBACK_QUEUE_FRAMES

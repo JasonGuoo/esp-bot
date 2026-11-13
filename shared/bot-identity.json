@@ -14,7 +14,11 @@
     "accept_split_keyword_events": false,
     "active_while_display_sleeping": true,
     "recognition_location": "device",
-    "recognition_model": "unprovisioned",
+    "recognition_model": "mn7_cn",
+    "recognition_backend": "multinet7_full_phrase",
+    "recognition_command": "xiao dai xiao dai",
+    "dedicated_wakenet_provisioned": false,
+    "requires_model_partition_update": true,
     "unrecognized_audio_upload": false
   }
 }

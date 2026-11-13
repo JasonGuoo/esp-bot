@@ -4,6 +4,8 @@
 
 **ESP32-S31 capability research, 2026-11-13:** [官方文档、示例与成功项目调研](docs/research/esp32-s31-standalone-agent-feasibility-2026-11-13.md) covers on-device vision, speech, custom wake, Agent execution, local replies and visual output, including the limits of a standalone deployment. This is a feasibility study, separate from this project's hardware acceptance record.
 
+**Local wake and speech update, 2026-11-13:** the default firmware now uses official **MultiNet7 `mn7_cn`** to recognize the single complete command `xiao dai xiao dai`. It also includes **104 actual Chinese speech clips**, contextual selection and matching expressions. These acknowledgements need no Mac or network. The dedicated WakeNet model is still separate; this fallback's acoustic accuracy needs board testing. Follow [拉取后构建、模型更新与测试](docs/wake-test.md): existing devices need the generated `srmodels.bin` as well as the application, with the old model partition backed up first. No partition layout or pairing data is changed.
+
 **First actual board session, 2026-11-06:** see [the hardware bring-up record](docs/board-bringup-2026-11-06.md) for what was built, flashed, observed and remains unresolved. The delivered board has an **SC101IOT** camera. Older source-only and “awaiting hardware” statements below describe their original deliveries, not the current validation record.
 
 **[语音命令、Mac Server 解题与设备图文反馈开发规格](docs/specs/server-voice-tasks/README.md)**（2026-11-11）。实板已建立认证 WSS 连接并完成一次测试语音回合。新规格包含工具执行与屏幕反馈的开发顺序、本机与实板验收，以及喇叭到货后的声音测试。[11 月 8 日实板接入记录](docs/server-integration-2026-11-08.md)

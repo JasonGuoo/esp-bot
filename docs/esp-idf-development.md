@@ -16,6 +16,12 @@ firmware/idf.sh                 为本项目配置环境并调用 idf.py
 后运行其 `install.sh esp32s31`。实际依赖版本由组件管理器决定；
 `firmware/dependencies.lock` 是本地生成文件，不应误认为已在 Git 中固定。
 
+**2026-11-13 唤醒更新：** 拉取后先按 [wake-test.md](wake-test.md) 准备已有
+`sdkconfig`，再执行构建；这一次还需要备份并更新 `model` 分区。104 条本地应答
+语音已经入库，普通构建不运行 TTS，也不下载语音合成模型。runtime 的本机检查
+现在还需链接 `bot_responses.c` 及其嵌入音频符号；使用目标工具链的正式构建会由
+组件 CMake 完成这些依赖，不要把平台头文件替身检查当成完整 IDF 编译。
+
 ```sh
 ./firmware/idf.sh --version
 ./firmware/idf.sh build

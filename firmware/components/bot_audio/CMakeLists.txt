@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "bot_audio.c" "bot_audio_afe.c"
+    SRCS "bot_audio.c" "bot_audio_afe.c" "bot_audio_keyword.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."
     REQUIRES esp_common

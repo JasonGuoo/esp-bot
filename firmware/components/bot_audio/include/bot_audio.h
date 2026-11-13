@@ -30,6 +30,17 @@ typedef enum {
 } bot_audio_wake_status_t;
 
 typedef enum {
+    BOT_AUDIO_WAKE_BACKEND_NONE = 0,
+    BOT_AUDIO_WAKE_BACKEND_WAKENET,
+    BOT_AUDIO_WAKE_BACKEND_MULTINET7,
+} bot_audio_wake_backend_t;
+
+typedef enum {
+    BOT_AUDIO_PLAYBACK_SESSION = 0,
+    BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE,
+} bot_audio_playback_source_t;
+
+typedef enum {
     BOT_AUDIO_EVENT_HEALTH = 0,
     BOT_AUDIO_EVENT_WAKE_STATUS,
     BOT_AUDIO_EVENT_WAKE_DETECTED,
@@ -49,10 +60,12 @@ typedef struct {
     esp_err_t error;
     bool available;
     bot_audio_wake_status_t wake_status;
+    bot_audio_wake_backend_t wake_backend;
     bool echo_safe;              /* false for VAD: no validated reference/AEC */
-    bool confidence_available;   /* false: AFE wake event has no calibrated confidence */
-    float confidence;
+    bool confidence_available;   /* MultiNet native score only; false for WakeNet */
+    float confidence;            /* uncalibrated model score, NOT measured accuracy */
     uint32_t playback_id;
+    bot_audio_playback_source_t playback_source; /* playback events only */
     int wake_word_index;
     bool direction_valid;         /* official DOA quality gate passed; orientation uncalibrated */
     bool speech;                  /* ESP-SR VAD; false may be a non-speech sound */
@@ -82,7 +95,9 @@ typedef void (*bot_audio_pcm_cb_t)(void *context, const bot_audio_pcm_t *frame);
 typedef struct {
     /* Strings are copied by create. Name must exactly match the flash model entry.
      * Full keyword metadata must exactly equal BOT_AUDIO_WAKE_PHRASE; no aliases,
-     * split-name counting, fallback WakeNet model, or VAD wake are allowed. */
+     * split-name counting, stock WakeNet model, or VAD wake are allowed.
+     * When absent, the enabled MultiNet7 fallback recognizes one complete
+     * xiao dai xiao dai command locally; it is not a dedicated WakeNet model. */
     const char *wake_model_name;
     const char *model_partition;
     uint8_t output_volume;        /* codec percentage, not an acoustic dB limit */
@@ -97,6 +112,7 @@ typedef struct {
 typedef struct {
     bool started, capture_running, afe_running, playback_running;
     bool session_open, pcm_delivery_enabled;
+    bool self_playback_blocked;       /* reservation, playback, tail or RX/AFE cleanup still active */
     bool codec_available, vad_available, wake_available;
     bool hardware_capture_timestamps; /* false */
     bool aec_available;               /* false; no fabricated reference */
@@ -104,6 +120,7 @@ typedef struct {
     bool voice_identity_available;    /* false; ESP-SR WakeNet is not voice identity */
     bool night_wake_supported;        /* true while started; audio has no sleep timer */
     bot_audio_wake_status_t wake_status;
+    bot_audio_wake_backend_t wake_backend;
     esp_err_t last_error;
     /* Read/result/write completion observations, never measured acoustic times. */
     int64_t last_capture_us, last_afe_result_us, last_playback_us;
@@ -118,6 +135,7 @@ typedef struct {
     uint64_t wake_detections, suppressed_wakes, playback_underruns;
     uint32_t rx_discard_frames;       /* remaining DMA FIFO fence before PCM release */
     uint32_t playback_id;
+    bot_audio_playback_source_t playback_source;
     char model_name[BOT_AUDIO_MODEL_NAME_BYTES + 1];
     char reason[BOT_AUDIO_REASON_BYTES + 1];
 } bot_audio_status_t;
@@ -144,6 +162,9 @@ esp_err_t bot_audio_destroy(bot_audio_t *audio, uint32_t timeout_ms);
  * No wake/VAD event opens this gate automatically. New gates discard the entire
  * possible RX DMA backlog before emitting raw PCM; no vad_cache is released.
  * Idempotent for an unchanged token/permission. Thread-safe, nonblocking.
+ * Playback reservation, playback itself and its tail suppress PCM delivery even
+ * when deliver_pcm=true. Session changes cancel SESSION playback only; runtime
+ * must explicitly cancel a LOCAL_RESPONSE when its own authorization expires.
  * Consumers must also reject stale tokens because revocation can race a callback
  * already in progress. Never make network/filesystem calls in these callbacks. */
 esp_err_t bot_audio_set_session(bot_audio_t *audio, const bot_audio_token_t *token,
@@ -160,6 +181,15 @@ esp_err_t bot_audio_wait_for_followup(bot_audio_t *audio, const bot_audio_token_
  * No resampling/MP3/Opus decoder is hidden here. */
 esp_err_t bot_audio_playback_begin(bot_audio_t *audio, const bot_audio_token_t *token,
                                   uint32_t *playback_id);
+/** Runtime-authorized local reply using the same sole codec/queue. Does not open
+ * a microphone session or authorize PCM. Nonzero epoch/session_id identify the
+ * runtime operation; they need not match the network audio session. set_session
+ * cannot cancel or replace it. Runtime MUST cancel it when that operation is
+ * revoked. All completion events retain this token and LOCAL_RESPONSE source.
+ * Only one playback may be reserved; a competing begin returns INVALID_STATE.
+ * BEGIN immediately blocks wake/VAD/uplink through the eventual playback tail. */
+esp_err_t bot_audio_playback_begin_local(bot_audio_t *audio, const bot_audio_token_t *runtime_token,
+                                        uint32_t *playback_id);
 esp_err_t bot_audio_playback_write(bot_audio_t *audio, uint32_t playback_id,
                                   const int16_t *samples, size_t sample_count);
 esp_err_t bot_audio_playback_end(bot_audio_t *audio, uint32_t playback_id);

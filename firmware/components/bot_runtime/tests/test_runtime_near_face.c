@@ -302,6 +302,156 @@ static void test_ambient_session_and_night_priority(void)
     bot_runtime_destroy(runtime);
 }
 
+typedef struct {
+    unsigned queued, cancelled;
+    bool fail_enqueue, hold_tail;
+    bot_runtime_snapshot_t published;
+    const bot_response_entry_t *entry;
+} response_probe_t;
+
+static void response_state(void *context, const bot_runtime_snapshot_t *state)
+{
+    ((response_probe_t *)context)->published = *state;
+}
+
+static bool queue_response(void *context, const bot_session_token_t *token,
+                            const bot_response_entry_t *entry)
+{
+    response_probe_t *probe = context;
+    /* The speaker adapter must never run before the microphone gate closes. */
+    assert(probe->published.local_response_active);
+    assert(!probe->published.audio_session_requested && !probe->published.audio_uplink_permitted);
+    assert(token->epoch == probe->published.token.epoch);
+    assert(entry && entry->pcm_samples > 0 && entry->audio_bytes > 0);
+    probe->entry = entry;
+    probe->queued++;
+    return !probe->fail_enqueue;
+}
+
+static void cancel_response(void *context)
+{
+    ((response_probe_t *)context)->cancelled++;
+}
+static bool response_tail_clear(void *context)
+{
+    return !((response_probe_t *)context)->hold_tail;
+}
+
+static void test_wake_response_ownership(void)
+{
+    bot_bus_t bus = {0};
+    bot_runtime_t *runtime = NULL;
+    bot_runtime_snapshot_t state;
+    response_probe_t probe = {0};
+    bot_runtime_config_t config = bot_runtime_default_config();
+    config.waking_ms = 50;
+    config.allow_audio_uplink = true;
+    const bot_runtime_ops_t ops = {.apply_state = response_state,
+        .play_wake_response = queue_response, .stop_output = cancel_response,
+        .wake_response_tail_clear = response_tail_clear};
+    assert(bot_runtime_create(&bus, &config, &ops, &probe, 1000, &runtime) == ESP_OK);
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_AUDIO_HEALTH,
+        .source = BOT_SOURCE_AUDIO, .observed_ms = 1010, .data.health = {.available = true}});
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_WAKE_STATUS,
+        .source = BOT_SOURCE_AUDIO, .observed_ms = 1020, .data.wake_status = {.status = BOT_WAKE_READY}});
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_NIGHT_POLICY,
+        .source = BOT_SOURCE_PLATFORM, .observed_ms = 1030,
+        .data.night = {.clock_valid = true, .night = true, .local_hour = 23}});
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_LINK_STATE,
+        .source = BOT_SOURCE_LINK, .observed_ms = 1040,
+        .data.link = {.connected = true, .authenticated = true, .encrypted = true}});
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_SOUND_ACTIVITY,
+        .source = BOT_SOURCE_AUDIO, .observed_ms = 1050});
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_WAKE_DETECTED,
+        .source = BOT_SOURCE_AUDIO, .observed_ms = 1060, .data.wake = {.phrase = BOT_WAKE_PHRASE_NONE}});
+    assert(probe.queued == 0);
+    bot_event_t wake = {.kind = BOT_EVENT_WAKE_DETECTED, .source = BOT_SOURCE_AUDIO,
+        .observed_ms = 1100, .data.wake = {.phrase = BOT_WAKE_PHRASE_XIAODAI_XIAODAI}};
+    post_event(&bus, runtime, wake);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(probe.queued == 1 && state.local_response_active);
+    assert(strcmp(probe.entry->scene, "night") == 0 && probe.entry->gain_percent <= 30);
+    assert(strcmp(state.caption, probe.entry->text) == 0);
+    assert(strcmp(state.expression, probe.entry->expression) == 0);
+    assert(!state.audio_session_requested && !state.audio_uplink_permitted);
+    const bot_session_token_t first = state.token;
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_UTTERANCE_STARTED,
+        .source = BOT_SOURCE_AUDIO, .observed_ms = 1120, .token = first});
+    bus.command = (bot_command_t){.kind = BOT_COMMAND_SET_CAPTION, .token = first,
+        .received_ms = 1125, .data.caption = "remote must not interrupt local acknowledgement"};
+    bus.has_command = true;
+    bot_runtime_step(runtime, 1125);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.utterance_active && strcmp(state.caption, probe.entry->text) == 0);
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_PLAYBACK_STARTED,
+        .source = BOT_SOURCE_AUDIO, .observed_ms = 1130, .token = first,
+        .data.playback = {.id = 41, .local_response = true}});
+    /* Going offline cannot interrupt an acknowledgement that needs no server. */
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_LINK_STATE,
+        .source = BOT_SOURCE_LINK, .observed_ms = 1150});
+    bot_runtime_step(runtime, 2000);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.conversation == BOT_CONVERSATION_SPEAKING && state.local_response_active);
+    assert(state.token.epoch == first.epoch && strcmp(state.expression, probe.entry->expression) == 0);
+    bot_event_t done = {.kind = BOT_EVENT_PLAYBACK_DONE, .source = BOT_SOURCE_AUDIO,
+        .observed_ms = 2150, .token = first, .data.playback = {.id = 41, .local_response = true}};
+    probe.hold_tail = true;
+    post_event(&bus, runtime, done);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.local_response_active && !state.audio_session_requested);
+    assert(!state.audio_uplink_permitted && strcmp(state.expression, probe.entry->expression) == 0);
+    probe.hold_tail = false;
+    bot_runtime_step(runtime, 2200);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.local_response_active && state.audio_session_requested && !state.audio_uplink_permitted);
+    assert(state.conversation == BOT_CONVERSATION_LISTENING && !state.caption[0]);
+
+    /* New turn cancellation makes a queued old playback completion powerless. */
+    wake.observed_ms = 4000;
+    post_event(&bus, runtime, wake);
+    bot_runtime_get_snapshot(runtime, &state);
+    const bot_session_token_t second = state.token;
+    assert(probe.queued == 2 && state.local_response_active);
+    done.observed_ms = 4020;
+    post_event(&bus, runtime, done);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.local_response_active && state.token.epoch == second.epoch);
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_SETTINGS_OPEN,
+        .source = BOT_SOURCE_LOCAL_UI, .observed_ms = 4040});
+    done.observed_ms = 4060;
+    done.token = second;
+    post_event(&bus, runtime, done);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.settings_open && !state.local_response_active && !state.audio_session_requested);
+    assert(state.token.session_id == 0 && probe.cancelled > 0);
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_SETTINGS_CLOSE,
+        .source = BOT_SOURCE_LOCAL_UI, .observed_ms = 4080});
+
+    /* A lost output callback has a finite recovery bound. */
+    wake.observed_ms = 7000;
+    post_event(&bus, runtime, wake);
+    bot_runtime_step(runtime, 23001);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.local_response_active && state.audio_session_requested);
+    assert(state.conversation == BOT_CONVERSATION_LISTENING);
+
+    /* Queue and pre-playback decoder failures also return to listening. */
+    probe.fail_enqueue = true;
+    wake.observed_ms = 25000;
+    post_event(&bus, runtime, wake);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.local_response_active && state.audio_session_requested);
+    probe.fail_enqueue = false;
+    wake.observed_ms = 28000;
+    post_event(&bus, runtime, wake);
+    bot_runtime_get_snapshot(runtime, &state);
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_LOCAL_RESPONSE_FAILED,
+        .source = BOT_SOURCE_SYSTEM, .observed_ms = 28020, .token = state.token});
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.local_response_active && state.audio_session_requested);
+    bot_runtime_destroy(runtime);
+}
+
 int main(void)
 {
     bot_bus_t bus = {0};
@@ -378,5 +528,6 @@ int main(void)
     test_passive_sound_reactions();
     test_ambient_sleep_and_recovery();
     test_ambient_session_and_night_priority();
+    test_wake_response_ownership();
     return 0;
 }

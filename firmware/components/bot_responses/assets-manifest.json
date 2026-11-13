@@ -1,0 +1,1078 @@
+{
+  "schema_version": 1,
+  "catalog_sha256": "58f0a84ad9f46d2d00dfff7c0b42da19c1b940d51a2e0a186b98634ba0dc1f6e",
+  "audio_file": "wake_replies.adpcm",
+  "codec": "Microsoft IMA ADPCM WAV mono data blocks (RIFF headers removed)",
+  "sample_rate": 16000,
+  "channels": 1,
+  "block_bytes": 256,
+  "samples_per_full_block": 505,
+  "nibble_order": "low then high",
+  "gain_baked_in": false,
+  "reply_count": 104,
+  "total_bytes": 1446400,
+  "total_pcm_samples": 2826704,
+  "audio_sha256": "ccad4f854803ddd8cf8e35c323db745833455b84d1f3560fc46f20948b7e8953",
+  "provenance": {
+    "engine": "sherpa-onnx",
+    "engine_version": "2.0.1",
+    "engine_license": "Apache-2.0 (upstream project; see bundled dependencies separately)",
+    "engine_url": "https://github.com/k2-fsa/sherpa-onnx",
+    "model": "Kokoro-82M-v1.1-zh",
+    "model_url": "https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh",
+    "model_license": "Apache-2.0",
+    "model_package_url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2",
+    "weights_filename": "model.int8.onnx",
+    "weights_sha256": "05d793700b0b507f760c183c0e39bdd6a97b43d32fdc7bf7b54a5179f1b11222",
+    "voices_sha256": "e64a5a581d8c2a350d848f51c3121657cd83aa07ed6109172177345874a7244c",
+    "speaker_id": 3,
+    "speaker_name": "zf_001",
+    "inference_location": "development computer CPU, offline after model download",
+    "cloud_inference_requests": 0,
+    "pretrained_model_shipped_in_firmware": false,
+    "raw_training_recordings_shipped": false
+  },
+  "entries": [
+    {
+      "id": "general_01",
+      "text": "我在呢。",
+      "offset": 0,
+      "bytes": 6400,
+      "pcm_samples": 12277,
+      "duration_ms": 768,
+      "pcm_wav_sha256": "0af0766d5952a18c23f4017a5d5c685c152e56830e51774ddfd124dd396512e9",
+      "adpcm_sha256": "0f3fd49c3bdc0aa260ff1c67219e7c7f9a0897fc1521b3af77f4af21399128e3"
+    },
+    {
+      "id": "general_02",
+      "text": "小呆在这儿。",
+      "offset": 6400,
+      "bytes": 9216,
+      "pcm_samples": 17911,
+      "duration_ms": 1120,
+      "pcm_wav_sha256": "d4dde6898dd3eec9db6a40954d2d638c674c5c9fa30760fa710dd63ad5e3d53e",
+      "adpcm_sha256": "130df9cf38b0804ccb68dc92a1ae0555edb9662cef0f5b222bbf030422b024c8"
+    },
+    {
+      "id": "general_03",
+      "text": "嗯，你说。",
+      "offset": 15616,
+      "bytes": 5888,
+      "pcm_samples": 11564,
+      "duration_ms": 723,
+      "pcm_wav_sha256": "cbe75f88874b4c76fb15f0cf1b683909b45e60086012996ba814e5d7c298f654",
+      "adpcm_sha256": "edb2d3a2f3ec832b579211f80a1dc9d6490bec3ae0657412317fb27fa1fbd26b"
+    },
+    {
+      "id": "general_04",
+      "text": "听见啦。",
+      "offset": 21504,
+      "bytes": 6912,
+      "pcm_samples": 13180,
+      "duration_ms": 824,
+      "pcm_wav_sha256": "04dc9065facc9594a3fb6d4f0ca5cd769487a46ea35e7751809f76792306be68",
+      "adpcm_sha256": "1e4cd5eda65624348521fd2694e6e4a8759f3b0bacc498718fb7de8d3e8d105e"
+    },
+    {
+      "id": "general_05",
+      "text": "叫我啦？我在。",
+      "offset": 28416,
+      "bytes": 9984,
+      "pcm_samples": 19599,
+      "duration_ms": 1225,
+      "pcm_wav_sha256": "40ff9e8b8ad538bedf984446cb81b1ecb3e26591b3d3293d8c6fb310332433b9",
+      "adpcm_sha256": "ea880e2d0b00dfeae9d8911540865240d7eccc7d2f67addd4cdca6ccfa29d668"
+    },
+    {
+      "id": "general_06",
+      "text": "收到你的呼唤啦。",
+      "offset": 38400,
+      "bytes": 13056,
+      "pcm_samples": 25697,
+      "duration_ms": 1607,
+      "pcm_wav_sha256": "898ae287aa9b844dd948a108aa6c8c45e1daf60accb1e2f4e7d47ff2d1912bba",
+      "adpcm_sha256": "421947ad10d621cbf43c2d6e9b6b5dd3d972e2b979b580b57f36a6a5e3e8ceb3"
+    },
+    {
+      "id": "general_07",
+      "text": "小呆报到。",
+      "offset": 51456,
+      "bytes": 9472,
+      "pcm_samples": 18362,
+      "duration_ms": 1148,
+      "pcm_wav_sha256": "817cfe5e33c3ffc4ce2ca8f2de824cd791969df3d89ced9d0e8bc3383c7e7995",
+      "adpcm_sha256": "e0f95431badeaf835bbe3447a65fa61c45af5b81e4552e607d120c4178612778"
+    },
+    {
+      "id": "general_08",
+      "text": "我在，慢慢说。",
+      "offset": 60928,
+      "bytes": 10496,
+      "pcm_samples": 20650,
+      "duration_ms": 1291,
+      "pcm_wav_sha256": "0c0ed040d80edf6b7a2aeac773f471275b90d494f1228b7106b3938b2c2858b6",
+      "adpcm_sha256": "59a7b38501522a55bd3eb6dad81fa268f583872cc3b8e168cf2a93dfb9ab62aa"
+    },
+    {
+      "id": "general_09",
+      "text": "嗯，小呆听着呢。",
+      "offset": 71424,
+      "bytes": 11776,
+      "pcm_samples": 22978,
+      "duration_ms": 1437,
+      "pcm_wav_sha256": "fc3ea19003c401cddc5ccc6c9f396f1b660700c238c364199bbe992126ff7048",
+      "adpcm_sha256": "2b82f0e3b7637e3d7bf4a26d91aa4974e53707ef0a89a2ef038be8b90b851506"
+    },
+    {
+      "id": "general_10",
+      "text": "嗨，我在这里。",
+      "offset": 83200,
+      "bytes": 9984,
+      "pcm_samples": 19677,
+      "duration_ms": 1230,
+      "pcm_wav_sha256": "fd0e2817a52fa06c6392e2b9e114b093824c0529878f2cadce1b113db2c64c2a",
+      "adpcm_sha256": "49902a907d54be0a8a106864a37fd5c9d9ebdb1bcf59061194df80eb5c3f4b06"
+    },
+    {
+      "id": "general_11",
+      "text": "你一叫，我就来啦。",
+      "offset": 93184,
+      "bytes": 12800,
+      "pcm_samples": 25127,
+      "duration_ms": 1571,
+      "pcm_wav_sha256": "3979d163af47a30c4af46bf84853935ff727dd19b3a57e863058b53f0bb9c034",
+      "adpcm_sha256": "25ee74de72da31f0d3e9bdb1337e499f53c12f0308048990588b8a740eb4d91c"
+    },
+    {
+      "id": "general_12",
+      "text": "我在，有什么新鲜事？",
+      "offset": 105984,
+      "bytes": 14080,
+      "pcm_samples": 27512,
+      "duration_ms": 1720,
+      "pcm_wav_sha256": "f0ab163d89e73509d4c146fc77855a1ba1c8c14c173e6f0c22b96de5d93bd945",
+      "adpcm_sha256": "0ed0c01c17e3a204b84a69639c3922b526901c8952d7df1d064e896941928af2"
+    },
+    {
+      "id": "general_13",
+      "text": "小呆准备听啦。",
+      "offset": 120064,
+      "bytes": 12544,
+      "pcm_samples": 24299,
+      "duration_ms": 1519,
+      "pcm_wav_sha256": "0cb67d0065974a8b4c093bbaf73c107e71b78b60400fe2f36c2cb6c79f666297",
+      "adpcm_sha256": "a7631d25851a9efb7ad0a3e704ef6e41a630cb74def9e959a365b12908414b91"
+    },
+    {
+      "id": "general_14",
+      "text": "听到我的名字啦。",
+      "offset": 132608,
+      "bytes": 12800,
+      "pcm_samples": 24836,
+      "duration_ms": 1553,
+      "pcm_wav_sha256": "60741c3f18d3fe2da19c28399588cd381404e913d8e52d258c247af49283a564",
+      "adpcm_sha256": "90ba5c13ce6fd52ffb00e3b6cd1d39f960001ad8acbbfb28889c35d96633d3ee"
+    },
+    {
+      "id": "general_15",
+      "text": "我在，轮到你说啦。",
+      "offset": 145408,
+      "bytes": 13056,
+      "pcm_samples": 25313,
+      "duration_ms": 1583,
+      "pcm_wav_sha256": "8e652c012d588f9996d9139f24a884610a4499c4eb5b11bac3076ecf35054920",
+      "adpcm_sha256": "06f26c1ddd7662e303761ddc7bc1207906115895b83900404be9702231bd8a5b"
+    },
+    {
+      "id": "general_16",
+      "text": "小呆收到啦。",
+      "offset": 158464,
+      "bytes": 10752,
+      "pcm_samples": 21074,
+      "duration_ms": 1318,
+      "pcm_wav_sha256": "c24923cdb52cb89dba39ac24073124bcb6d4f71ea0581aaa66a6ab84f846b8fd",
+      "adpcm_sha256": "f7ca51aa86d7b057b352f8a35b65ea29c5eb4506f5cbb0ac4713d56a99938ae0"
+    },
+    {
+      "id": "morning_01",
+      "text": "早呀，我在呢。",
+      "offset": 169216,
+      "bytes": 9728,
+      "pcm_samples": 19031,
+      "duration_ms": 1190,
+      "pcm_wav_sha256": "ba8cfb7ca179dba3b2c014b52fb8ab5efe926ef3095eb213b54937b40deea0dc",
+      "adpcm_sha256": "53f917bf6a8fc5ce16d1311ee5808f1a8f5327a4a1ea1e5c462b32b769945399"
+    },
+    {
+      "id": "morning_02",
+      "text": "早上好，小呆在。",
+      "offset": 178944,
+      "bytes": 13312,
+      "pcm_samples": 26028,
+      "duration_ms": 1627,
+      "pcm_wav_sha256": "9b4942543ca792909669e0c1b59d2a8d652154831809a80a76330db4dfb02ea3",
+      "adpcm_sha256": "861695ecf0e19ed203e02dc4695324a5f1b00bed4b3bd699d4956a74667ae0d5"
+    },
+    {
+      "id": "morning_03",
+      "text": "早安，听你说。",
+      "offset": 192256,
+      "bytes": 10496,
+      "pcm_samples": 20508,
+      "duration_ms": 1282,
+      "pcm_wav_sha256": "5350a9bd507d60b6b93e75834caf168bc3287ee6e702d0393df72703e50f82aa",
+      "adpcm_sha256": "848687baaf4acc459e8516fece84708eb01bfb00061f16892c2de96921ba7a1e"
+    },
+    {
+      "id": "morning_04",
+      "text": "新的一天，小呆报到。",
+      "offset": 202752,
+      "bytes": 14848,
+      "pcm_samples": 28984,
+      "duration_ms": 1812,
+      "pcm_wav_sha256": "e0d64846ee3847ed73270ff3db1e547bb5ab48fa4a284410d8e1ac90e8b22f6c",
+      "adpcm_sha256": "631bdc0e6c8157d0b84feb909a1251c020d5e43a742c9b0de56e2c76c9290073"
+    },
+    {
+      "id": "morning_05",
+      "text": "早呀，今天想聊什么？",
+      "offset": 217600,
+      "bytes": 14592,
+      "pcm_samples": 28684,
+      "duration_ms": 1793,
+      "pcm_wav_sha256": "f1f396d3cd20b0bb314d50ef097656bab8ff1a0edc03274b5f29717dac08fa3b",
+      "adpcm_sha256": "8718111501983126aa62895ae1b21d6ca032a8bc767a6a92d5b2ddc08d9cc517"
+    },
+    {
+      "id": "morning_06",
+      "text": "早上好，慢慢说。",
+      "offset": 232192,
+      "bytes": 13056,
+      "pcm_samples": 25597,
+      "duration_ms": 1600,
+      "pcm_wav_sha256": "eda3acffb518958738d3a5838ff0a517ad281d3494a8e7f820988f8a00754b1c",
+      "adpcm_sha256": "9f1ee2b03d48d7d28a21288d47d37bfc95ae8d474e42eefe3b308df4ad9c1503"
+    },
+    {
+      "id": "morning_07",
+      "text": "早安，我听着呢。",
+      "offset": 245248,
+      "bytes": 11520,
+      "pcm_samples": 22328,
+      "duration_ms": 1396,
+      "pcm_wav_sha256": "4855279c9ecb5d9389fb66fdd3adaabd68bbfd78e0e770f1131697dc6ed4631d",
+      "adpcm_sha256": "9a72556c0856e6c81bdaee5cbc7c69ed100f761dd76c2aa81eaec8496c186bab"
+    },
+    {
+      "id": "morning_08",
+      "text": "早呀，你叫我啦？",
+      "offset": 256768,
+      "bytes": 11776,
+      "pcm_samples": 23136,
+      "duration_ms": 1446,
+      "pcm_wav_sha256": "4192f3b25b5d882318f7196efcb79bf7e04983c53221654a27f89250088ebe83",
+      "adpcm_sha256": "ef51516727ac48b3a830dca0fb2492dc1985c4246b54ed1a7b8f2610fba61f38"
+    },
+    {
+      "id": "morning_09",
+      "text": "小呆在，早上好。",
+      "offset": 268544,
+      "bytes": 13056,
+      "pcm_samples": 25696,
+      "duration_ms": 1606,
+      "pcm_wav_sha256": "5b1481099d6ceea51742b5aecef1f8bf50651c434d9ff9563885ed92782e20b5",
+      "adpcm_sha256": "2355d8ea65855fda5e943275218539d435847a6445f44e17df4c5ee52fa71ca6"
+    },
+    {
+      "id": "morning_10",
+      "text": "早安，给你一个微笑。",
+      "offset": 281600,
+      "bytes": 14080,
+      "pcm_samples": 27485,
+      "duration_ms": 1718,
+      "pcm_wav_sha256": "6637ce206eeee94aba1ef4b80427324d6af3879a9bc2d94b3c5b4cb6eaf8ce98",
+      "adpcm_sha256": "744267d969003b45e3a459f03635895b855486b9041ffa8c5160c88deb2998b7"
+    },
+    {
+      "id": "morning_11",
+      "text": "早呀，我已经竖起耳朵啦。",
+      "offset": 295680,
+      "bytes": 16896,
+      "pcm_samples": 33184,
+      "duration_ms": 2074,
+      "pcm_wav_sha256": "8c5af5e4ab0c007f46c4278507953b2f99cb248e6ab33dfe833090f401d2515e",
+      "adpcm_sha256": "257896cc045712c1e0c68510b6e0126fdbdb318860ce41ba6bb208fc9b5b698b"
+    },
+    {
+      "id": "morning_12",
+      "text": "早上好，有什么新鲜事？",
+      "offset": 312576,
+      "bytes": 16384,
+      "pcm_samples": 31963,
+      "duration_ms": 1998,
+      "pcm_wav_sha256": "0716c4222b0aff062f20b2471be4733d3c7e1a984af8d5750c6ac91b11d14185",
+      "adpcm_sha256": "d2656da33e7526b8ee264d2d677e4e967e7d5a3d2ee04c3be17b2be4866ea288"
+    },
+    {
+      "id": "day_01",
+      "text": "我在，今天过得怎么样？",
+      "offset": 328960,
+      "bytes": 15616,
+      "pcm_samples": 30697,
+      "duration_ms": 1919,
+      "pcm_wav_sha256": "45f0ce0b5702ff98de765bf704c57a5f04f0e43d74cbdcc3398585fc65b03419",
+      "adpcm_sha256": "ed283259f41096643f1425f72f155e2004d07423da2cd6c13fed97459fc2b693"
+    },
+    {
+      "id": "day_02",
+      "text": "小呆在，想聊点什么？",
+      "offset": 344576,
+      "bytes": 15360,
+      "pcm_samples": 29834,
+      "duration_ms": 1865,
+      "pcm_wav_sha256": "610db7969dcbd1ba1c5c082338d6c5f9859861545c2e592750ec5a833ca2b458",
+      "adpcm_sha256": "85019f86548c08dc9429be90790fc3316dac8865af3a109b873feeb59ea6c698"
+    },
+    {
+      "id": "day_03",
+      "text": "听见啦，有新发现吗？",
+      "offset": 359936,
+      "bytes": 15104,
+      "pcm_samples": 29481,
+      "duration_ms": 1843,
+      "pcm_wav_sha256": "8f5d2476ad59917d12ae4414e5469512f9f4e8a9e61db799aa547678eed3ee25",
+      "adpcm_sha256": "9b86592c0bd35960f92eb40601919881a73505b1c0960e4049cb3f88efc68952"
+    },
+    {
+      "id": "day_04",
+      "text": "我在，来听你的故事。",
+      "offset": 375040,
+      "bytes": 14080,
+      "pcm_samples": 27620,
+      "duration_ms": 1727,
+      "pcm_wav_sha256": "8c74dfc9cdeb320300787be296cc7957b6f65e312ee6deaf49504522e29638e2",
+      "adpcm_sha256": "9af3f9dd4996f6c1c7e9da55633b295756617c6f4a1537bd105b9de9ccda99d9"
+    },
+    {
+      "id": "day_05",
+      "text": "小呆报到，今天也精神满满。",
+      "offset": 389120,
+      "bytes": 21248,
+      "pcm_samples": 41650,
+      "duration_ms": 2604,
+      "pcm_wav_sha256": "a091e98bc2c5cb162d8896ccb0a6f8e9b51d635a323ac8ea768bda39ba591dbe",
+      "adpcm_sha256": "8dd5bf867b50e5234239975245785fb4ae73f8a1fa2fa2b87f13d650b80e2e3b"
+    },
+    {
+      "id": "day_06",
+      "text": "叫我啦？让我听听。",
+      "offset": 410368,
+      "bytes": 13056,
+      "pcm_samples": 25447,
+      "duration_ms": 1591,
+      "pcm_wav_sha256": "410c200215dd3d0b52c0a0dca7541b7789487dd84d92867f4e582d7abc9fe4bc",
+      "adpcm_sha256": "1f44256dc153d2c63af4fd267a0437a52528b32a1d24941869ba2bef781d2160"
+    },
+    {
+      "id": "day_07",
+      "text": "我在，有什么好玩的？",
+      "offset": 423424,
+      "bytes": 13568,
+      "pcm_samples": 26758,
+      "duration_ms": 1673,
+      "pcm_wav_sha256": "91d4f32873de1f686197f2b6e18318786e6f8b4f1ec054f5aa6f6dccab0a02e4",
+      "adpcm_sha256": "c28d9e00078d978c62076efb711a7823ddb4e1ba11ece9fa6c559e85e16b00c4"
+    },
+    {
+      "id": "day_08",
+      "text": "嗯，今天想问什么？",
+      "offset": 436992,
+      "bytes": 12544,
+      "pcm_samples": 24726,
+      "duration_ms": 1546,
+      "pcm_wav_sha256": "b0ccb72786193a5045014cdecce7d8c3df5eb151e37f96673c720f0d964836b4",
+      "adpcm_sha256": "03f1791690a95d7ed3a37d58aa0ce425d3f454c78b955780d5464df14d00a6dd"
+    },
+    {
+      "id": "day_09",
+      "text": "我在，听你慢慢讲。",
+      "offset": 449536,
+      "bytes": 13824,
+      "pcm_samples": 27037,
+      "duration_ms": 1690,
+      "pcm_wav_sha256": "4b55a17773aa0a06f61b2cd4caa8628014287f3b7efc3b45e1fe44a33579c445",
+      "adpcm_sha256": "22789d0ee948264f6665da314878886bb9242029096359762601de64e9888f16"
+    },
+    {
+      "id": "day_10",
+      "text": "小呆收到，耳朵准备好啦。",
+      "offset": 463360,
+      "bytes": 19712,
+      "pcm_samples": 38728,
+      "duration_ms": 2421,
+      "pcm_wav_sha256": "ab2542b258c307361f3f20667c24707312e183685b19e6d34c441327c352df68",
+      "adpcm_sha256": "e8507c4e18d8cb10def6989e31e67e6b8db78b787d3107f672ed7a8ce56745bb"
+    },
+    {
+      "id": "day_11",
+      "text": "我在，带来什么新消息？",
+      "offset": 483072,
+      "bytes": 15616,
+      "pcm_samples": 30477,
+      "duration_ms": 1905,
+      "pcm_wav_sha256": "d229139a186593d910a355bbbc85ba9fc1814d958f18173c9b3c06057b51807a",
+      "adpcm_sha256": "40d2a7ad0e1a0966cbb6f06bcf2114777a62b57165dfe1bee416f283a7bbc909"
+    },
+    {
+      "id": "day_12",
+      "text": "听见啦，小呆认真听。",
+      "offset": 498688,
+      "bytes": 16128,
+      "pcm_samples": 31402,
+      "duration_ms": 1963,
+      "pcm_wav_sha256": "e6c91b691066e9d4f420a96830d6ee73e4ff56548116c94ccccb9042c6511477",
+      "adpcm_sha256": "ffb93688b7a9eb1bfa74ba7536f7dd456177d57a0f8483171c5f720e0390e478"
+    },
+    {
+      "id": "evening_01",
+      "text": "晚上好，小呆在。",
+      "offset": 514816,
+      "bytes": 13056,
+      "pcm_samples": 25660,
+      "duration_ms": 1604,
+      "pcm_wav_sha256": "9ac8b4081528b9336560ce427c1b5a72ceaf1f0f5d3db5fbd0bf9226d3672f78",
+      "adpcm_sha256": "59b4d2bf969fa7693d69e25543bc6277de81ffcccf476fa984754a94b4e481c3"
+    },
+    {
+      "id": "evening_02",
+      "text": "我在，今天辛苦啦。",
+      "offset": 527872,
+      "bytes": 14080,
+      "pcm_samples": 27638,
+      "duration_ms": 1728,
+      "pcm_wav_sha256": "c821b5a221744586d3b2e6d54cce954673242838c3aaac322348924fd4384ef4",
+      "adpcm_sha256": "f58983507f25f29f42b8c7f37c966756a3b1da6c40ee12c7298c1486f199c966"
+    },
+    {
+      "id": "evening_03",
+      "text": "晚上好，慢慢聊。",
+      "offset": 541952,
+      "bytes": 13312,
+      "pcm_samples": 26100,
+      "duration_ms": 1632,
+      "pcm_wav_sha256": "ebf1811e61bf844658d812d1bc17b8e1151ff6f2e5ed3e85fd5c5df7118a5860",
+      "adpcm_sha256": "d49b00e0296e394182bae41fb7f6d14b420c0f686ba960e259de57b22bc28ecb"
+    },
+    {
+      "id": "evening_04",
+      "text": "小呆在，听你说。",
+      "offset": 555264,
+      "bytes": 12544,
+      "pcm_samples": 24325,
+      "duration_ms": 1521,
+      "pcm_wav_sha256": "f6414ac50dbf7162d7c6799c03b2813b3cf096a6f44756c66e083746c9163e4e",
+      "adpcm_sha256": "25efd26974208b8b1e5dcc696557c40a29308abccbf9113c8e71226be6c2892b"
+    },
+    {
+      "id": "evening_05",
+      "text": "晚上好，今天有什么故事？",
+      "offset": 567808,
+      "bytes": 17664,
+      "pcm_samples": 34521,
+      "duration_ms": 2158,
+      "pcm_wav_sha256": "1604fdb99def9622f8897a419faa72dc5820bec9bf6fe309f50b44cae035b236",
+      "adpcm_sha256": "56a4c19fa07a3b59f04dd493a4eaf396fcb7b7d7e690152f35db328467029bc0"
+    },
+    {
+      "id": "evening_06",
+      "text": "我在，陪你聊一会儿。",
+      "offset": 585472,
+      "bytes": 13056,
+      "pcm_samples": 25458,
+      "duration_ms": 1592,
+      "pcm_wav_sha256": "0987904ac83135f0c198338734d0fffc0f9e6cdfbb2fdcbfa31e25761c651a80",
+      "adpcm_sha256": "ebaff83233f7f895f88bb936a00265c7c72e63246adbe179b12a69400a567678"
+    },
+    {
+      "id": "evening_07",
+      "text": "晚上好，给你一个微笑。",
+      "offset": 598528,
+      "bytes": 15872,
+      "pcm_samples": 30917,
+      "duration_ms": 1933,
+      "pcm_wav_sha256": "f799320d3936e1fa4882dc89572fca2f2983660140b4db1a3d3291a7b846cd15",
+      "adpcm_sha256": "53f1b92bd173af6034b8e514a75a3520d90e7b766a0312f816ff6d32bfcc292d"
+    },
+    {
+      "id": "evening_08",
+      "text": "听见啦，今晚想聊什么？",
+      "offset": 614400,
+      "bytes": 16384,
+      "pcm_samples": 32312,
+      "duration_ms": 2020,
+      "pcm_wav_sha256": "3033476a308d76c0b6930cea50da6f5f6c2ae217ca4ad4207a0a647b50eec207",
+      "adpcm_sha256": "1a63715c476346a27a146b42fff2369410841e21a4f3729387543ac5e1f8ae96"
+    },
+    {
+      "id": "night_01",
+      "text": "嗯，我在。",
+      "offset": 630784,
+      "bytes": 5888,
+      "pcm_samples": 11340,
+      "duration_ms": 709,
+      "pcm_wav_sha256": "f99b7c8a0a90b3693a9ab50bd61cfba25a5afbdc20e6e717c964b8d9d3e21fcc",
+      "adpcm_sha256": "3e269f59b2bb00e0b7142f32acaeae6e737d85775fb3060ed19b2f1233b1c0d7"
+    },
+    {
+      "id": "night_02",
+      "text": "我在，慢慢说。",
+      "offset": 636672,
+      "bytes": 11520,
+      "pcm_samples": 22432,
+      "duration_ms": 1402,
+      "pcm_wav_sha256": "0fbffbbee68b67e60582e81377680be955129c672a88936a21be96dac5ac2ba1",
+      "adpcm_sha256": "c47cab871fa50c458225d09dbf6c108e69a5c70071ceef17925f6e76266bb0ea"
+    },
+    {
+      "id": "night_03",
+      "text": "轻轻叫，我也在。",
+      "offset": 648192,
+      "bytes": 13568,
+      "pcm_samples": 26442,
+      "duration_ms": 1653,
+      "pcm_wav_sha256": "63850c7c5b3c1b9da36c26a517ce23050b0c389b1be8bf944a154f86f3b0a577",
+      "adpcm_sha256": "7149c4305e84859d14723166ee530c448bf56b8967a91a2a383e47319a5c4494"
+    },
+    {
+      "id": "night_04",
+      "text": "我会小声一点。",
+      "offset": 661760,
+      "bytes": 13056,
+      "pcm_samples": 25273,
+      "duration_ms": 1580,
+      "pcm_wav_sha256": "dd7908af90438318a4e73b06a318cdd5bbccdf142ec016db8fa9371d0a87803b",
+      "adpcm_sha256": "fd37f863ec91cd2d00c3dc571bd0c24daa31f54c5985479569d0f40e3d274d90"
+    },
+    {
+      "id": "night_05",
+      "text": "嗯，陪你一会儿。",
+      "offset": 674816,
+      "bytes": 10496,
+      "pcm_samples": 20225,
+      "duration_ms": 1265,
+      "pcm_wav_sha256": "1805ca7cda3a7f2b0a23a6df36ceca2054239c42cdde393feb8dc7e2a3c5cd15",
+      "adpcm_sha256": "51abf58a0c779dd8ad617ef0d287ccad78aa5c21d9eaa78c32e61847ff9aedeb"
+    },
+    {
+      "id": "night_06",
+      "text": "小呆醒着呢。",
+      "offset": 685312,
+      "bytes": 11776,
+      "pcm_samples": 22982,
+      "duration_ms": 1437,
+      "pcm_wav_sha256": "f1d3431fa5fa45fb921b0f2ab7a3a8a366865d7b049a798d020f38bff6d38c23",
+      "adpcm_sha256": "683dbfb74954273830f80d22cd63a7695e9a8f184ea5fdde453d8f04b850e576"
+    },
+    {
+      "id": "night_07",
+      "text": "我在这儿，别急。",
+      "offset": 697088,
+      "bytes": 11776,
+      "pcm_samples": 23125,
+      "duration_ms": 1446,
+      "pcm_wav_sha256": "f952016fd8b3afef6afecd0ef33fe569941f642b343724648ba7d0c13bd143c7",
+      "adpcm_sha256": "7a016dab69f78f6758f9f48cb197b2ee7b4e8bfc18f50f1b9d31221e6faaa841"
+    },
+    {
+      "id": "night_08",
+      "text": "晚上好，我在。",
+      "offset": 708864,
+      "bytes": 12032,
+      "pcm_samples": 23652,
+      "duration_ms": 1479,
+      "pcm_wav_sha256": "9d6701bb0e67cc967914e9bb07ed7bfee6452f178b2e01f564e2f49134009013",
+      "adpcm_sha256": "3db1050aaa884d8072f4a2d261e352049141131523b7feea8dfc567e0cfde4d9"
+    },
+    {
+      "id": "night_09",
+      "text": "夜里也听见啦。",
+      "offset": 720896,
+      "bytes": 11776,
+      "pcm_samples": 22998,
+      "duration_ms": 1438,
+      "pcm_wav_sha256": "c83fb94b554988f3be21cdaddbacf21b51908b916188152feb25c6c225bcb3c0",
+      "adpcm_sha256": "f863e41108be92e6219c9bcfce9811a94455e0114eee8053c5e0d0b4701e6be0"
+    },
+    {
+      "id": "night_10",
+      "text": "轻声说，我听着。",
+      "offset": 732672,
+      "bytes": 14080,
+      "pcm_samples": 27471,
+      "duration_ms": 1717,
+      "pcm_wav_sha256": "490a885c5b4b4f09b0b63a8bd49fc72b4b4138fcb8c34d7f38f5989ca95c3296",
+      "adpcm_sha256": "390b302a2e897d4a57f2227795f687d65110fcae9c291cc40027e64b82fbdfb7"
+    },
+    {
+      "id": "night_11",
+      "text": "嗯，小呆在呢。",
+      "offset": 746752,
+      "bytes": 11264,
+      "pcm_samples": 21943,
+      "duration_ms": 1372,
+      "pcm_wav_sha256": "d6c1cd5b0a7d484e2e9fc70753aa6ff9f2834a61f02ff08bff27469de8534ec2",
+      "adpcm_sha256": "de29b5fa3b223de57b02d9910eb9f8075b63a4cadfa1203948d4b564ac402217"
+    },
+    {
+      "id": "night_12",
+      "text": "我在，轻轻回应你。",
+      "offset": 758016,
+      "bytes": 14592,
+      "pcm_samples": 28423,
+      "duration_ms": 1777,
+      "pcm_wav_sha256": "3e1cb1578141a673e678cf9fbdbfdfd3e88902107a5fb6a524e27ddf0b91e3fd",
+      "adpcm_sha256": "bacff83919d7c738cfac4b66eab182b0a1f7a64f7f825a724e6ca28fbaea98c7"
+    },
+    {
+      "id": "waking_01",
+      "text": "醒啦，我在。",
+      "offset": 772608,
+      "bytes": 8448,
+      "pcm_samples": 16462,
+      "duration_ms": 1029,
+      "pcm_wav_sha256": "6f46472e75bff98f5a9bb8a2aac0474932404770c83980c606cb415d0ef155b2",
+      "adpcm_sha256": "e9ca64526bb6980c27cd0fa17646a27eac7bba339bc498445ec9c598f63fe07b"
+    },
+    {
+      "id": "waking_02",
+      "text": "刚才打了个小盹。",
+      "offset": 781056,
+      "bytes": 13056,
+      "pcm_samples": 25514,
+      "duration_ms": 1595,
+      "pcm_wav_sha256": "c600616e6b284db7b460bdd5eecb0f99c129969455d7b8565e1c89324343a304",
+      "adpcm_sha256": "b8f2b987f913071baca7c202d01d0ea821f597ddc314345abf99a8d698dccfcd"
+    },
+    {
+      "id": "waking_03",
+      "text": "嗯，我醒了。",
+      "offset": 794112,
+      "bytes": 7936,
+      "pcm_samples": 15374,
+      "duration_ms": 961,
+      "pcm_wav_sha256": "567f113d8ddf7672482559e9348172a8213dc5e6a7a6b24033438be6d3c0979b",
+      "adpcm_sha256": "27208c2075382b676c244687bab2492f3dd16acdc2b89dd468ef27a4e3ae7ddc"
+    },
+    {
+      "id": "waking_04",
+      "text": "小呆醒来报到。",
+      "offset": 802048,
+      "bytes": 12288,
+      "pcm_samples": 23830,
+      "duration_ms": 1490,
+      "pcm_wav_sha256": "34456c0e67f15363df2ea2f635914ce09e34b38425a3139a18aa4ca9cc50e88c",
+      "adpcm_sha256": "e54c8f9bb788b3f1469a2c68d96d3515b63f4dc43a54974931019c36a3141c13"
+    },
+    {
+      "id": "waking_05",
+      "text": "听见啦，困意先放一边。",
+      "offset": 814336,
+      "bytes": 16896,
+      "pcm_samples": 33046,
+      "duration_ms": 2066,
+      "pcm_wav_sha256": "d1dab1e5a35087587005e9e37718ea2c1c1106454da5bae5a0d67821fb3bc0fb",
+      "adpcm_sha256": "3d489525d9b3ae6f6c50bfc980c88b19f4d208e88656e87638a624612aa138b8"
+    },
+    {
+      "id": "waking_06",
+      "text": "我醒啦，慢慢说。",
+      "offset": 831232,
+      "bytes": 12288,
+      "pcm_samples": 24006,
+      "duration_ms": 1501,
+      "pcm_wav_sha256": "040ce6a8e660be26656f1ee37d4bf1ceead0ba96368f839aef7e3daef79a6b69",
+      "adpcm_sha256": "09d23604474ec1a2b2c647859c386a4a9d1e2022ff73a227a816c4366f5825eb"
+    },
+    {
+      "id": "waking_07",
+      "text": "小盹结束，我在呢。",
+      "offset": 843520,
+      "bytes": 13824,
+      "pcm_samples": 27213,
+      "duration_ms": 1701,
+      "pcm_wav_sha256": "e5ca8f180d036ac4002b39d91e1906d22ebf7e080c223e38431043580a4f6c68",
+      "adpcm_sha256": "da8d0068876c9a239aa3d1ff3d2be7afa7e09146f6ba37f13b7641c6e6fa4e46"
+    },
+    {
+      "id": "waking_08",
+      "text": "刚醒，先听你说。",
+      "offset": 857344,
+      "bytes": 12800,
+      "pcm_samples": 24790,
+      "duration_ms": 1550,
+      "pcm_wav_sha256": "206e42bae4e4d2c6de9aae46ac4536b8dd10aca5d4618c1030501fe5fef24d61",
+      "adpcm_sha256": "a07953b179e613667b07ef21fc592a6b2301231acabf296ffd7100004f8fa99c"
+    },
+    {
+      "id": "waking_09",
+      "text": "你叫我，我就醒啦。",
+      "offset": 870144,
+      "bytes": 13056,
+      "pcm_samples": 25585,
+      "duration_ms": 1600,
+      "pcm_wav_sha256": "a8b9fa8dffc6f6a1e5daa68d4ea72184a15f60d2461b1de0bd90ae62d8aa215d",
+      "adpcm_sha256": "a5e8f0f006a80e16ef289050b2cf5775b6825ac64700972c0719c3ad49ace598"
+    },
+    {
+      "id": "waking_10",
+      "text": "嗯，从小盹里回来啦。",
+      "offset": 883200,
+      "bytes": 14592,
+      "pcm_samples": 28626,
+      "duration_ms": 1790,
+      "pcm_wav_sha256": "4dd5d3b5c10a1c66dafb3de76a2d2891886204aef1741cc1e4df477cdfe85b5d",
+      "adpcm_sha256": "fbc0324c4c909bc9c9d0184dbb039c7efa97dc00368e74dbc6bffa332db67692"
+    },
+    {
+      "id": "waking_11",
+      "text": "小呆醒着了，你说。",
+      "offset": 897792,
+      "bytes": 15616,
+      "pcm_samples": 30696,
+      "duration_ms": 1919,
+      "pcm_wav_sha256": "50272e912c781e0aea33ec275ea5e44d1ce80e2796cfbb005b33da05cb6bb698",
+      "adpcm_sha256": "06845dc4f215b1b411f27f7f711f34aba9be503393dcde257f71890b67eb049a"
+    },
+    {
+      "id": "waking_12",
+      "text": "让我眨眨眼，我在呢。",
+      "offset": 913408,
+      "bytes": 17408,
+      "pcm_samples": 34273,
+      "duration_ms": 2143,
+      "pcm_wav_sha256": "17426aeb59317358b57a9ebb95b8047fd31b04b8a214274561ea4e6ece92bfbb",
+      "adpcm_sha256": "f6d5f9515101111dc346d290f9c73724a0817b82748370804b915d2570c6fe88"
+    },
+    {
+      "id": "dark_01",
+      "text": "我在，光线有点暗。",
+      "offset": 930816,
+      "bytes": 14592,
+      "pcm_samples": 28625,
+      "duration_ms": 1790,
+      "pcm_wav_sha256": "1b74ebad102ea1b6c741a8af5ff63bc1a6d09aff9464ea7d80e0bae0c9bbf28c",
+      "adpcm_sha256": "73e7dd04f2b8921372d59e97c966c922615e64ab4ea31feea7392ffe1965dd7e"
+    },
+    {
+      "id": "dark_02",
+      "text": "听见啦，暗一点也能回应你。",
+      "offset": 945408,
+      "bytes": 20224,
+      "pcm_samples": 39417,
+      "duration_ms": 2464,
+      "pcm_wav_sha256": "e672f91d702d22e23839f3f6ba467b3a29024da01979b389fb570b76d90f082e",
+      "adpcm_sha256": "43f8cfc7189e5c9d5e194095515ec9e7d543e3a3595cab66b3612e623702c6bc"
+    },
+    {
+      "id": "dark_03",
+      "text": "我在，这会儿看不太清。",
+      "offset": 965632,
+      "bytes": 17152,
+      "pcm_samples": 33432,
+      "duration_ms": 2090,
+      "pcm_wav_sha256": "7213b17b8d11020c740131f17060160f01190f32902f544c28bac23d20d7a868",
+      "adpcm_sha256": "9a870a155cf19a3a39a905c65d5e1a4fee1b66332cc5de1d21011e26b07336e3"
+    },
+    {
+      "id": "dark_04",
+      "text": "小呆在，先听你说。",
+      "offset": 982784,
+      "bytes": 14592,
+      "pcm_samples": 28533,
+      "duration_ms": 1784,
+      "pcm_wav_sha256": "e24ffe8a2deb10c422ff1a220e53894f04abc9927a971a05a1ecefc8b51fafea",
+      "adpcm_sha256": "711c6393c83d600b312a3c2ba42743fdc04d5eb88a8d608db6e0cb2d22ba0423"
+    },
+    {
+      "id": "dark_05",
+      "text": "这里有点暗，我在呢。",
+      "offset": 997376,
+      "bytes": 17664,
+      "pcm_samples": 34524,
+      "duration_ms": 2158,
+      "pcm_wav_sha256": "49ef0cbeec90d97d3ecd4367b3ca16181670c8d149c89fe982ad390ef413058e",
+      "adpcm_sha256": "41995dbe0d0a72b3cde61e3c10a73c1f8b5ddabeb04e2c4dd9bd9e62799232c0"
+    },
+    {
+      "id": "dark_06",
+      "text": "我在，不用急着开灯。",
+      "offset": 1015040,
+      "bytes": 15616,
+      "pcm_samples": 30653,
+      "duration_ms": 1916,
+      "pcm_wav_sha256": "553f572b1e24aaa1f3a4eadea3ac9c77ad39384df3d29241e646d75c2d510cea",
+      "adpcm_sha256": "228a1329aa261d58ef8f66721851ecc0b10e5ee0d6b3523834a0cb14bb4f5b43"
+    },
+    {
+      "id": "dark_07",
+      "text": "听见啦，我会轻声回应。",
+      "offset": 1030656,
+      "bytes": 18176,
+      "pcm_samples": 35467,
+      "duration_ms": 2217,
+      "pcm_wav_sha256": "54ec58aaeabc06f69cc9c6bb732777d614827845eadee53ddb047ce7d5bb57d1",
+      "adpcm_sha256": "f89176948b1b44b9edb9cdc05a61ec590587b75f81f01a4df354551ca07314e1"
+    },
+    {
+      "id": "dark_08",
+      "text": "小呆在，声音收到啦。",
+      "offset": 1048832,
+      "bytes": 16384,
+      "pcm_samples": 31927,
+      "duration_ms": 1996,
+      "pcm_wav_sha256": "0816ae0549a8e05a614a0b9fcbc90947b10f61193c8be41fa38adb7411c0928a",
+      "adpcm_sha256": "9664e1cb0b54e3255db9852d82557003d2843336c35113599ca2eddcd72f774e"
+    },
+    {
+      "id": "offline_01",
+      "text": "我在，聊天连接还没好。",
+      "offset": 1065216,
+      "bytes": 16128,
+      "pcm_samples": 31425,
+      "duration_ms": 1965,
+      "pcm_wav_sha256": "16667ad3994557caf9bcf30dbb51d1e7ca3fb0850770c52edaf2d6c421f3fa23",
+      "adpcm_sha256": "0aad476051789d2bfbc028065c858246faed64c04a1ba1778aa6b0f771982355"
+    },
+    {
+      "id": "offline_02",
+      "text": "小呆在，聊天还要等一等。",
+      "offset": 1081344,
+      "bytes": 18944,
+      "pcm_samples": 37070,
+      "duration_ms": 2317,
+      "pcm_wav_sha256": "ccf4ff4ba648aa828c30a42b486a3a7d954e2afedf635f8e7471acaba34dd672",
+      "adpcm_sha256": "d039a503b4e5bb55258ecaf5827107abb602808cfa499f4d963ed00774e686c5"
+    },
+    {
+      "id": "offline_03",
+      "text": "听见啦，我还在等聊天连接。",
+      "offset": 1100288,
+      "bytes": 19968,
+      "pcm_samples": 39364,
+      "duration_ms": 2461,
+      "pcm_wav_sha256": "fcb585b91115a3b576b27cb1a02560a0493de0261baf8acffbe1fb26891475a8",
+      "adpcm_sha256": "9dc10423f7e22a9e5675a189fa2fc039c3bd836c98fb045b6f3f7b088da2858b"
+    },
+    {
+      "id": "offline_04",
+      "text": "我在，这会儿先陪你待着。",
+      "offset": 1120256,
+      "bytes": 16896,
+      "pcm_samples": 33094,
+      "duration_ms": 2069,
+      "pcm_wav_sha256": "ce45baa4593b18da691c3cf3903774c7fcb52d00bec4081b328e7ea1189a0515",
+      "adpcm_sha256": "481e6a64bc272312280225920ad3b51bf5abd0f4fb6607860f66c4c55aceb3a8"
+    },
+    {
+      "id": "offline_05",
+      "text": "我在，暂时还不能回答长问题。",
+      "offset": 1137152,
+      "bytes": 22016,
+      "pcm_samples": 42942,
+      "duration_ms": 2684,
+      "pcm_wav_sha256": "31f9029ed1921bf08c04170a7ade3a6167f0f13ed31f93be658fd68a7092b5e0",
+      "adpcm_sha256": "272ea29cf2e53a95a289498f26eb47faaa046bda8f0832e5eaa11ce821966d2e"
+    },
+    {
+      "id": "offline_06",
+      "text": "我在，连接恢复再好好聊。",
+      "offset": 1159168,
+      "bytes": 18432,
+      "pcm_samples": 36229,
+      "duration_ms": 2265,
+      "pcm_wav_sha256": "1a59534e89b85b002ef7ac6cf3ee538348163ddd39ca33df8960c92915832f76",
+      "adpcm_sha256": "d0e77dd9f2eff11d01f8c3d0f668669fe0156feeaa5ef6288dcaf72ed10a1884"
+    },
+    {
+      "id": "offline_07",
+      "text": "小呆收到，先眨个眼。",
+      "offset": 1177600,
+      "bytes": 15616,
+      "pcm_samples": 30574,
+      "duration_ms": 1911,
+      "pcm_wav_sha256": "1f66f7e563a404aede37ccf5b57d8dfdeba7afebb5ab7d389c35f531e9996a76",
+      "adpcm_sha256": "32a09cc287a8253318c66ad8b5ef17397498f04e07b6e30679997521ff18fcd6"
+    },
+    {
+      "id": "offline_08",
+      "text": "我在，先给你一个微笑。",
+      "offset": 1193216,
+      "bytes": 15872,
+      "pcm_samples": 30901,
+      "duration_ms": 1932,
+      "pcm_wav_sha256": "8ea9a5f10524a6e981814903e71335fbd0dac75688253e1f6fffbd5333f11340",
+      "adpcm_sha256": "d51d4c3acd76146635386fd3200eb0acb38827560146da8d24c27cb039bcbdf3"
+    },
+    {
+      "id": "repeat_01",
+      "text": "还在呢，你说。",
+      "offset": 1209088,
+      "bytes": 10496,
+      "pcm_samples": 20293,
+      "duration_ms": 1269,
+      "pcm_wav_sha256": "9d91c6a4975b0e8af9b89e5195e9ecc1ad05325eecbc7e6af8fbd6583379cce4",
+      "adpcm_sha256": "b4aaa7ced86fc204be2b5c082f7d3399da492e40d98f5703b6e69a109652b068"
+    },
+    {
+      "id": "repeat_02",
+      "text": "听见啦，不用着急。",
+      "offset": 1219584,
+      "bytes": 13568,
+      "pcm_samples": 26388,
+      "duration_ms": 1650,
+      "pcm_wav_sha256": "bdfa70e43ef10070f9a903446de3c3a1af5b6fe165cb242ba6b02a8822ce8e61",
+      "adpcm_sha256": "83d2dec880450b5001d109b9e595314995ae378dba3c875ce1484230ab25b525"
+    },
+    {
+      "id": "repeat_03",
+      "text": "小呆在，没走开。",
+      "offset": 1233152,
+      "bytes": 12544,
+      "pcm_samples": 24554,
+      "duration_ms": 1535,
+      "pcm_wav_sha256": "36808f106ea831f312159de05019a18917654ef275b246b5d8a839b92f0071af",
+      "adpcm_sha256": "3157782edbcf27ee1fb38672937da06eea16f9bae4f2c04d950e99983bab3db6"
+    },
+    {
+      "id": "repeat_04",
+      "text": "嗯，又听见你啦。",
+      "offset": 1245696,
+      "bytes": 10752,
+      "pcm_samples": 20778,
+      "duration_ms": 1299,
+      "pcm_wav_sha256": "e620ff52bf91cd6fe9fd37ad31198f68ac4efe746eaea4241da427fe71203926",
+      "adpcm_sha256": "58790b761428f47766b0ed40f5e19b92981e8f2390f5ec26c5e629ddafb137ad"
+    },
+    {
+      "id": "repeat_05",
+      "text": "我在，又收到你的呼唤啦。",
+      "offset": 1256448,
+      "bytes": 17152,
+      "pcm_samples": 33375,
+      "duration_ms": 2086,
+      "pcm_wav_sha256": "d521c89a621c291fff433569294797dd580d10113047ff108f5cf0b37f300df0",
+      "adpcm_sha256": "826d4c478fc7f60f1bdf2e8ffb451ba060b49152712c216ddf0d3a2db1430c53"
+    },
+    {
+      "id": "repeat_06",
+      "text": "在呢，接着说。",
+      "offset": 1273600,
+      "bytes": 10752,
+      "pcm_samples": 20945,
+      "duration_ms": 1310,
+      "pcm_wav_sha256": "884e0031a3b2ef9354906e8d1d42251ad6e8808c174dd8169e63f177ad5ef907",
+      "adpcm_sha256": "d7d3aa17c27feb6dfcbd619aed56a1cc5c37a78925ce5e8cdc791146955dbc42"
+    },
+    {
+      "id": "repeat_07",
+      "text": "收到啦，我一直在这儿。",
+      "offset": 1284352,
+      "bytes": 14848,
+      "pcm_samples": 28818,
+      "duration_ms": 1802,
+      "pcm_wav_sha256": "ab1fbe8ed0edfcdfac5908e9c28feb1740bd5bad75098719c9d3362e5de13526",
+      "adpcm_sha256": "6d368eb305c2c54d3bbd3ae7644edfec72bb087be7ad36afa9843f49023138c7"
+    },
+    {
+      "id": "repeat_08",
+      "text": "小呆在，认真听。",
+      "offset": 1299200,
+      "bytes": 13056,
+      "pcm_samples": 25338,
+      "duration_ms": 1584,
+      "pcm_wav_sha256": "6332ba941c62e602035501d8817d89c5c81b8cce72926d7bf86ddbfaa4d18b7e",
+      "adpcm_sha256": "e8a1a410f256771321af3a67327256500bcbfc54dac748e95c4a63d783dff8a3"
+    },
+    {
+      "id": "no_face_01",
+      "text": "我在，还没找到你的脸。",
+      "offset": 1312256,
+      "bytes": 14848,
+      "pcm_samples": 28986,
+      "duration_ms": 1812,
+      "pcm_wav_sha256": "7669852404b5b0de9c4b493b3904e7b55eaedffa1186f6bbfa0b31c65c44feb9",
+      "adpcm_sha256": "4624df24cf1334dd9d3a643f67dd5cb9b3113fdb110be4b0265dccb6bb0fcb21"
+    },
+    {
+      "id": "no_face_02",
+      "text": "听见啦，我这会儿没看见你。",
+      "offset": 1327104,
+      "bytes": 18176,
+      "pcm_samples": 35373,
+      "duration_ms": 2211,
+      "pcm_wav_sha256": "cd98a5bc4849bc439bc12669e2e9a6a89169036e1d4c0d66d183e69da0b1b274",
+      "adpcm_sha256": "4017cbecfbd3bd72ca4f8b5d67a149f85f07a8a3dfcfda67607daabdcbc1bc22"
+    },
+    {
+      "id": "no_face_03",
+      "text": "小呆在，镜头里还没找到你。",
+      "offset": 1345280,
+      "bytes": 20224,
+      "pcm_samples": 39614,
+      "duration_ms": 2476,
+      "pcm_wav_sha256": "97b0f255e9bcbb0d052a8c87056067273f69f339390158625d1f8865af80dc08",
+      "adpcm_sha256": "ed8c6f4accf0bb374e4d83d2b4b0d13f6e1e0d0372af660ba215e6785ad7c6e9"
+    },
+    {
+      "id": "no_face_04",
+      "text": "我在，暂时没看清你。",
+      "offset": 1365504,
+      "bytes": 14848,
+      "pcm_samples": 29275,
+      "duration_ms": 1830,
+      "pcm_wav_sha256": "aa4819bbe283eb96b541e960c3e3d1794cb5fc465f71910ebba05e79f8aae1f6",
+      "adpcm_sha256": "993db65cbeaa95c32a4bcaab0c101ee4b16861de71e2e752afa64aeb225e6558"
+    },
+    {
+      "id": "no_face_05",
+      "text": "听见你的呼唤啦，先说吧。",
+      "offset": 1380352,
+      "bytes": 20736,
+      "pcm_samples": 40548,
+      "duration_ms": 2535,
+      "pcm_wav_sha256": "fb2f867297261200d56928ccc8c898dcf180519b9d56b599953b65d897fb677b",
+      "adpcm_sha256": "ed9a9af59f1ea4f27218cd260c894ed4fb5aa09ac5ee2dfbd54ca342dc174528"
+    },
+    {
+      "id": "no_face_06",
+      "text": "我在，不用等我看清。",
+      "offset": 1401088,
+      "bytes": 14336,
+      "pcm_samples": 28271,
+      "duration_ms": 1767,
+      "pcm_wav_sha256": "cbba70d4ac38ad126f41f94c563af07c78ab4887b7edbc1afbfbfe63b1738542",
+      "adpcm_sha256": "efcca71cc2184706410f6b2796b3b46239e4d8ab614499982b117091cd13a0ff"
+    },
+    {
+      "id": "no_face_07",
+      "text": "小呆在，声音已经收到啦。",
+      "offset": 1415424,
+      "bytes": 18944,
+      "pcm_samples": 37070,
+      "duration_ms": 2317,
+      "pcm_wav_sha256": "4a283ee57de49ad733325d5ba5318c0cb931bee896b12c206d8f3b381dee9d9f",
+      "adpcm_sha256": "f39a2038858c46167ae2891af202d474dfe12d1b63258e6c426a8786076644b6"
+    },
+    {
+      "id": "no_face_08",
+      "text": "我在，先听你说。",
+      "offset": 1434368,
+      "bytes": 12032,
+      "pcm_samples": 23712,
+      "duration_ms": 1482,
+      "pcm_wav_sha256": "7e440dbe07b4b769d1edb21c0f99c59eca0064438b3cc0efda7b3b635a394567",
+      "adpcm_sha256": "79d918337679040a2c7e9bcd515b7fc89d8ff25aa7cf63fda4f763e374f01d11"
+    }
+  ],
+  "ffmpeg_version": "ffmpeg version 7.1.5-0+deb13u1 Copyright (c) 2000-2026 the FFmpeg developers"
+}

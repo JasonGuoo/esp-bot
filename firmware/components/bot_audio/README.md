@@ -1,8 +1,8 @@
 # bot_audio：小呆本地音频运行时
 
-本组件面向 **ESP32-S31-Korvo-1 V1.1 / ESP32-S31**。它把官方 BSP、`esp_codec_dev` 和 ESP-SR 接成实际的采集、AFE、WakeNet、VAD 与可取消播放链路。没有自行实现唤醒算法，没有引入第二个麦克风读取者，也没有把 ESP32-S3 的板级配置套到 S31 上。
+本组件面向 **ESP32-S31-Korvo-1 V1.1 / ESP32-S31**。它把官方 BSP、`esp_codec_dev` 和 ESP-SR 接成采集、AFE、WakeNet/MultiNet7、VAD 与可取消播放链路。声学推理由官方引擎完成；没有引入第二个麦克风读取者，也没有把 ESP32-S3 的板级配置套到 S31 上。
 
-**首次实板接入（2026-11-06）：用户已明确要求本机构建、测试和烧录；已完成构建和烧录，并观察到麦克风非零采样。** 分项验收与当前限制以 [实板记录](../../../docs/board-bringup-2026-11-06.md) 为准；此前的未构建交付是历史状态。官方 API 的接线依据和版本见文末。自定义“小呆小呆”声学模型尚未提供，默认报告 `WAKE_MODEL_MISSING`；这不会阻止 codec 和手动会话路径启动。
+**首次实板接入（2026-11-06）：用户已明确要求本机构建、测试和烧录；已完成构建和烧录，并观察到麦克风非零采样。** 当时各项验收以 [实板记录](../../../docs/board-bringup-2026-11-06.md) 为准。**2026-11-13 新增默认离线完整“小呆小呆”MultiNet7 路径和独立本地应答播放；本次没有 ESP-IDF 工具链或实板，尚未构建、烧录或声学验收这些新增代码。** 默认使用固定 ESP-SR 2.6.1 自带的 `mn7_cn`，无需另找定制权重；有效的专用 WakeNet 仍优先。旧板需要同时更新生成的 model 镜像，单独 app-flash 不会安装新模型。
 
 ## 1. 已实现的链路与边界
 
@@ -10,16 +10,16 @@
 | --- | --- |
 | 板级初始化 | 复用 `bsp_i2c_init()`、BSP 引脚定义与官方板级双麦 TDM 示例；本组件持有 I2S/data interface |
 | codec | 唯一 ES8389 `ESP_CODEC_DEV_TYPE_IN_OUT` 实例，ADC/DAC 共用它 |
-| 采集 | 唯一采集任务读取 16 kHz、双时隙 PCM16，取第一个 ADC 时隙作为 mono |
+| 采集 | 唯一任务读取 16 kHz PCM16；四时隙 TDM 中选择 0/2 两路麦克风，第一路作为 mono |
 | 本地检测 | 官方 `afe_config_init()` → `create_from_config()`；单个采集/AFE worker 顺序 reset/feed/fetch，使用官方 WebRTC VAD |
-| 唤醒 | 加载配置的精确模型名，并要求模型的完整关键词元数据恰好为 `小呆小呆` |
+| 唤醒 | 优先精确的专用 `小呆小呆` WakeNet；否则 `mn7_cn` 只安装一条完整 `xiao dai xiao dai` 命令并持续本地识别 |
 | 会话隔离 | 四字段 token、内部 permission epoch、RX DMA 丢弃窗口与 AFE/VAD 重置 |
 | PCM 输出 | 只有会话及传输权限都开放才调用 `on_pcm`；输出原始第一 ADC 通道，带真实能力标记 |
-| 播放 | 有界 PCM 队列、begin/write/end、独立取消锁存、立即关闭功放、静音清理 DMA |
+| 播放 | 本地应答/会话播放共享同一个有界 PCM 队列；独立取消锁存、立即关闭功放、静音清理 DMA；BEGIN 至尾音后 RX/AFE 清理完成均阻断识别和上行 |
 | 健康状态 | 麦克风读取、AFE 结果、播放错误、丢帧与唤醒状态计数及单调时钟 |
 | 夜间 | 屏幕熄灭无需停止音频 owner；保持本地检测 |
 
-本组件不包含 ASR、TTS、Opus/MP3 解码、重采样、网络、磁盘录音、声纹身份识别。Mac/harness 输出音频时，应在对端转换为本组件接受的格式。识别人不是 WakeNet 的功能，`voice_identity_available` 保持 false。
+本组件不包含开放词汇 ASR、TTS、Opus/MP3 解码、重采样、网络、磁盘录音、声纹身份识别。MultiNet 是有限命令识别器，此处只识别完整唤醒词。上层本地应答或 Mac/harness 应提供符合格式的 PCM。`voice_identity_available` 保持 false。
 
 ### codec 与总线所有权
 
@@ -31,27 +31,53 @@
 
 ## 2. 唤醒与降级行为
 
-`BOT_AUDIO_WAKE_READY` 表示精确模型已加载且 AFE 已创建；是否当前有可用的麦克风读取还要看 `wake_available` 和 `BOT_AUDIO_EVENT_HEALTH`。启动初期，在第一次成功读取麦克风之前，health 与 wake_available 均为 false。
+`BOT_AUDIO_WAKE_READY` 表示一种完整关键词后端及 AFE 已初始化；`wake_backend` 明确区分 `WAKENET` 与 `MULTINET7`，`model_name` 是实际选中的条目。是否有健康麦克风读取还要看 `wake_available` 和 `BOT_AUDIO_EVENT_HEALTH`。初始化成功不等于误唤醒率通过验收。启动初期，在第一次成功读取麦克风之前，health 与 wake_available 均为 false。
 
 | 情况 | 状态与行为 |
 | --- | --- |
-| 未配置模型名 | `BOT_AUDIO_WAKE_MODEL_MISSING`，继续 codec/manual/VAD 初始化 |
-| 分区不存在、空白、目录损坏、精确条目不存在 | `BOT_AUDIO_WAKE_MODEL_MISSING`，不把损坏目录交给官方模型 mmap loader |
-| 模型元数据不是一个完整的“小呆小呆” | `BOT_AUDIO_WAKE_MODEL_MISSING`，没有默认模型替代 |
-| 模型正确且 AFE 创建成功 | `BOT_AUDIO_WAKE_READY`；健康采集后才 `wake_available=true` |
+| 专用模型名、完整关键词元数据均匹配，AFE 创建成功 | `READY / WAKENET`，不创建 MultiNet 实例 |
+| 专用模型未配置、缺失或元数据不符，但默认 `mn7_cn` 可加载 | `READY / MULTINET7`，只注册完整四音节命令 |
+| 分区不存在、空白、目录损坏或两个可用后端都缺失 | `BOT_AUDIO_WAKE_MODEL_MISSING`；保留 codec/manual/VAD，不把损坏目录交给模型 loader |
+| `mn7_cn` 格式、分配或命令注册失败 | `BOT_AUDIO_WAKE_UNAVAILABLE`；保留已创建的 AFE/VAD 与手动会话 |
 | AFE 初始化或运行失败 | `BOT_AUDIO_WAKE_UNAVAILABLE`；启动时的 AFE 失败允许保留原始采集与手动交互路径 |
 | codec 初始化失败 | `bot_audio_start()` 返回错误；主程序使用触摸/UI 降级路径 |
 
-匹配是模型条目名和完整 UTF-8 关键词的两次精确比较。官方 `esp_srmodel_get_wake_words()` 会用分号拼接多关键词；因此多个关键词、别名或两次“小呆”都不通过。只接受 `WAKENET_DETECTED`、model index 1、word index 1。**VAD 无论多强、多长都不能产生唤醒事件。**
+专用 WakeNet 路径精确比较模型条目名和整个 UTF-8 关键词。官方 `esp_srmodel_get_wake_words()` 用分号拼接多关键词，因此多个关键词或别名都不通过；只接受 `WAKENET_DETECTED`、model index 1、word index 1。
+
+默认 MultiNet 路径复用小智 `CustomWakeWord` 已采用的持续命令检测方式，但只选择 `mn7_cn`，不跨语言回退。初始化会清空内置命令，用官方 `esp_mn_commands_add(1, "xiao dai xiao dai")` 和 `esp_mn_commands_update()` 安装**唯一一条完整命令**。只接受最高候选的 command ID 1 / phrase ID 0，以及有限、达到默认 0.80 的模型分数。没有单独 `xiao dai` 命令，也没有两次短名字计数器。**VAD 无论多强、多长都不能产生唤醒事件。**
+
+检测、原生 3000 ms 超时、会话权限变化、播放抑制和连续 600 ms 低于 −48 dBFS 的静音会清理 MultiNet 状态；接受的完整唤醒默认至少间隔 2000 ms。静音判断使用官方 AFE 的 pre-AGC `data_volume`，不把它当另一个识别器。0.80 与静音阈值是待实板调整的策略起点，不能据此承诺零误触发：有限词表模型仍可能把普通声音、单独“小呆”或相似读音误判为完整短语，必须做相应负例验收。
 
 分区目录检查只做边界与基本格式保护，不是模型签名验证；修改元数据不能替代真实训练好的声学权重。模型来源及真实性由模型部署流程负责。
 
-## 3. 后续怎样安装真正的“小呆小呆”模型
+## 3. 默认模型打包与可选专用 WakeNet
+
+项目默认配置实际选择 ESP-SR 2.6.1 提供的中文 MultiNet7；不是模型文件占位：
+
+```ini
+CONFIG_MODEL_IN_FLASH=y
+CONFIG_SR_VADN_WEBRTC=y
+CONFIG_SR_MN_CN_MULTINET7_QUANT=y
+CONFIG_SR_MN_EN_NONE=y
+CONFIG_BOT_AUDIO_MULTINET_WAKE_FALLBACK=y
+CONFIG_BOT_AUDIO_MULTINET_THRESHOLD_PERCENT=80
+CONFIG_BOT_AUDIO_MULTINET_WINDOW_MS=3000
+CONFIG_BOT_AUDIO_MODEL_PARTITION="model"
+CONFIG_BOT_AUDIO_WAKE_MODEL_NAME=""
+```
+
+空的 `BOT_AUDIO_WAKE_MODEL_NAME` 只表示没有指定专用 WakeNet。官方 `movemodel.py` 会把 `mn7_cn` 和必需的 `fst` 资源打入 `build/srmodels/srmodels.bin`。固定版本中模型文件共 2,671,387 bytes，`fst` 共 9,648 bytes，加上 316 bytes 目录，最小镜像约 **2,681,351 bytes / 2.557 MiB**；现有 6 MiB model 分区可容纳这一组合。增加其它模型后按实际镜像重新核对。`fst` 本来没有 `_MODEL_INFO_`，本组件目录检查允许这一官方资源目录，同时继续检查全部文件的名称与分区边界。
+
+已有 checkout 的 `sdkconfig` 不会自动被 `sdkconfig.defaults` 覆盖。按 [本地唤醒测试准备](../../../docs/wake-test.md) 合并配置并使用项目既有 S31 环境构建。首次安装该默认模型需要更新生成的 model 镜像；只刷应用会继续读旧分区。完整 `idf.py flash` 包含模型且会覆盖之前的 model 内容；已有专用模型时保留其外部模型配置，按生成的分区表刷写，不 erase-flash、不重建 Wi-Fi/NVS 凭据。
+
+MultiNet 的实际运行 RAM、CPU 占用、与视觉并行的余量尚未实测；上述数值是 flash 文件预算，**不是运行内存**。初始化日志打印内存前后读数供上板观察，但不能代替峰值和持续负载测量。官方原生模型使用默认 PSRAM/flash 混合加载。本组件另有一个最多 4096 样本（8 KiB）、16 字节对齐的 PSRAM 重分帧块，使 AFE 和 MultiNet 的不同帧长也能接续；它及时清零、不上传、不作为唤醒前录音。运行日志报告双方真实帧长，不把未实测的 512 假定写死。
+
+### 后续部署专用“小呆小呆” WakeNet
 
 以下步骤是硬件与模型到位后的操作说明，**本次没有执行这些命令**。
 
 1. 从 Espressif 的定制唤醒流程获得 **ESP32-S31 / 当前 ESP-SR 兼容**、完整“小呆小呆”关键词的 WakeNet 权重包。保留官方实际给出的模型目录名、`_MODEL_INFO_` 与权重文件。不要使用 ESP32-S3 的导出包代替；外部模型复制路径不会替你做目标架构转换。
-2. 把官方已准备好的模型目录放在一个外部模型根目录下。该根目录可以包含子目录；官方 `movemodel.py` 递归查找非空 `_MODEL_INFO_`，以其所在目录的 basename 作为模型条目名。最小部署只放本次需要的定制 WakeNet，避免无关模型占用分区。
+2. 把官方已准备好的模型目录放在一个外部模型根目录下。该根目录可以包含子目录；官方 `movemodel.py` 递归查找非空 `_MODEL_INFO_`，以其所在目录的 basename 作为模型条目名。保留默认 MultiNet 可作缺失时回退；确认专用模型可靠后也可显式关闭 fallback 并选择中文 MultiNet None，以节省 flash。
 3. 在真实 `sdkconfig` 中设置下面四项。路径、模型名必须替换为实际值；示例中的模型名不是随仓库交付的权重。
 
 ```ini
@@ -96,9 +122,9 @@ ESP-SR 2.6.1 的 CMake 在 `CONFIG_PARTITION_TABLE_CUSTOM` 开启且找到 `mode
 
 回答后等待下一句话时，运行时调用 `bot_audio_wait_for_followup(audio, token)`。此时只有官方 AFE 同时报告语音且帧音量达到 −42 dBFS 才触发追问。沿用 AFE 的 `data_volume` 和 Mac ASR 的活跃帧门槛。已经开始的语音由 VAD 判断结束，主动触摸后的首句沿用原有灵敏度。
 
-任何 token 字段、传输权限或等待模式变化，以及关闭或重新开启会话，都会增加内部 gate epoch。新的采集窗口先丢弃至少官方 I2S DMA 容量加一个采集块的数据，再重置 AFE ring buffer 与 VAD 状态。重置返回值不成功时，检测被关闭。相同 token、权限和等待模式重复调用是幂等操作，可用于主程序每 20 ms 的 reconcile。
+任何 token 字段、传输权限或等待模式变化，以及关闭或重新开启会话，都会增加内部 gate epoch，并清理关键词部分状态。新的采集窗口先丢弃至少官方 I2S DMA 容量加一个采集块的数据，再重置 AFE ring buffer 与 VAD 状态。重置返回值不成功时，检测被关闭。相同 token、权限和等待模式重复调用是幂等操作，可用于主程序每 20 ms 的 reconcile。
 
-会话切换还会取消旧 token 的播放。VAD 的 speech 状态按 epoch 重建：如果孩子持续说话且上层更换 turn token，新 epoch 在拿到新的语音结果后重新发 START，然后用该 token 发 END。因此运行时在 WAITING 收到 START 后建立新轮次的模式可以接续。DMA 丢弃和检测重置可能截断轮次开头的少量音频，这是当前显式授权边界的取舍；没有偷偷补发旧 `vad_cache`。
+会话切换还会取消旧 token 的 `SESSION` 播放；不会自动取消 runtime 独立授权的 `LOCAL_RESPONSE`，后者由 runtime 在会话结束或替换时显式取消。VAD 的 speech 状态按 epoch 重建：如果孩子持续说话且上层更换 turn token，新 epoch 在拿到新的语音结果后重新发 START，然后用该 token 发 END。因此运行时在 WAITING 收到 START 后建立新轮次的模式可以接续。DMA 丢弃和检测重置可能截断轮次开头的少量音频，这是当前显式授权边界的取舍；没有偷偷补发旧 `vad_cache`。
 
 回调可能与撤销权限并发。接收方必须复制原始 token 并在真正发送/消费前再次比较当前 token；不得把旧回调改贴为新 token。`samples`、`event.reason` 只在回调期间有效。回调来自不同音频任务，必须线程安全、短且非阻塞，通过有界队列转交主运行时/传输线程；不能在回调里直接读写网络、文件、调用 start/stop/destroy。
 
@@ -107,6 +133,8 @@ ESP-SR 2.6.1 的 CMake 在 `CONFIG_PARTITION_TABLE_CUSTOM` 开启且找到 `mode
 输入格式固定为 **16 kHz、mono、signed PCM16 little-endian**。`bot_audio_playback_write()` 每次接受 1..320 个样本，并复制到队列；不保留调用者指针。默认 12 个队列槽，满帧约 240 ms；END 标记也占一个槽。`ESP_ERR_TIMEOUT` 是背压，发送方应在当前 token 仍有效时重试；不能当作成功发送。
 
 操作顺序：`playback_begin(token,&id)` → 多次 `playback_write(id,...)` → `playback_end(id)`。BEGIN 到首块之间保持功放关闭；首块前开启功放，再发 STARTED。正常 END 推入足够零样本，让此前 DMA 中的音频离开队列，随后关闭功放并发 DONE。ES8389 1.5.11 的 codec `set_mute` 实际写 ADC 静音位，因此正常播放结束不调用它，避免关闭麦克风。API 的 DONE 是本地提交/排空完成，不是经过外部麦克风测量的实际声学结束。
+
+本地预置应答使用 `bot_audio_playback_begin_local(audio,&runtime_token,&id)`，然后复用 write/end/cancel。它不要求网络音频 session，也不开放麦克风权限；四字段 token 由 runtime 提供，`epoch/session_id` 必须非零。STARTED/DONE/CANCELLED/FAILED 的 `playback_source` 为 `BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE`；原 begin 的事件为 `BOT_AUDIO_PLAYBACK_SESSION`。所有路径仍只允许一个播放 reservation，竞争的 begin 返回 `ESP_ERR_INVALID_STATE`。runtime 根据 source/token/id 处理真正的音频完成，不能用推测时长切到下一状态；也必须在原本地操作失效时 cancel，不能依赖网络 session 切换代替撤销。
 
 `playback_cancel(id)` 或 `playback_cancel(0)` 不经过播放队列，不会因队列已满而丢失取消。它锁存取消并直接关闭功放，worker 随后静音、清理 TX DMA、丢弃队列并报告 CANCELLED。没有关闭 ADC。若 codec 写入/静音/排空失败，会报告 FAILED；排空失败后锁住新播放，必须成功停止并重启 owner 后恢复，避免下一次解除静音播放残留数据。
 
@@ -118,9 +146,9 @@ GPIO 关闭是当前固件的及时静音路径，不能据此声称已经测得
 
 当前只有第一 ADC lane 的读取与官方 AFE 接线，没有实测的同步扬声器参考、延迟校准或回声抑制效果。因此 AEC、SE、NS、AGC 在此配置中均关闭；`aec_available=false`、`automatic_barge_in=false`、PCM `enhanced=false`、`echo_cancelled=false`。不能把输出 PCM 简单复制到一个“参考通道”就宣称 AEC 可用。
 
-播放中及默认 800 ms 尾音窗口会抑制唤醒和 VAD 事件；本地触摸/停止按钮始终可取消播放。夜间显示状态无需关闭麦克风，但真正进入深睡眠当然不能继续运行软件 WakeNet，上层不能把 UI 睡眠直接等同于芯片深睡眠。
+从 BEGIN 排队阶段开始，播放中及默认 800 ms 尾音窗口会抑制唤醒、VAD、环境声音反应与 `on_pcm`，即使上层已经授权传输。尾音结束后继续丢弃 RX DMA 容量加一个采集块，并由同一采集 owner 清理 AFE/VAD/MultiNet，才重新放行，避免把缓冲中的自播当成新语音。本地触摸/停止按钮始终可取消播放。夜间显示状态无需关闭麦克风，但真正进入深睡眠当然不能继续运行软件识别器，上层不能把 UI 睡眠直接等同于芯片深睡眠。
 
-Wake 事件的 `echo_safe=true` 只表示当时未处于自身播放或尾音屏蔽窗口；不保证环境里没有外部扬声器、电视或其他回声。VAD 事件始终 `echo_safe=false`，不得用于自动打断。AFE 没有提供校准后的唤醒置信概率，所以 `confidence_available=false`，不要显示伪造百分比分数。
+Wake 事件的 `echo_safe=true` 只表示当时自播屏蔽窗口及其缓冲清理已结束；不保证环境里没有外部扬声器、电视或其他回声。VAD 事件始终 `echo_safe=false`，不得用于自动打断。WakeNet 事件没有可用分数，因此 `confidence_available=false`；MultiNet 事件携带清理模型状态前保存的最高候选 `prob`，并设 `confidence_available=true`。它只是未校准的模型分数，便于调门槛，**不能显示为实测准确率或“正确概率”**。
 
 所有时间来自 `esp_timer_get_time()`：`read_started_us` 是进入 codec read 的时刻，`observed_us` 是读取或事件被观察到的时刻。它们不是 I2S 硬件采样时间，也不是与 Mac 同步的墙上时钟。`hardware_capture_timestamps=false`。序号在一次 start 生命周期内递增，丢弃帧也消耗序号；下游应接受间隔。
 
@@ -128,7 +156,10 @@ Wake 事件的 `echo_safe=true` 只表示当时未处于自身播放或尾音屏
 
 | 配置 | 默认值 | 含义 |
 | --- | --- | --- |
-| `CONFIG_BOT_AUDIO_WAKE_MODEL_NAME` | 空字符串 | 必须替换成真实定制模型条目名 |
+| `CONFIG_BOT_AUDIO_WAKE_MODEL_NAME` | 空字符串 | 可选专用 WakeNet 条目名；空时走默认 MultiNet7 |
+| `CONFIG_BOT_AUDIO_MULTINET_WAKE_FALLBACK` | y | 完整四音节中文命令作为离线唤醒 |
+| `CONFIG_BOT_AUDIO_MULTINET_THRESHOLD_PERCENT` | 80 | 内部模型分数门槛，待实板标定 |
+| `CONFIG_BOT_AUDIO_MULTINET_WINDOW_MS` | 3000 | 原生检测窗口；超时清理后继续识别 |
 | `CONFIG_BOT_AUDIO_MODEL_PARTITION` | `model` | 与官方自动打包/flash 路径一致 |
 | `CONFIG_BOT_AUDIO_OUTPUT_VOLUME` | 30 | codec 百分比，上限 60；不是声学分贝限值 |
 | `CONFIG_BOT_AUDIO_MIC_GAIN_DB` | 36 | 双麦输入增益，范围 0..42 dB；沿用官方该板 DOA 示例 |
@@ -152,12 +183,14 @@ Wake 事件的 `echo_safe=true` 只表示当时未处于自身播放或尾音屏
 | [esp-adf codec 1.5.11 manifest](https://github.com/espressif/esp-adf/blob/531054ea3b68c5f4ba1879b9be738ccb79866e99/components/esp_codec_dev/idf_component.yml)、[codec API](https://github.com/espressif/esp-adf/blob/531054ea3b68c5f4ba1879b9be738ccb79866e99/components/esp_codec_dev/include/esp_codec_dev.h)、[ES8389 配置](https://github.com/espressif/esp-adf/blob/531054ea3b68c5f4ba1879b9be738ccb79866e99/components/esp_codec_dev/device/include/es8389_codec.h) | codec 创建、音量/增益、全双工读写、静音/关闭 |
 | [ESP-SR S31 AFE 配置](https://github.com/espressif/esp-sr/blob/b6774a31118de04742e51ab57dd68c9001fa1091/include/esp32s31/esp_afe_config.h)、[AFE 接口](https://github.com/espressif/esp-sr/blob/b6774a31118de04742e51ab57dd68c9001fa1091/include/esp32s31/esp_afe_sr_iface.h) | 官方 S31 配置、feed/fetch、WakeNet/VAD 结果及 reset 接口 |
 | [ESP-SR 模型 loader](https://github.com/espressif/esp-sr/blob/b6774a31118de04742e51ab57dd68c9001fa1091/src/model_path.c)、[Kconfig](https://github.com/espressif/esp-sr/blob/b6774a31118de04742e51ab57dd68c9001fa1091/Kconfig.projbuild)、[CMake](https://github.com/espressif/esp-sr/blob/b6774a31118de04742e51ab57dd68c9001fa1091/CMakeLists.txt)、[movemodel.py](https://github.com/espressif/esp-sr/blob/b6774a31118de04742e51ab57dd68c9001fa1091/model/movemodel.py) | 精确模型加载、关键词元数据、外部模型打包和 flash 集成 |
+| [S31 MultiNet API](https://github.com/espressif/esp-sr/blob/b6774a31118de04742e51ab57dd68c9001fa1091/include/esp32s31/esp_mn_iface.h)、[命令注册实现](https://github.com/espressif/esp-sr/blob/b6774a31118de04742e51ab57dd68c9001fa1091/src/esp_mn_speech_commands.c)、[中文命令样例](https://github.com/espressif/esp-sr/blob/b6774a31118de04742e51ab57dd68c9001fa1091/model/multinet_model/fst/commands_cn.txt)、[模型文件](https://github.com/espressif/esp-sr/tree/b6774a31118de04742e51ab57dd68c9001fa1091/model/multinet_model/mn7_cn) | 官方中文拼音格式、完整命令注册、detect/clean/timeout、真实模型预算 |
+| [小智 CustomWakeWord](https://github.com/78/xiaozhi-esp32/blob/67ca62d4bb7d91e514d7ccd5e6977745002f41f4/main/audio/wake_words/custom_wake_word.cc) | 已有项目采用的持续 MultiNet 自定义唤醒模式；本组件不复制录音缓存和上传功能 |
 | [esp-skainet AFE wake 示例](https://github.com/espressif/esp-skainet/blob/97885d425d951b41a50747e2c33743d0e233a3e3/examples/wake_word_detection/afe/main/main.c)、[VAD 示例](https://github.com/espressif/esp-skainet/blob/97885d425d951b41a50747e2c33743d0e233a3e3/examples/voice_activity_detection/main/main.c) | 独立 feed/fetch 的官方任务模式与检测事件读取 |
 
 上述链接固定到实际阅读的 commit。官方依赖保留各自许可证；本组件的会话授权、token、取消和降级策略属于项目代码。没有引入官方 VAD 示例里的录音保存路径。
 
 ### 尚待完成的声学验证
 
-主要待验证点是 S31 工具链与固定组件版本的实际兼容性、第一 ADC 时隙是否对应目标麦克风、实际输入增益、无 MCLK 时的 ES8389/I2S 工作、DMA 几何与读取行为、内存与任务负载、真正定制唤醒模型的准确率、播音音量与停止时延。双向同时工作的 codec 能力及共享 I2C 仲裁也需要上板观察。
+此前 codec/采集/AFE 的上板结果以历史记录为准，不能把它扩展为新增功能已经验证。此次新增 MultiNet7 持续识别、本地应答来源隔离、播放后缓冲清理仍需在 S31 编译并实测；重点包括内部堆和 PSRAM 峰值、与视觉/Wi-Fi 并行的 CPU 余量、完整短语召回率、单独“小呆”及长间隔负例、实际扬声器自播、重复检测、取消与恢复。声学停止时延同样没有测量结果。
 
 AEC 和自动打断需要另行测量回声参考通道及同步关系后再实现；这份代码没有将其标记为已完成。当前 30% 默认电气音量不代表儿童耳边的安全声压，必须结合实际扬声器、外壳与距离确定使用音量。以上都是尚未执行的硬件验证项，不是本次验证结果。

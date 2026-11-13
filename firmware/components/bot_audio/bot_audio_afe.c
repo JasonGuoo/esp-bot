@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
  * Thin integration of Espressif ESP-SR 2.6.1; see README for upstream references.
- * Signal processing and inference are entirely the official AFE/WakeNet engines.
+ * Signal processing and inference use the official AFE/WakeNet/MultiNet engines.
  */
 #include "bot_audio_afe.h"
 #include <stdio.h>
@@ -10,6 +10,7 @@
 #include "esp_afe_sr_models.h"
 #include "esp_partition.h"
 #include "esp_log.h"
+#include "sdkconfig.h"
 
 /* ESP-SR's public model_path.c loader trusts its binary directory. Check the
  * directory before passing it an erased/partially provisioned flash partition.
@@ -32,22 +33,23 @@ static bool read_name(const esp_partition_t *part, size_t offset, char *name)
     return name[0] != '\0' && memchr(name, '\0', SRMODEL_STRING_LENGTH) != NULL;
 }
 
-static bool model_directory_valid(const esp_partition_t *part, const char *wanted)
+static bool model_directory_valid(const esp_partition_t *part)
 {
     uint32_t models;
     size_t cursor = 4;
     size_t first_payload = part->size;
-    bool found = false;
     if (!read_u32(part, 0, &models) || models == 0 || models > 32) return false;
     for (uint32_t i = 0; i < models; ++i) {
         char name[SRMODEL_STRING_LENGTH];
         uint32_t files;
         if (!read_name(part, cursor, name)) return false;
-        bool matching = strcmp(name, wanted) == 0;
+        /* The official MultiNet packer adds fst/commands_{cn,en}.txt. This
+         * resource directory intentionally has no _MODEL_INFO_ of its own. */
+        bool fst = strcmp(name, "fst") == 0;
         cursor += SRMODEL_STRING_LENGTH;
         if (!read_u32(part, cursor, &files) || files == 0 || files > 64) return false;
         cursor += 4;
-        bool has_info = false;
+        bool has_info = false, has_chinese_commands = false;
         for (uint32_t j = 0; j < files; ++j) {
             uint32_t offset, size;
             if (!read_name(part, cursor, name)) return false;
@@ -60,11 +62,11 @@ static bool model_directory_valid(const esp_partition_t *part, const char *wante
                 if (size > 4096) return false;
                 has_info = true;
             }
+            if (strcmp(name, "commands_cn.txt") == 0) has_chinese_commands = true;
         }
-        if (!has_info) return false;
-        found |= matching;
+        if (!has_info && !(fst && has_chinese_commands)) return false;
     }
-    return found && cursor <= first_payload;
+    return cursor <= first_payload;
 }
 
 static void reason(bot_audio_afe_t *afe, const char *text)
@@ -76,23 +78,30 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
 {
     memset(afe, 0, sizeof(*afe));
     afe->wake_status = BOT_AUDIO_WAKE_MODEL_MISSING;
-    reason(afe, "WAKE_MODEL_MISSING: exact custom model is not configured");
+    reason(afe, "WAKE_MODEL_MISSING: no usable full-phrase detector found");
     char *selected = NULL;
-    if (name[0] != '\0') {
+    char *multinet_name = NULL;
+#if CONFIG_BOT_AUDIO_MULTINET_WAKE_FALLBACK
+    const bool fallback_enabled = true;
+#else
+    const bool fallback_enabled = false;
+#endif
+    if (name[0] != '\0' || fallback_enabled) {
         const esp_partition_t *partition = esp_partition_find_first(
             ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, label);
         if (!partition) {
             reason(afe, "WAKE_MODEL_MISSING: model partition does not exist");
-        } else if (!model_directory_valid(partition, name)) {
-            reason(afe, "WAKE_MODEL_MISSING: blank, malformed, or nonmatching model directory");
+        } else if (!model_directory_valid(partition)) {
+            reason(afe, "WAKE_MODEL_MISSING: blank or malformed model directory; flash generated srmodels.bin");
         } else {
             afe->models = esp_srmodel_init(label);
             if (!afe->models) {
                 reason(afe, "WAKE_MODEL_MISSING: official model loader could not map partition");
             } else {
-                /* Exact lookup; never select the first wn9/wn9s stock model. */
+                /* Exact lookup; never select the first stock WakeNet or a
+                 * different language/domain MultiNet model. */
                 for (int i = 0; i < afe->models->num; ++i) {
-                    if (strcmp(afe->models->model_name[i], name) == 0) {
+                    if (name[0] && strcmp(afe->models->model_name[i], name) == 0) {
                         char *words = esp_srmodel_get_wake_words(afe->models, afe->models->model_name[i]);
                         /* Upstream joins multiple keywords with ';'. Whole-string
                          * equality requires exactly one complete acoustic keyword. */
@@ -100,14 +109,16 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
                             selected = afe->models->model_name[i];
                         }
                         free(words); /* get_wake_words returns an allocation */
-                        break;
                     }
+                    if (strcmp(afe->models->model_name[i], BOT_AUDIO_MULTINET_MODEL) == 0)
+                        multinet_name = afe->models->model_name[i];
                 }
                 reason(afe, selected ? "Exact full-phrase model loaded; awaiting AFE initialization"
-                                    : "WAKE_MODEL_MISSING: model metadata is not exactly 小呆小呆");
+                                    : "WAKE_MODEL_MISSING: dedicated 小呆小呆 model unavailable; checking mn7_cn");
             }
         }
     }
+    if (selected) snprintf(afe->model_name, sizeof(afe->model_name), "%s", selected);
 
     /* The AFE sees only the selected primary mic. The second mic is reserved
      * for local direction estimation; neither input is an AEC reference. */
@@ -179,13 +190,32 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
              samples, afe->iface->get_fetch_chunksize(afe->data));
     if (selected) {
         afe->wake_status = BOT_AUDIO_WAKE_READY;
-        reason(afe, "Full 小呆小呆 model ready; AEC/reference unverified, auto barge-in disabled");
+        afe->wake_backend = BOT_AUDIO_WAKE_BACKEND_WAKENET;
+        reason(afe, "Dedicated full 小呆小呆 WakeNet ready; AEC and automatic barge-in unavailable");
+    } else if (fallback_enabled && multinet_name) {
+        esp_err_t err = bot_audio_keyword_open(&afe->keyword, multinet_name, afe->feed_samples);
+        if (err == ESP_OK) {
+            afe->wake_status = BOT_AUDIO_WAKE_READY;
+            afe->wake_backend = BOT_AUDIO_WAKE_BACKEND_MULTINET7;
+            snprintf(afe->model_name, sizeof(afe->model_name), "%s", multinet_name);
+            reason(afe, "MultiNet7 full 小呆小呆 command ready; acoustic accuracy and CPU/RAM not yet validated");
+        } else {
+            /* A missing/failed keyword engine does not take manual VAD/codec
+             * interaction down with it. No alternative word is accepted. */
+            bot_audio_keyword_close(&afe->keyword);
+            afe->wake_status = BOT_AUDIO_WAKE_UNAVAILABLE;
+            reason(afe, "MultiNet7 initialization failed; manual interaction and local VAD remain available");
+            ESP_LOGE("bot_audio", "Full-phrase MultiNet7 unavailable: %s", esp_err_to_name(err));
+        }
+    } else if (fallback_enabled && afe->models) {
+        reason(afe, "WAKE_MODEL_MISSING: mn7_cn absent; build with SR_MN_CN_MULTINET7_QUANT and flash srmodels.bin");
     }
     return ESP_OK;
 }
 
 void bot_audio_afe_close(bot_audio_afe_t *afe)
 {
+    bot_audio_keyword_close(&afe->keyword);
     if (afe->data && afe->iface) afe->iface->destroy(afe->data);
     afe->data = NULL;
     afe->iface = NULL;

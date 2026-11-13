@@ -170,9 +170,20 @@ static void fail_session(const char *reason) {
     portENTER_CRITICAL(&s_lock);
     s.audio_allowed = false;
     bool active = s.active;
+    const bot_session_token_t token = s.desired;
+    const uint32_t playback = s.playback_id;
+    s.playback_id = 0;
     portEXIT_CRITICAL(&s_lock);
-    if (s_audio) bot_audio_playback_cancel(s_audio, 0);
-    if (active && s_bus) bot_bus_request_stop(s_bus, (uint32_t)(esp_timer_get_time()/1000));
+    /* Transport owns only its own playback lease. A disconnect or late error
+     * must not cancel an independent local wake acknowledgement. */
+    if (s_audio && playback) bot_audio_playback_cancel(s_audio, playback);
+    if (active && s_bus) {
+        const bot_event_t event = {.kind = BOT_EVENT_SESSION_END, .source = BOT_SOURCE_SYSTEM,
+            .observed_ms = (uint32_t)(esp_timer_get_time()/1000), .token = token};
+        /* Token matching in runtime makes a concurrent new wake immune to this
+         * old failure. A critical enqueue failure still latches the bus fault. */
+        (void)bot_bus_post(s_bus, &event, 0);
+    }
 }
 void brain_secure_network_down(void) {
     portENTER_CRITICAL(&s_lock);

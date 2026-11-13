@@ -6,6 +6,7 @@
 #include "esp_err.h"
 #include "bot_bus.h"
 #include "attention_manager.h"
+#include "bot_responses.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -50,10 +51,12 @@ typedef struct {
     bool audio_available, camera_available;
     bool display_awake, display_sleep_supported, display_full_blackout_verified;
     bool clock_valid, night_policy;
+    uint8_t local_hour;          /* valid only with clock_valid; local configured timezone */
     bool ambient_dark, ambient_sample_valid, ambient_probe;
     uint8_t ambient_luma;        /* camera image mean, not calibrated lux */
     bool critical_fault;
     bool utterance_active;
+    bool local_response_active; /* queued/playing wake acknowledgement; microphone gate closed */
     uint32_t playback_id; /* current local playback operation; zero means none */
     uint32_t last_interaction_ms;
     uint32_t rejected_commands, rejected_events;
@@ -91,6 +94,18 @@ typedef struct {
     void (*cancel_remote)(void *context, const bot_session_token_t *invalidated_token);
     /** Transport should report this receipt for every dequeued remote command. */
     void (*command_result)(void *context, uint32_t request_id, bot_command_result_t result);
+    /** Queue one embedded acknowledgement after an accepted acoustic wake.
+     * MUST be nonblocking. The runtime has already closed the capture gate and
+     * applied the selected expression/caption. false means nothing was queued.
+     * Playback events keep the supplied token and local_response=true; a queue
+     * or decoder failure posts BOT_EVENT_LOCAL_RESPONSE_FAILED from SYSTEM.
+     * stop_output MUST invalidate any queued job as well as hardware playback. */
+    bool (*play_wake_response)(void *context, const bot_session_token_t *token,
+                               const bot_response_entry_t *entry);
+    /** Short/nonblocking hardware-tail check AFTER the real local DONE event.
+     * Keeps the listening UI/session closed until self-echo cleanup finishes.
+     * NULL means that the adapter's DONE already includes the tail boundary. */
+    bool (*wake_response_tail_clear)(void *context);
     /** Optional local monotonic clock, low 32 bits of milliseconds. Called on
      * the owner task after dequeuing input and before time-dependent decisions;
      * MUST be short/nonblocking and use the same clock as producer timestamps.

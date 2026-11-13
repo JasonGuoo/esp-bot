@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #pragma once
 #include "bot_audio.h"
+#include "bot_audio_keyword.h"
 #include "esp_afe_sr_iface.h"
 #include "model_path.h"
 
@@ -10,6 +11,9 @@ typedef struct {
     esp_afe_sr_data_t *data;
     size_t feed_samples;
     bot_audio_wake_status_t wake_status;
+    bot_audio_wake_backend_t wake_backend;
+    bot_audio_keyword_t keyword;
+    char model_name[BOT_AUDIO_MODEL_NAME_BYTES + 1];
     char reason[BOT_AUDIO_REASON_BYTES + 1];
 } bot_audio_afe_t;
 
