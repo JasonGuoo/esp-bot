@@ -7,6 +7,7 @@
 #pragma once
 #include <stdbool.h>
 #include "lvgl.h"
+#include "bot_voice.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,7 +56,7 @@ typedef enum { FACE_RESULT_TEXT, FACE_RESULT_IMAGE } face_result_part_t;
 typedef void (*face_result_draw_cb_t)(face_result_part_t part, void *context);
 void face_on_result_draw(face_view_t *view, face_result_draw_cb_t callback, void *context);
 
-/** Reveal the top-right gear for five seconds; opens Settings -> Appearance. */
+/** Reveal the top-right gear for five seconds; opens Settings. */
 void face_reveal_settings(face_view_t *view);
 
 typedef enum {
@@ -78,6 +79,24 @@ void face_set_animation_active(face_view_t *view, bool active);
 typedef void (*face_theme_applied_cb_t)(const char *theme_id, void *context);
 void face_on_theme_applied(face_view_t *view,
                            face_theme_applied_cb_t callback, void *context);
+
+/** Sound controls emit intent only. Copy/enqueue the requested value and return
+ * true if queued; never perform driver, persistence or playback work here.
+ * Sliders submit on release, switches/choices submit once per change. */
+typedef bool (*face_sound_settings_request_cb_t)(const bot_voice_settings_t *settings,
+                                                 void *context);
+typedef bool (*face_sound_preview_request_cb_t)(void *context);
+void face_on_sound_settings_request(face_view_t *view,
+                                    face_sound_settings_request_cb_t callback, void *context);
+void face_on_sound_preview_request(face_view_t *view,
+                                   face_sound_preview_request_cb_t callback, void *context);
+/** Authoritative application snapshots; values are copied under the LVGL lock.
+ * Setters never invoke the request callbacks or save preferences. Diagnostics
+ * are read-only metadata, not microphone samples or a wake/session decision. */
+void face_set_sound_settings(face_view_t *view, const bot_voice_settings_t *settings);
+void face_set_sound_diagnostics(face_view_t *view, const bot_voice_diagnostics_t *diagnostics);
+/** Optional status/error feedback copied into the sound page. NULL clears it. */
+void face_set_sound_notice(face_view_t *view, const char *notice);
 
 /** Current identifiers for diagnostics and other modules; owned by component. */
 const char *face_theme_id(const face_view_t *view);

@@ -39,6 +39,11 @@ typedef struct {
     bot_focus_snapshot_t focus;
     bot_wake_status_t wake_status;
     bool settings_open;
+    bot_voice_settings_t voice_settings;
+    bool sound_preview_active; /* explicit settings audition; no microphone/session lease */
+    bool capture_ready;        /* AUDIO confirms current token's DMA fence is clear */
+    bool transport_ready;      /* LINK confirms current token's authenticated media path */
+    bool followup_armed;       /* next token allocated before follow-up speech starts */
     bool display_awake_requested, camera_requested;
     bool audio_session_requested; /* local post-wake permission, never opens a second mic */
     bool audio_uplink_permitted;  /* session + current secure link + capture availability */
@@ -56,6 +61,7 @@ typedef struct {
     uint8_t ambient_luma;        /* camera image mean, not calibrated lux */
     bool critical_fault;
     bool utterance_active;
+    bool utterance_seen;        /* sticky for this token after an accepted VAD START */
     bool local_response_active; /* queued/playing wake acknowledgement; microphone gate closed */
     uint32_t playback_id; /* current local playback operation; zero means none */
     uint32_t last_interaction_ms;
@@ -74,14 +80,15 @@ typedef struct {
 typedef struct {
     uint32_t daytime_awake_ms, daytime_drowsy_ms;
     uint32_t waking_ms;
-    /* Maximum time between meaningful local conversation transitions, including
-     * an ongoing utterance/playback. This is a hard progress bound, not silence
-     * detection; longer narration needs an explicit larger bound. */
+    /* Maximum gap between meaningful conversation transitions. A bounded,
+     * matching AUDIO hardware-write progress event also refreshes playback.
+     * Capture/network PCM and cosmetic updates never refresh this deadline. */
     uint32_t session_timeout_ms, wake_debounce_ms;
     uint32_t event_max_age_ms, command_max_age_ms;
     uint16_t max_events_per_step, max_commands_per_step;
     bool allow_audio_uplink;
     bool allow_barge_in;
+    bot_voice_settings_t voice_settings;
     attention_manager_config_t focus;
 } bot_runtime_config_t;
 
@@ -101,7 +108,12 @@ typedef struct {
      * or decoder failure posts BOT_EVENT_LOCAL_RESPONSE_FAILED from SYSTEM.
      * stop_output MUST invalidate any queued job as well as hardware playback. */
     bool (*play_wake_response)(void *context, const bot_session_token_t *token,
-                               const bot_response_entry_t *entry);
+                               const bot_response_entry_t *entry, uint8_t gain_percent);
+    /** Explicit settings-only audition, token has an epoch and no session/turn.
+     * Uses the same cancellable output owner without authorizing microphone input. */
+    bool (*play_sound_preview)(void *context, const bot_session_token_t *token,
+                              const bot_response_entry_t *entry, uint8_t gain_percent);
+    bool (*set_theme)(void *context, const char *theme_id);
     /** Short/nonblocking hardware-tail check AFTER the real local DONE event.
      * Keeps the listening UI/session closed until self-echo cleanup finishes.
      * NULL means that the adapter's DONE already includes the tail boundary. */

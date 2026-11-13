@@ -1,86 +1,76 @@
 # Main composition contract
 
-Public API is `include/bot_audio.h`. Use `bot_audio_default_config()` → set callback/context → `bot_audio_create()` → `bot_audio_start()`. `bot_audio` alone owns the I2S channels and ES8389 IN_OUT codec. Main/platform may call the idempotent `bsp_i2c_init()` for the shared bus but **must not call `bsp_audio_init()`, either BSP codec helper, or read/write that I2S peripheral**. The owner uses the official board DOA example's four-slot TDM input selection and frees its own I2S/data interface at stop.
+Public API is `include/bot_audio.h`. Load saved `bot_voice_settings_t`, use `bot_audio_default_config()` with `output_volume = muted ? 0 : volume_percent`, set callbacks/context, create, call `bot_audio_set_controls()` with the complete saved settings, then start. Pre-start requests survive the status reset; PA stays off during initialization. `bot_audio` alone owns I2S and the ES8389 IN_OUT codec. Platform may call idempotent `bsp_i2c_init()` for the shared bus, but must not call `bsp_audio_init()`, either BSP codec helper, or read/write that I2S peripheral.
 
-Callbacks post bus events; they must be short, nonblocking, thread-safe, and never call start/stop/destroy. Copy the audio token's epoch/session_id/turn_id/focus_generation explicitly to the runtime token. Copy borrowed reason/PCM before returning. All observed timestamps are `esp_timer_get_time()`; divide by 1000 for bus milliseconds. VAD events have `echo_safe=false`; automatic VAD barge-in must remain disabled. Wake events only contain the complete `小呆小呆` keyword. Wake `echo_safe=true` means the speaker/tail/DMA/AFE suppression gate was clear, not validated AEC. `wake_backend` identifies dedicated WakeNet or full-phrase MultiNet7. WakeNet has `confidence_available=false`; MultiNet7 provides its highest native score with that flag true. This score is not a calibrated probability or measured accuracy.
+Callbacks must be short, nonblocking and thread-safe; never call start/stop/destroy. Copy epoch/session_id/turn_id/focus_generation explicitly to the runtime token, and copy borrowed reason/PCM before returning. All observed times are local `esp_timer_get_time()`; divide by 1000 for bus milliseconds. VAD has `echo_safe=false`; automatic VAD barge-in remains disabled. Wake events only carry the complete `小呆小呆`. Wake `echo_safe=true` means local playback/tail/DMA/AFE suppression was clear, not validated AEC. WakeNet has no available score; MN's native score is uncalibrated, never measured accuracy.
 
-Reconcile `bot_audio_set_session(audio, &original_runtime_token, snapshot.audio_uplink_permitted)` when audio_session_requested is true. Pass NULL otherwise. `audio_session_requested` authorizes local VAD; only `audio_uplink_permitted` releases postauthorization PCM. For the current plaintext/local-only link, keep `on_pcm=NULL` and `deliver_pcm=false`. Stop output via `bot_audio_playback_cancel(audio, 0)`; this does not close the microphone and its latch does not depend on queue space. Sleeping/night UI states must leave this audio owner started.
+## Capture lease and follow-up
 
-Repeated reconcile calls with unchanged token/permission are idempotent. A changed token or permission flushes the old RX window and resets AFE/VAD before events for the new token; the keyword engine also drops partial state across gate changes. If WAITING → utterance START causes runtime to allocate a new turn token, continuing speech can emit START again under that new token and later END under the same token. Runtime should ignore a duplicate START when that utterance is already active. Do not substitute the runtime's newest token into an older callback. Receivers must reject stale callbacks already in flight at revocation.
+Reconcile `bot_audio_set_session_ex(audio, &original_runtime_token, &options)` only while runtime authorizes that session; pass NULL/NULL to close. Its options are explicit:
 
-## Local acknowledgement playback
+| Option | Meaning |
+| --- | --- |
+| `deliver_pcm` | Current authenticated transport is ready to consume this token's PCM |
+| `retain_start` | Permit bounded RAM-only capture after this token's RX/AFE fence |
+| `waiting_for_followup` | Use stricter VAD onset while waiting for the next sentence |
+| `local_commands` | Permit the fixed local control command graph after authorization |
 
-Runtime alone decides whether a complete wake should receive a local reply. Use
-`bot_audio_playback_begin_local(audio, &runtime_token, &id)`, then the existing
-`bot_audio_playback_write`, `bot_audio_playback_end` and `bot_audio_playback_cancel`.
-The four-field token has nonzero epoch/session_id but need not match an open
-audio/network session. This API never opens the microphone permission gate.
-Local write/end validate the playback ID, so an unrelated WSS session transition
-cannot invalidate or replace the greeting.
+LISTENING/WAITING may enable retain/commands. THINKING/REPLY_PRESENT keep the session with all three capture permissions false so SESSION playback still works. Legacy `set_session` enables neither retention nor fixed commands. LAN v1 diagnostics never authorize audio.
 
-All playback events contain `playback_source`: `BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE`
-or `BOT_AUDIO_PLAYBACK_SESSION`. Copy this distinction into bus events and match
-the original token plus ID. Wait for real STARTED/DONE/FAILED/CANCELLED events;
-do not guess completion from text length. `set_session` only auto-cancels the
-SESSION kind. Runtime must call cancel when a local operation ends, is replaced,
-or loses authorization. Both kinds share a single codec and bounded queue;
-another begin is refused while either reservation is active.
+Main enables retain only with an available authenticated encrypted WSS control connection that can negotiate this turn's media; this is separate from actual media readiness. Offline commands remain enabled with retain false, so a long local command is not interrupted by an irrelevant upload-buffer overflow. The PCM media transport itself remains the project's existing negotiated policy.
 
-From successful BEGIN through the 800 ms default tail, every playback blocks
-wake, VAD and `on_pcm`, including the pre-first-frame queue interval. After the
-tail the capture owner discards one complete RX DMA capacity plus an input frame
-and resets AFE/VAD/keyword state before release. This also applies when the
-network permission was already true. Runtime should keep its audio session/uplink
-closed during the local greeting and open it after completion. There is no AEC
-or voice barge-in; explicit touch/cancel remains available.
+Identical requests are idempotent. New token/close changes capture epoch, discards a full RX DMA capacity plus one block, then resets AFE/VAD before `CAPTURE_READY.available=true`. This is local readiness, not network readiness. Same-token transport/waiting changes preserve the fence. Runtime prepares the next token **before WAITING**; VAD START consumes that token without incrementing it. Transport may negotiate it in advance; delivery stays false until local speech and all permissions are ready. Never relabel old PCM. Receivers must still reject stale callbacks already in flight at revocation.
 
-Startup reports HEALTH unavailable until the first successful microphone read. Missing model is nonfatal; codec failure is a start error. AFE failure can leave raw/manual capture available with VAD/wake unavailable. Capability flags for AEC, automatic barge-in, hardware capture timestamps, and voice identity remain false. `stop(timeout_ms)` accepts 0..10000 and retains resources on timeout; retry later, never free a live instance. Destroy only after external producer/status callers are quiesced.
+Retained PCM is limited to complete frames within `CONFIG_BOT_AUDIO_START_BUFFER_MS` (default 800 ms, 25,600 PCM bytes plus frame metadata) in PSRAM. Both initial LISTENING and WAITING roll the latest authorized window until VAD START; silent network negotiation can exceed the window without failing. VAD START protects the onset with a 256 ms local observation-time margin. If waiting for transport would overwrite protected audio, the owner wipes and latches that token closed, then emits `BUFFER_OVERFLOW`; runtime cancels it and offers a retry. This depends on functioning VAD and is not a completeness guarantee when VAD misses speech.
 
-## Dependency and model configuration
+Up to four retained frames are delivered per capture iteration before current audio, retaining original sequence/token/read timestamps. Every callback rechecks authorization. Stop, playback BEGIN, token changes, retain revocation, delivery revocation, command consumption and read failures wipe the window. Native `vad_cache` is never exported. `buffered_drops` counts known protected-onset loss; ordinary pre-onset rolling eviction is excluded.
 
-- BSP: `espressif/esp32_s31_korvo_1 =1.1.0`.
-- Codec: `espressif/esp_codec_dev =1.5.11`, compatible with BSP's `~1.5` range.
-- DOA: `espressif/esp_apa_doa =1.0.0`, licensed for use with Espressif products; see its component license.
-- Speech: `espressif/esp-sr =2.6.1`.
-- Project baseline: IDF >=6.1, target `esp32s31`; `CONFIG_CODEC_ES8389_SUPPORT=y`; `CONFIG_BSP_ERROR_CHECK=n` for recoverable BSP returns.
-- Real ESP-SR defaults: `CONFIG_MODEL_IN_FLASH=y`, `CONFIG_SR_VADN_WEBRTC=y`, `CONFIG_SR_MN_CN_MULTINET7_QUANT=y`, `CONFIG_SR_MN_EN_NONE=y`.
-- Project defaults: `CONFIG_BOT_AUDIO_MODEL_PARTITION="model"`, `CONFIG_BOT_AUDIO_WAKE_MODEL_NAME=""`, `CONFIG_BOT_AUDIO_MULTINET_WAKE_FALLBACK=y`, threshold percent 80, native window 3000 ms.
-- Partition: parent owns the partition table; `model,data,spiffs,0x810000,0x600000` is the planned 6 MiB model region on 16 MiB flash. It holds the official raw SR model image and must not be mounted/formatted as SPIFFS.
+`LOCAL_COMMAND` carries a shared `bot_voice_command_t` and uncalibrated score. Before emitting it the owner latches that token's PCM closed and wipes retained audio. Runtime alone executes/rejects it, cancels already-sent prefixes remotely, and establishes a new token when appropriate. Repeated same-token reconcile cannot reopen a consumed/overflowed turn. Passive mode has only the complete wake phrase; commands never start a conversation. Playback blocks these commands too: there is no acoustic stop/barge-in promise.
 
-The default full-phrase fallback uses the actual `mn7_cn` packaged by ESP-SR
-2.6.1, plus its `fst` resources. It needs no custom vendor export and never
-registers a standalone `xiao dai`. Its only command is ID 1, phrase ID 0,
-`xiao dai xiao dai`. It continuously calls the official detector without first
-requiring a different WakeNet keyword. A single aligned PSRAM frame handles
-AFE/MultiNet frame-size differences; both remain 16 kHz mono PCM16.
+Sleeping/night display states leave the owner started. Closing settings or Stop must revoke the capture session and any preview/local-response lease in runtime.
 
-A separately provisioned compatible S31 WakeNet with exact full `小呆小呆`
-metadata remains preferred. Set its exact model name and
-`CONFIG_ESP_SR_EXTERNAL_MODEL_PATH` while keeping the generated image intact.
-No stock wake word becomes an alias. If neither backend is usable, report
-missing/unavailable and retain manual interaction. See README for immutable
-official API/model sources and the XiaoZhi continuous-custom-wake precedent.
+## Settings and bounded diagnostics
 
-First-board update: the selected one-mic path requires equal feed/fetch block
-sizes and executes official reset/feed/fetch calls in the single capture worker.
-Playback remains independent. AFE freshness comes from successful processing,
-not just microphone reads. ES8389 1.5.11's `set_mute` writes the ADC mute bits;
-normal speaker silence therefore uses PA GPIO 7 and TX zero flushing, preserving
-the microphone. Codec close may still mute ADC after capture has stopped.
-Keep the official AFE ring capacity. Its reserved onset history includes both
-`vad_min_speech_ms` and `vad_delay_ms` (256 ms with this configuration), plus
-room for incoming PCM. Four or eight 32 ms frames alone eventually leave no
-feed space. This history is not exported. A zero feed result still allows a
-bounded fetch so temporary backpressure cannot permanently stop draining work.
+`bot_audio_set_controls()` queues a copy; the caller performs no codec/model I/O. Only the capture owner applies volume (0..60), mute and native wake threshold (40..99). Equal requests remain no-ops after errors; an explicit edit produces a new revision. `CONTROLS_APPLIED` reports revision/error; status exposes requested/applied values and revisions. Platform owns NVS persistence. `night_gain_percent` and `spoken_answers` are retained here but acted on by the composing response player/Mac policy.
 
-**Flash integration:** ESP-SR 2.6.1's CMake hardcodes the partition name `model`, generates `build/srmodels/srmodels.bin`, and attaches it to the full `flash` target. A later complete flash with no correct external-model configuration can overwrite an earlier manually flashed custom model, even when no stock WakeNet is selected. Its explicit generation dependency is sdkconfig; changed external weights alone require regenerating the model image. Do not put the sole vendor export in the generated `build/srmodels` directory, which the official packer recreates.
+No UI code calls codec APIs. Mute preserves volume; output checks pending/applied mute each block and writes zeros with PA off. ES8389 1.5.11 `set_out_mute` changes ADC mute bits, so it must never be used for runtime speaker mute. Codec close may mute ADC after capture has stopped.
 
-The first real S31 build and flash were explicitly requested and performed on
-2026-11-06. See [the board record](../../../docs/board-bringup-2026-11-06.md)
-for actual per-feature acceptance; do not infer acoustic validation from the
-build. The MultiNet and local-source playback additions on 2026-11-13 have not
-been built in ESP-IDF or run on hardware in this session. An off-board syntax/API
-check of the keyword adapter uses exact ESP-SR 2.6.1 headers and minimal platform
-declarations; it does not validate linking, S31 execution, timing or acoustics.
-CPU/RAM peak, false wakes, missed calls, repeated calls and self-playback remain
-manual board checks. No CI was added.
+Diagnostics contain bounded counters, levels and last/max timings, never recordings. `read_us` includes blocking capture, `afe_us` includes feed/fetch/keyword/event work, `keyword_us` measures native detect, and `processing_us` is post-read wall time. `capture_overruns` means processing exceeded a frame duration, not measured hardware lost samples. Buffer and output queue watermarks, read errors, native feed rejections, keyword timeouts/rejections, playback underruns and last wake/capture-ready/playback stage times expose concrete bottlenecks.
+
+AFE gets at most the configured automatic reset attempts (default two, spaced 1.5 s and outside playback suppression). `bot_audio_retry_afe()` queues one explicit existing-buffer/VAD reset. Neither path restarts I2S or loads a missing model; an AFE that was never created cannot retry. Persistent failure exposes degraded manual/raw operation. Initial codec or required buffer allocation failure returns a start error.
+
+## Playback sources and actual progress
+
+One bounded queue accepts 16 kHz mono signed PCM16LE, 1..320 samples per write. BEGIN reserves silently; write/end validate the playback ID. Queue-full `ESP_ERR_TIMEOUT` is backpressure, so a producer must retry only while its original lease remains valid.
+
+| Source | Begin API | Authorization |
+| --- | --- | --- |
+| SESSION | `bot_audio_playback_begin` | Must match the retained open session token |
+| LOCAL_RESPONSE | `bot_audio_playback_begin_local` | Runtime's independent operation token; nonzero epoch/session_id |
+| PREVIEW | `bot_audio_playback_begin_preview` | Explicit settings preview epoch; event token `{epoch,0,0,0}` |
+
+Local/preview playback opens no microphone permission. All events retain original token/id/source. Runtime validates those three fields; settings closure/Stop explicitly cancel preview and local leases. Session changes only auto-cancel SESSION. No competing BEGIN can replace an existing reservation.
+
+STARTED follows the first successful PCM codec write. PLAYBACK_PROGRESS uses the same token/id/source and is emitted about once per second only after successful PCM writes. Network bytes, empty queues, starvation padding and DMA flushing do not emit progress. Runtime may renew an already matching SPEAKING operation from this event; it creates no capture permission and does not extend the protocol's maximum reply duration. Muted logical playback writes zeros and completes normally.
+
+END drains prior audio before PA-off/zero purge and DONE. `bot_audio_playback_cancel(audio, 0)` sets a capacity-independent latch and gates PA immediately; the worker purges the queue/DMA and emits CANCELLED. Errors emit FAILED; failed drain prevents subsequent playback until successful stop/restart. These are software/driver completion observations, not measured acoustic end times.
+
+Every successful BEGIN, including pre-first-frame reservation, blocks wake/VAD/ambient/PCM and clears retained onset. After completion, default tail is 800 ms, then one RX DMA capacity plus one capture frame is discarded and AFE/VAD/MN state reset before release. Runtime waits for completion and this tail-clear state before authorizing subsequent listening. There is no AEC or voice barge-in; explicit touch/cancel remains available.
+
+## Official dependencies and model configuration
+
+- BSP `espressif/esp32_s31_korvo_1 =1.1.0`; codec `espressif/esp_codec_dev =1.5.11`; DOA `espressif/esp_apa_doa =1.0.0`; speech `espressif/esp-sr =2.6.1`.
+- Target is ESP32-S31 / IDF >=6.1; `CONFIG_CODEC_ES8389_SUPPORT=y`, PSRAM, and `CONFIG_BSP_ERROR_CHECK=n` for recoverable BSP errors.
+- Model defaults: `CONFIG_MODEL_IN_FLASH=y`, `CONFIG_SR_VADN_WEBRTC=y`, `CONFIG_SR_MN_CN_MULTINET7_QUANT=y`, `CONFIG_SR_MN_EN_NONE=y`.
+- Project defaults: model label `model`, dedicated WakeNet name empty, full-phrase MN fallback enabled, wake threshold80, local-command threshold85, native window3000 ms.
+- The 6 MiB raw model partition is not mounted/formatted as SPIFFS. Use the generated partition table and model image when flashing.
+
+The actual pinned `mn7_cn` plus `fst` resources are packaged. Passive graph is command1/phrase0 `xiao dai xiao dai`; no standalone name is registered. Explicit listening adds only fixed commands10..18 listed in README. The single aligned MN input staging frame accommodates AFE/MN frame sizes, both 16 kHz mono. Dedicated compatible S31 WakeNet with exact whole-keyword metadata remains preferred. Keep MN enabled for active commands with WakeNet; it is idle during passive WakeNet mode. Disabling fallback also disables those commands. No stock wake word becomes an alias.
+
+The one-mic AFE path requires equal feed/fetch sizes and serializes reset/feed/fetch on its capture worker. Keep the official 50-frame native ring: minimum speech plus VAD delay reserve 256 ms before room for new PCM. Reducing it to four/eight 32 ms frames previously stalled feeding. Zero feed return still permits bounded fetch to drain temporary backpressure. This internal history is never exported.
+
+ESP-SR 2.6.1 CMake hardcodes partition name `model`, generates `build/srmodels/srmodels.bin`, and adds it to full `flash`. A complete flash without correct external-model configuration can overwrite a previously provisioned dedicated model. Generation depends explicitly on sdkconfig; changed external weights alone need regeneration. Keep vendor source weights outside generated `build/srmodels`. README links fixed official API/model commits and the XiaoZhi continuous-MN precedent.
+
+## Verification scope
+
+The historical first real S31 build/flash on 2026-11-06 is recorded in [the board record](../../../docs/board-bringup-2026-11-06.md); it does not validate later additions. The 2026-11-13 MN/controls/active-command/onset/preview/progress changes have no ESP-IDF build, S31 run, flashing, model inference or acoustic acceptance in this session. All four audio C files passed an off-board C11 `-Wall -Wextra -Werror -fsyntax-only` check using exact ESP-SR 2.6.1 headers plus minimal platform declarations. It cannot validate linking, native model behavior, S31 execution, timing or acoustics. CPU/RAM peaks, graph-switch cost, false/missed commands, runtime codec controls, self-playback, long-answer progress and first-word capture still require physical testing. No CI was added.

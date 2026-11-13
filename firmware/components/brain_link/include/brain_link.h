@@ -21,8 +21,13 @@ esp_err_t brain_link_wifi_provision(const char *base64_json);
 esp_err_t brain_secure_start(bot_bus_t *bus, bot_audio_t *audio);
 esp_err_t brain_secure_provision(const char *base64_json);
 void brain_secure_update(const bot_runtime_snapshot_t *state);
+/** True only for this token's established capture transport. Runtime must also
+ * authorize capture/delivery; follow-up preparation alone never sends PCM. */
 bool brain_secure_uplink(const bot_session_token_t *token);
 void brain_secure_pcm(const bot_audio_pcm_t *frame);
+/** Nonblocking copy of this transport's SESSION hardware playback events.
+ * Safe before start and ignores local wake replies / settings previews. */
+void brain_secure_audio_event(const bot_audio_event_t *event);
 void brain_secure_network_down(void);
 
 #define BOT_DISPLAY_ASSET_ID_BYTES 48
@@ -34,8 +39,9 @@ typedef struct {
 } bot_display_image_t;
 /** Transfer a decoded image to the caller. Caller owns pixels on success. */
 bool brain_secure_take_image(bot_display_image_t *image);
-/** Queue a display receipt for the authenticated session. False means the
- * bounded queue could not accept it; callers may retry while the token is current. */
+/** Queue a display receipt for the independently retained result token. False
+ * means the bounded queue could not accept it; callers may retry while that
+ * result remains readable/authorized, including next-turn preconnection. */
 bool brain_secure_display_report(bot_session_token_t token, const char *part,
                                  const char *asset_id, bool rendered, const char *code);
 /** Record a terminal image-only failure without allocating. The transport task

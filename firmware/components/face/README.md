@@ -30,6 +30,55 @@ saves to NVS; the face component never accesses NVS itself. Firmware `app_main.c
 any valid saved ID; new/invalid preferences use the manifest default. Existing users retain
 their explicit Classic Outline selection until they choose EVE.
 
+Settings also includes **声音**. The separate `face_sound_settings.c` renderer
+contains volume (0–60%), mute, response mode, three wake sensitivity presets,
+relative night-response volume (10–100%), an explicit local preview and restore
+defaults. Content scrolls beneath a fixed back button and title on the 800×480
+display. It uses the current theme's palette without importing an eye renderer,
+codec, runtime, network client or NVS API.
+
+`face_on_sound_settings_request()` copies/enqueues one proposed
+`bot_voice_settings_t`; `face_on_sound_preview_request()` only requests an
+explicit preview. Callbacks run under the LVGL lock, return whether work was
+queued and must not perform driver or persistence work. Sliders update their
+visible number during dragging and submit only on release. Switches and preset
+buttons submit once per change. Restore requests the shared defaults; it does
+not erase preferences. Preview remains available in text mode, but mute or zero
+volume disables it. Runtime retains sole authority for the playback lease and
+keeps conversation capture closed while Settings is open.
+
+The app supplies authoritative values with `face_set_sound_settings()`, read-only
+metadata with `face_set_sound_diagnostics()` and brief status/error text with
+`face_set_sound_notice()`. Identical snapshots do no UI work. A repeated old
+settings snapshot does not pull back an in-progress slider or a queued choice.
+Opening the page restores the latest authoritative snapshot. Status text is
+copied and UTF-8 boundary-truncated at 191 bytes. Its full 30 px Chinese font
+supports app-owned notices; fixed labels use the regenerated 22 px font.
+
+Low/standard/high map to native thresholds 90/80/70, respectively. These are
+initial product presets, not measured recognition accuracy; a higher sensitivity
+can also increase false activations. A different saved threshold is retained and
+shown as custom until the person selects a preset. The diagnosis distinguishes
+microphone availability, wake-model readiness, conversation capture readiness,
+Mac transport readiness and suppression of self-wake during playback/tail cleanup.
+It does not describe that suppression as speaker failure or measured AEC.
+
+The controls adapt the official LVGL v9.6.0
+[slider event example](https://github.com/lvgl/lvgl/blob/v9.6.0/examples/widgets/slider/lv_example_slider_event.c)
+and [switch event example](https://github.com/lvgl/lvgl/blob/v9.6.0/examples/widgets/switch/lv_example_switch_event.c).
+
+**Sound-page verification, 2026-11-13:** actual component/font sources compiled
+with host `cc` and LVGL 9.6.0 in a temporary directory. Six 800×480 software-rendered
+frames were visually inspected: Settings home, sound controls, sensitivity/night
+controls, preview feedback, diagnostics and return navigation. Actual widget-event
+checks exercised release-only slider submission, repeated unchanged snapshots,
+text-mode preview, mute gating, defaults and back navigation. LVGL resolved all
+250 distinct non-ASCII characters in settings/theme/expression strings at 22 px
+and all 108 distinct non-ASCII app/runtime strings at 30 px to nonempty glyphs.
+This checks host UI behavior and font coverage, not physical touch, sound output,
+NVS, S31 memory use or an ESP-IDF firmware build. No CI or permanent test harness
+was added.
+
 ## Runtime UI hooks
 
 `face_on_event()` emits deliberate surface touch, stop, Settings opened and Settings closed. Callbacks run on the LVGL task/under its lock and must only enqueue intent. Main uses a capacity-independent stop latch; the UI does not make behavior decisions. `face_set_stop_visible()` controls the explicit stop button during a local session. `face_set_animation_active(false)` pauses the animation timer behind logical blackout without touching board-level touch hardware.

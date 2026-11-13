@@ -18,13 +18,14 @@ struct bot_runtime {
     vatt_snapshot_t vision;
     bool has_vision, has_published, has_wake, wake_barrier_valid;
     bool has_acoustic_wake, has_link_state;
-    bool revoking, identity_exhausted, waiting_for_approval;
+    bool revoking, identity_exhausted, waiting_for_approval, manual_sleep;
+    bool reply_presented, remote_audio_done;
     bot_passive_cycle_t passive_cycle;
     bot_idle_expression_t idle_expression;
     bot_near_face_t near_face;
     bot_ambient_light_t ambient;
     bot_responses_state_t responses;
-    const bot_response_entry_t *response;
+    const bot_response_entry_t *response, *last_response;
     bool response_playback_done;
     uint32_t response_started_ms, response_timeout_ms;
     uint32_t waking_since_ms, last_wake_ms, wake_barrier_ms, next_session_id;
@@ -32,6 +33,8 @@ struct bot_runtime {
     uint32_t last_sound_ms;
     uint32_t event_times[BOT_EVENT_COUNT];
     bool event_seen[BOT_EVENT_COUNT];
+    uint32_t capture_event_times[2];
+    bool capture_event_seen[2];
 };
 
 static bool within_age(uint32_t now_ms, uint32_t observed_ms, uint32_t limit_ms)
@@ -103,7 +106,13 @@ static void derive_permissions(bot_runtime_t *runtime)
          !state->settings_open && !state->critical_fault);
     state->audio_session_requested = engaged && !runtime->revoking && !state->local_response_active;
     state->audio_uplink_permitted = state->audio_session_requested && runtime->config.allow_audio_uplink &&
-                                   state->audio_available && secure_link(runtime);
+                                   state->audio_available && secure_link(runtime) &&
+                                   state->utterance_seen &&
+                                   (!state->followup_armed || state->utterance_active);
+    if (!state->audio_session_requested) {
+        state->capture_ready = false;
+        state->transport_ready = false;
+    }
     state->visual_tracking_permitted = engaged && state->camera_available;
     attention_manager_set_policy(&runtime->attention, state->visual_tracking_permitted, engaged);
     if (!state->visual_tracking_permitted) state->focus = runtime->attention.focus;
@@ -150,7 +159,8 @@ static void set_passive(bot_runtime_t *runtime, uint32_t now_ms)
     const bot_passive_phase_t phase = bot_passive_cycle_step(&runtime->passive_cycle, now_ms,
         state->clock_valid && state->night_policy,
         runtime->config.daytime_awake_ms, runtime->config.daytime_drowsy_ms);
-    bot_behavior_t next = phase == BOT_PASSIVE_NIGHT ? BOT_BEHAVIOR_NIGHT_DARK :
+    bot_behavior_t next = runtime->manual_sleep ? BOT_BEHAVIOR_SLEEPING :
+                          phase == BOT_PASSIVE_NIGHT ? BOT_BEHAVIOR_NIGHT_DARK :
                           runtime->ambient.dark ? BOT_BEHAVIOR_SLEEPING :
                           phase == BOT_PASSIVE_DROWSY ? BOT_BEHAVIOR_DROWSY : BOT_BEHAVIOR_IDLE;
     if (state->behavior != next || state->conversation != BOT_CONVERSATION_NONE) {
@@ -196,14 +206,20 @@ static void end_session(bot_runtime_t *runtime, uint32_t now_ms, session_end_rea
         memcpy(runtime->state.reading_notice, notice, strlen(notice) + 1);
     }
     runtime->waiting_for_approval = false;
+    runtime->reply_presented = false;
+    runtime->remote_audio_done = false;
     advance_epoch(runtime);
     runtime->state.token.session_id = 0;
     runtime->state.token.turn_id = 0;
     runtime->state.token.focus_generation = 0;
     runtime->state.activation = BOT_ACTIVATION_NONE;
     runtime->state.utterance_active = false;
+    runtime->state.utterance_seen = false;
     runtime->state.playback_id = 0;
     runtime->state.local_response_active = false;
+    runtime->state.sound_preview_active = false;
+    runtime->state.followup_armed = false;
+    runtime->state.capture_ready = runtime->state.transport_ready = false;
     runtime->response = NULL;
     runtime->response_playback_done = false;
     runtime->state.last_interaction_ms = now_ms;
@@ -221,6 +237,8 @@ static bool begin_turn(bot_runtime_t *runtime, uint32_t now_ms)
 {
     bot_session_token_t old = runtime->state.token;
     runtime->waiting_for_approval = false;
+    runtime->reply_presented = false;
+    runtime->remote_audio_done = false;
     if (runtime->state.token.turn_id == UINT32_MAX || !advance_epoch(runtime)) {
         runtime->identity_exhausted = true;
         end_session(runtime, now_ms, SESSION_FAULT);
@@ -229,8 +247,11 @@ static bool begin_turn(bot_runtime_t *runtime, uint32_t now_ms)
     runtime->state.token.turn_id++;
     runtime->state.token.focus_generation = 0;
     runtime->state.utterance_active = false;
+    runtime->state.utterance_seen = false;
     runtime->state.playback_id = 0;
     runtime->state.local_response_active = false;
+    runtime->state.followup_armed = false;
+    runtime->state.capture_ready = runtime->state.transport_ready = false;
     runtime->response = NULL;
     runtime->response_playback_done = false;
     runtime->state.caption[0] = '\0';
@@ -244,9 +265,43 @@ static bool begin_turn(bot_runtime_t *runtime, uint32_t now_ms)
     return true;
 }
 
+static bool arm_followup(bot_runtime_t *runtime, uint32_t now_ms)
+{
+    /* Allocate the new authorization BEFORE any next-turn audio is retained.
+     * The old visual result has its own reading_token and remains on screen.
+     * No intermediate inactive snapshot: the completed result's image transfer
+     * and hardware receipt must survive this preparation of the next turn. */
+    if (runtime->state.token.turn_id == UINT32_MAX || !advance_epoch(runtime)) {
+        runtime->identity_exhausted = true;
+        end_session(runtime, now_ms, SESSION_FAULT);
+        return false;
+    }
+    runtime->state.token.turn_id++;
+    runtime->state.token.focus_generation = 0;
+    runtime->state.utterance_active = false;
+    runtime->state.utterance_seen = false;
+    runtime->state.playback_id = 0;
+    runtime->state.local_response_active = false;
+    runtime->state.capture_ready = runtime->state.transport_ready = false;
+    runtime->response = NULL;
+    runtime->response_playback_done = false;
+    runtime->reply_presented = runtime->remote_audio_done = false;
+    runtime->waiting_for_approval = false;
+    runtime->state.caption[0] = '\0';
+    runtime->state.last_interaction_ms = now_ms;
+    runtime->state.followup_armed = true;
+    runtime->state.conversation = BOT_CONVERSATION_WAITING;
+    reset_expression(runtime);
+    derive_permissions(runtime);
+    return true;
+}
+
 static bool begin_session(bot_runtime_t *runtime, uint32_t now_ms)
 {
+    runtime->manual_sleep = false;
     runtime->waiting_for_approval = false;
+    runtime->reply_presented = false;
+    runtime->remote_audio_done = false;
     if (runtime->next_session_id == UINT32_MAX || !advance_epoch(runtime)) {
         runtime->identity_exhausted = true;
         end_session(runtime, now_ms, SESSION_FAULT);
@@ -259,8 +314,12 @@ static bool begin_session(bot_runtime_t *runtime, uint32_t now_ms)
     runtime->state.behavior = BOT_BEHAVIOR_WAKING;
     runtime->state.conversation = BOT_CONVERSATION_LISTENING;
     runtime->state.utterance_active = false;
+    runtime->state.utterance_seen = false;
     runtime->state.playback_id = 0;
     runtime->state.local_response_active = false;
+    runtime->state.sound_preview_active = false;
+    runtime->state.followup_armed = false;
+    runtime->state.capture_ready = runtime->state.transport_ready = false;
     runtime->response = NULL;
     runtime->response_playback_done = false;
     runtime->state.last_interaction_ms = now_ms;
@@ -305,9 +364,14 @@ static bool source_allowed(const bot_event_t *event)
     case BOT_EVENT_PLAYBACK_STARTED:
     case BOT_EVENT_PLAYBACK_DONE:
     case BOT_EVENT_PLAYBACK_FAILED:
+    case BOT_EVENT_PLAYBACK_PROGRESS:
     case BOT_EVENT_WAKE_STATUS:
     case BOT_EVENT_SOUND_ACTIVITY:
+    case BOT_EVENT_LOCAL_COMMAND:
+    case BOT_EVENT_CAPTURE_OVERFLOW:
         return event->source == BOT_SOURCE_AUDIO;
+    case BOT_EVENT_CAPTURE_READY:
+        return event->source == BOT_SOURCE_AUDIO || event->source == BOT_SOURCE_LINK;
     case BOT_EVENT_AUDIO_HEALTH:
         return event->source == BOT_SOURCE_AUDIO || event->source == BOT_SOURCE_PLATFORM;
     case BOT_EVENT_TOUCH_WAKE:
@@ -315,6 +379,8 @@ static bool source_allowed(const bot_event_t *event)
     case BOT_EVENT_RESULT_DISMISSED:
     case BOT_EVENT_SETTINGS_OPEN:
     case BOT_EVENT_SETTINGS_CLOSE:
+    case BOT_EVENT_VOICE_SETTINGS:
+    case BOT_EVENT_SOUND_PREVIEW:
     case BOT_EVENT_NIGHT_POLICY:
         return local_intent(event->source);
     case BOT_EVENT_CAMERA_HEALTH:
@@ -392,10 +458,103 @@ static void finish_local_response(bot_runtime_t *runtime, uint32_t now_ms)
     derive_permissions(runtime);
 }
 
+static uint8_t response_gain(const bot_runtime_t *runtime, const bot_response_entry_t *entry)
+{
+    return runtime->state.clock_valid && runtime->state.night_policy ?
+        runtime->state.voice_settings.night_gain_percent : entry->gain_percent;
+}
+
+static void start_local_response(bot_runtime_t *runtime, const bot_response_entry_t *entry,
+                                 uint32_t now_ms)
+{
+    if (!entry || !runtime->ops.play_wake_response || !runtime->state.audio_available ||
+        runtime->state.voice_settings.muted || !runtime->state.voice_settings.volume_percent) return;
+    runtime->response = entry;
+    runtime->state.local_response_active = true;
+    runtime->response_playback_done = false;
+    runtime->response_started_ms = now_ms;
+    runtime->response_timeout_ms = entry->pcm_samples / 16U + 5000U;
+    if (runtime->response_timeout_ms > 15000U) runtime->response_timeout_ms = 15000U;
+    memcpy(runtime->state.caption, entry->text, strlen(entry->text) + 1);
+    reset_expression(runtime);
+    derive_permissions(runtime);
+    publish_state(runtime);
+    if (!runtime->ops.play_wake_response(runtime->context, &runtime->state.token, entry,
+                                        response_gain(runtime, entry)))
+        finish_local_response(runtime, now_ms);
+}
+
+static void stop_preview(bot_runtime_t *runtime)
+{
+    runtime->state.sound_preview_active = false;
+    runtime->state.playback_id = 0;
+    runtime->response = NULL;
+    if (runtime->ops.stop_output) runtime->ops.stop_output(runtime->context);
+}
+
+static bool preview_token_matches(const bot_runtime_t *runtime, const bot_session_token_t *token)
+{
+    return runtime->state.sound_preview_active && runtime->state.settings_open &&
+        !token->session_id && !token->turn_id && token->epoch == runtime->state.token.epoch;
+}
+
+static void apply_local_command(bot_runtime_t *runtime, bot_voice_command_t command, uint32_t now_ms)
+{
+    bot_runtime_snapshot_t *state = &runtime->state;
+    if (command == BOT_VOICE_COMMAND_STOP || command == BOT_VOICE_COMMAND_SLEEP) {
+        runtime->manual_sleep = command == BOT_VOICE_COMMAND_SLEEP;
+        end_session(runtime, now_ms, SESSION_DISMISSED);
+        return;
+    }
+    /* Recognition consumed this utterance locally. Revoke the old remote turn
+     * before applying an action, even when the Mac is unavailable. */
+    const bot_session_token_t old = state->token;
+    invalidate_output(runtime, &old);
+    if (!arm_followup(runtime, now_ms)) return;
+    switch (command) {
+    case BOT_VOICE_COMMAND_VOLUME_UP:
+        state->voice_settings.volume_percent = state->voice_settings.volume_percent > BOT_VOICE_VOLUME_MAX - 5 ?
+            BOT_VOICE_VOLUME_MAX : state->voice_settings.volume_percent + 5;
+        state->voice_settings.muted = false;
+        strcpy(state->caption, "声音调大了");
+        break;
+    case BOT_VOICE_COMMAND_VOLUME_DOWN:
+        state->voice_settings.volume_percent = state->voice_settings.volume_percent < 5 ?
+            0 : state->voice_settings.volume_percent - 5;
+        strcpy(state->caption, "声音调小了");
+        break;
+    case BOT_VOICE_COMMAND_QUIET:
+        state->voice_settings.muted = true;
+        strcpy(state->caption, "已经静音");
+        break;
+    case BOT_VOICE_COMMAND_UNMUTE:
+        state->voice_settings.muted = false;
+        if (!state->voice_settings.volume_percent) state->voice_settings.volume_percent = 30;
+        strcpy(state->caption, "声音已打开");
+        break;
+    case BOT_VOICE_COMMAND_THEME_BLUE:
+        strcpy(state->caption, runtime->ops.set_theme && runtime->ops.set_theme(runtime->context, "sky") ?
+            "换成蓝色了" : "外观切换失败，请在设置中重试");
+        break;
+    case BOT_VOICE_COMMAND_HAPPY:
+        strcpy(state->caption, "给你一个笑脸");
+        strcpy(state->expression, "happy");
+        break;
+    case BOT_VOICE_COMMAND_REPEAT:
+        if (runtime->last_response && !state->voice_settings.muted && state->voice_settings.volume_percent) {
+            state->followup_armed = false;
+            start_local_response(runtime, runtime->last_response, now_ms);
+        } else strcpy(state->caption, "暂时没有可以重播的本地应答");
+        break;
+    default: break;
+    }
+}
+
 static void mark_wake(bot_runtime_t *runtime, const bot_event_t *event, uint32_t now_ms)
 {
     /* Capture context before begin_session retires old vision and sleep state. */
     const bot_response_context_t context = response_context(runtime, now_ms);
+    runtime->manual_sleep = false;
     bool accepted = is_active(runtime) ? begin_turn(runtime, now_ms) : begin_session(runtime, now_ms);
     if (!accepted) return;
     runtime->last_wake_ms = event->observed_ms;
@@ -410,25 +569,23 @@ static void mark_wake(bot_runtime_t *runtime, const bot_event_t *event, uint32_t
         !runtime->state.audio_available) return;
     const bot_response_entry_t *entry = bot_responses_select(&runtime->responses, &context);
     if (!entry) return;
-    runtime->response = entry;
-    runtime->state.local_response_active = true;
-    runtime->response_playback_done = false;
-    runtime->response_started_ms = now_ms;
-    /* An output failure must never leave the capture gate closed forever. */
-    /* Includes the audio API's maximum 3000 ms tail plus DMA/queue cleanup. */
-    runtime->response_timeout_ms = entry->pcm_samples / 16U + 5000U;
-    if (runtime->response_timeout_ms > 15000U) runtime->response_timeout_ms = 15000U;
-    memcpy(runtime->state.caption, entry->text, strlen(entry->text) + 1);
-    reset_expression(runtime);
-    derive_permissions(runtime);
-    publish_state(runtime); /* close capture BEFORE enqueueing any speaker data */
-    if (!runtime->ops.play_wake_response(runtime->context, &runtime->state.token, entry))
-        finish_local_response(runtime, now_ms);
+    start_local_response(runtime, entry, now_ms);
 }
 
 static bool event_order_valid(bot_runtime_t *runtime, const bot_event_t *event, uint32_t now_ms)
 {
     if (!within_age(now_ms, event->observed_ms, runtime->config.event_max_age_ms)) return false;
+    if (event->kind == BOT_EVENT_CAPTURE_READY) {
+        /* Audio and network are independent producers of separate readiness
+         * facts. One producer's timestamp must not suppress the other one. */
+        const unsigned producer = event->source == BOT_SOURCE_AUDIO ? 0 : 1;
+        if (runtime->capture_event_seen[producer] &&
+            within_age(now_ms, runtime->capture_event_times[producer], runtime->config.event_max_age_ms) &&
+            (int32_t)(event->observed_ms - runtime->capture_event_times[producer]) < 0) return false;
+        runtime->capture_event_seen[producer] = true;
+        runtime->capture_event_times[producer] = event->observed_ms;
+        return true;
+    }
     if (runtime->event_seen[event->kind] &&
         !within_age(now_ms, runtime->event_times[event->kind], runtime->config.event_max_age_ms))
         runtime->event_seen[event->kind] = false;
@@ -503,12 +660,73 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         end_session(runtime, now_ms, SESSION_DISMISSED);
         break;
     case BOT_EVENT_SETTINGS_CLOSE:
+        if (state->sound_preview_active) stop_preview(runtime);
         state->settings_open = false;
         state->last_interaction_ms = now_ms;
         bot_passive_cycle_reset(&runtime->passive_cycle, now_ms);
         runtime->wake_barrier_valid = true;
         runtime->wake_barrier_ms = now_ms;
         set_passive(runtime, now_ms);
+        break;
+    case BOT_EVENT_VOICE_SETTINGS:
+        if (!state->settings_open || state->critical_fault ||
+            !bot_voice_settings_valid(&event->data.voice_settings)) {
+            state->rejected_events++;
+            break;
+        }
+        if (state->sound_preview_active) stop_preview(runtime);
+        state->voice_settings = event->data.voice_settings;
+        break;
+    case BOT_EVENT_SOUND_PREVIEW: {
+        if (stopped_this_step || !state->settings_open || state->critical_fault ||
+            !state->audio_available || state->voice_settings.muted ||
+            !state->voice_settings.volume_percent || !runtime->ops.play_sound_preview) {
+            state->rejected_events++;
+            break;
+        }
+        if (state->sound_preview_active) stop_preview(runtime);
+        if (!advance_epoch(runtime)) break;
+        const bot_response_entry_t *entry = bot_responses_get(0);
+        if (!entry) break;
+        state->sound_preview_active = true;
+        state->playback_id = 0;
+        runtime->response_started_ms = now_ms;
+        runtime->response_timeout_ms = entry->pcm_samples / 16U + 5000U;
+        derive_permissions(runtime);
+        publish_state(runtime);
+        if (!runtime->ops.play_sound_preview(runtime->context, &state->token, entry,
+                                             response_gain(runtime, entry))) stop_preview(runtime);
+        break;
+    }
+    case BOT_EVENT_CAPTURE_READY:
+        if (!state->audio_session_requested || !token_matches(runtime, &event->token, false)) {
+            state->rejected_events++;
+            break;
+        }
+        if (event->source == BOT_SOURCE_AUDIO) state->capture_ready = event->data.capture.ready;
+        else state->transport_ready = event->data.capture.ready && secure_link(runtime);
+        break;
+    case BOT_EVENT_CAPTURE_OVERFLOW:
+        if (!state->audio_session_requested || !token_matches(runtime, &event->token, false)) {
+            state->rejected_events++;
+            break;
+        }
+        if (arm_followup(runtime, now_ms))
+            strcpy(state->caption, "连接还没准备好，请等就绪后再说一次");
+        break;
+    case BOT_EVENT_LOCAL_COMMAND:
+        if (stopped_this_step || !is_active(runtime) || state->settings_open || state->critical_fault ||
+            state->local_response_active || !state->audio_available ||
+            !token_matches(runtime, &event->token, false) ||
+            (state->conversation != BOT_CONVERSATION_LISTENING &&
+             state->conversation != BOT_CONVERSATION_WAITING) ||
+            !bot_voice_command_valid(event->data.local_command.command) ||
+            !isfinite(event->data.local_command.score) || event->data.local_command.score < 0 ||
+            event->data.local_command.score > 1) {
+            state->rejected_events++;
+            break;
+        }
+        apply_local_command(runtime, event->data.local_command.command, now_ms);
         break;
     case BOT_EVENT_UTTERANCE_STARTED:
         if (!is_active(runtime) || state->critical_fault || state->settings_open ||
@@ -530,14 +748,20 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
              * if speech continues; never re-label an old operation as new. */
             break;
         } else if (state->conversation == BOT_CONVERSATION_WAITING) {
-            begin_turn(runtime, now_ms);
-            break;
+            if (!state->followup_armed) {
+                state->rejected_events++;
+                break;
+            }
+            /* This START already belongs to the next token; retain its onset. */
+            state->followup_armed = false;
+            state->caption[0] = '\0';
         } else if (state->conversation != BOT_CONVERSATION_LISTENING) {
             state->rejected_events++;
             break;
         }
         state->conversation = BOT_CONVERSATION_LISTENING;
         state->utterance_active = true;
+        state->utterance_seen = true;
         /* Ambient sound without a usable media link is not conversation
          * progress and must not hold an offline session open indefinitely. */
         if (runtime->config.allow_audio_uplink && secure_link(runtime))
@@ -558,7 +782,24 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
             state->last_interaction_ms = now_ms;
         reset_expression(runtime);
         break;
+    case BOT_EVENT_PLAYBACK_PROGRESS:
+        if (event->data.playback.preview && preview_token_matches(runtime, &event->token)) break;
+        if (!is_active(runtime) || !token_matches(runtime, &event->token, false) ||
+            state->conversation != BOT_CONVERSATION_SPEAKING || !event->data.playback.id ||
+            event->data.playback.id != state->playback_id ||
+            event->data.playback.local_response != state->local_response_active) {
+            state->rejected_events++;
+            break;
+        }
+        state->last_interaction_ms = now_ms;
+        break;
     case BOT_EVENT_PLAYBACK_STARTED:
+        if (event->data.playback.preview) {
+            if (!preview_token_matches(runtime, &event->token) || !event->data.playback.id ||
+                state->playback_id) state->rejected_events++;
+            else state->playback_id = event->data.playback.id;
+            break;
+        }
         if (!is_active(runtime) || state->settings_open || state->critical_fault ||
             state->utterance_active || event->data.playback.id == 0 ||
             event->data.playback.local_response != state->local_response_active ||
@@ -573,6 +814,16 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         break;
     case BOT_EVENT_PLAYBACK_DONE:
     case BOT_EVENT_PLAYBACK_FAILED:
+        if (event->data.playback.preview) {
+            if (!preview_token_matches(runtime, &event->token) || !event->data.playback.id ||
+                (state->playback_id && state->playback_id != event->data.playback.id))
+                state->rejected_events++;
+            else {
+                state->sound_preview_active = false;
+                state->playback_id = 0;
+            }
+            break;
+        }
         if (event->data.playback.local_response) {
             if (!is_active(runtime) || !state->local_response_active ||
                 !token_matches(runtime, &event->token, false) || !event->data.playback.id ||
@@ -581,9 +832,11 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
                 break;
             }
             if (event->kind == BOT_EVENT_PLAYBACK_DONE && runtime->ops.wake_response_tail_clear) {
+                runtime->last_response = runtime->response;
                 runtime->response_playback_done = true;
                 state->playback_id = 0;
             } else {
+                if (event->kind == BOT_EVENT_PLAYBACK_DONE) runtime->last_response = runtime->response;
                 finish_local_response(runtime, now_ms);
             }
             break;
@@ -596,11 +849,18 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
             break;
         }
         state->playback_id = 0;
-        state->conversation = BOT_CONVERSATION_WAITING;
         state->last_interaction_ms = now_ms;
-        reset_expression(runtime);
+        runtime->remote_audio_done = true;
+        /* A very short clip may finish before the queued text receipt is
+         * drained. Do not retire that token until its PRESENT has been applied. */
+        if (!state->voice_settings.spoken_answers || runtime->reply_presented)
+            arm_followup(runtime, now_ms);
         break;
     case BOT_EVENT_LOCAL_RESPONSE_FAILED:
+        if (preview_token_matches(runtime, &event->token)) {
+            stop_preview(runtime);
+            break;
+        }
         if (!is_active(runtime) || !state->local_response_active ||
             !token_matches(runtime, &event->token, false)) {
             state->rejected_events++;
@@ -615,6 +875,7 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         state->link_connected = event->data.link.connected;
         state->link_authenticated = state->link_connected && event->data.link.authenticated;
         state->link_encrypted = state->link_connected && event->data.link.encrypted;
+        if (!secure_link(runtime)) state->transport_ready = false;
         if (was_secure && !secure_link(runtime) && is_active(runtime) && !state->local_response_active)
             begin_turn(runtime, now_ms);
         break;
@@ -622,6 +883,7 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
     case BOT_EVENT_AUDIO_HEALTH: {
         bool was_available = state->audio_available;
         state->audio_available = event->data.health.available;
+        if (!state->audio_available) state->capture_ready = false;
         if (!state->audio_available) state->wake_status = BOT_WAKE_UNAVAILABLE;
         if (was_available && !state->audio_available && is_active(runtime)) begin_turn(runtime, now_ms);
         break;
@@ -716,13 +978,21 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
                                            uint32_t now_ms)
 {
     bot_runtime_snapshot_t *state = &runtime->state;
-    if (command->kind < BOT_COMMAND_SET_EXPRESSION || command->kind > BOT_COMMAND_END_SESSION)
+    if (command->kind < BOT_COMMAND_SET_EXPRESSION || command->kind > BOT_COMMAND_REPLY_PRESENT)
         return BOT_COMMAND_REJECTED_INVALID;
     if (state->critical_fault) return BOT_COMMAND_REJECTED_FAULT;
     if (state->settings_open) return BOT_COMMAND_REJECTED_SETTINGS;
     if (!secure_link(runtime)) return BOT_COMMAND_REJECTED_UNTRUSTED;
     if (!is_active(runtime)) return BOT_COMMAND_REJECTED_PASSIVE;
-    if (!token_matches(runtime, &command->token, true)) return BOT_COMMAND_REJECTED_STALE;
+    const bool reading_image = command->kind == BOT_COMMAND_IMAGE_FAILED &&
+        state->reading_token.session_id &&
+        command->token.epoch == state->reading_token.epoch &&
+        command->token.session_id == state->reading_token.session_id &&
+        command->token.turn_id == state->reading_token.turn_id &&
+        command->token.focus_generation == state->reading_token.focus_generation &&
+        (state->followup_armed || token_matches(runtime, &command->token, true));
+    if (!reading_image && !token_matches(runtime, &command->token, true))
+        return BOT_COMMAND_REJECTED_STALE;
     /* Local acknowledgements own their expression/caption and playback. The
      * remote session opens only after their hardware completion. */
     if (state->local_response_active) return BOT_COMMAND_REJECTED_INVALID;
@@ -746,7 +1016,7 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
             memcpy(state->reading_notice, state->caption, sizeof(state->reading_notice));
         break;
     case BOT_COMMAND_IMAGE_FAILED:
-        if (!token_matches(runtime, &state->reading_token, false)) return BOT_COMMAND_REJECTED_STALE;
+        if (!reading_image) return BOT_COMMAND_REJECTED_STALE;
         if (!valid_text(command->data.caption, sizeof(command->data.caption)))
             return BOT_COMMAND_REJECTED_INVALID;
         memcpy(state->image_notice, command->data.caption, sizeof(state->image_notice));
@@ -761,10 +1031,13 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
         runtime->waiting_for_approval = false;
         reset_expression(runtime);
         break;
+    case BOT_COMMAND_REPLY_PRESENT:
     case BOT_COMMAND_REPLY_DONE:
         if (state->utterance_active ||
             (state->conversation != BOT_CONVERSATION_LISTENING &&
-             state->conversation != BOT_CONVERSATION_THINKING))
+             state->conversation != BOT_CONVERSATION_THINKING &&
+             !(state->conversation == BOT_CONVERSATION_SPEAKING &&
+               (command->kind == BOT_COMMAND_REPLY_PRESENT || runtime->remote_audio_done))))
             return BOT_COMMAND_REJECTED_INVALID;
         if (command->data.caption[0]) {
             if (!valid_text(command->data.caption, sizeof(command->data.caption)))
@@ -783,12 +1056,15 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
             end_session(runtime, now_ms, SESSION_INACTIVE);
             break;
         }
+        if (command->kind == BOT_COMMAND_REPLY_PRESENT) {
+            runtime->reply_presented = true;
+            state->last_interaction_ms = now_ms;
+            if (runtime->remote_audio_done) arm_followup(runtime, now_ms);
+            break;
+        }
         /* Audio completion is a local event. This receipt closes a text-only
          * reply; a remote server cannot declare hardware playback completed. */
-        state->conversation = BOT_CONVERSATION_WAITING;
-        runtime->waiting_for_approval = false;
-        state->last_interaction_ms = now_ms;
-        reset_expression(runtime);
+        arm_followup(runtime, now_ms);
         break;
     case BOT_COMMAND_PROGRESS:
         if (state->utterance_active || state->conversation != BOT_CONVERSATION_THINKING)
@@ -815,6 +1091,7 @@ bot_runtime_config_t bot_runtime_default_config(void)
         .event_max_age_ms = 2000, .command_max_age_ms = 5000,
         .max_events_per_step = 32, .max_commands_per_step = 8,
         .allow_audio_uplink = false, .allow_barge_in = false,
+        .voice_settings = bot_voice_default_settings(),
         .focus = attention_manager_default_config()
     };
 }
@@ -828,6 +1105,7 @@ static bool valid_config(const bot_runtime_config_t *config)
         config->wake_debounce_ms < INT32_MAX && config->event_max_age_ms > 0 &&
         config->event_max_age_ms < INT32_MAX && config->command_max_age_ms > 0 &&
         config->command_max_age_ms < INT32_MAX &&
+        bot_voice_settings_valid(&config->voice_settings) &&
         config->max_events_per_step > 0 && config->max_events_per_step <= 512 &&
         config->max_commands_per_step > 0 && config->max_commands_per_step <= 64;
 }
@@ -851,6 +1129,7 @@ esp_err_t bot_runtime_create(bot_bus_t *bus, const bot_runtime_config_t *config,
         return ESP_ERR_INVALID_ARG;
     }
     runtime->state.token.epoch = 1;
+    runtime->state.voice_settings = cfg.voice_settings;
     runtime->state.last_interaction_ms = now_ms;
     bot_passive_cycle_reset(&runtime->passive_cycle, now_ms);
     runtime->state.wake_status = BOT_WAKE_MODEL_MISSING;
@@ -876,7 +1155,7 @@ void bot_runtime_destroy(bot_runtime_t *runtime)
 static void update_ambient(bot_runtime_t *runtime, uint32_t now_ms)
 {
     bot_runtime_snapshot_t *state = &runtime->state;
-    const bool allow_probe = !is_active(runtime) && !state->settings_open && !state->critical_fault &&
+    const bool allow_probe = !runtime->manual_sleep && !is_active(runtime) && !state->settings_open && !state->critical_fault &&
         !(state->clock_valid && state->night_policy);
     bot_ambient_step(&runtime->ambient, now_ms, allow_probe);
     state->ambient_dark = runtime->ambient.dark;
@@ -959,6 +1238,9 @@ void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
         if (runtime->ops.stop_output) runtime->ops.stop_output(runtime->context);
         finish_local_response(runtime, now_ms);
     }
+    if (runtime->state.sound_preview_active &&
+        !within_age(now_ms, runtime->response_started_ms, runtime->response_timeout_ms))
+        stop_preview(runtime);
     if (is_active(runtime)) {
         uint32_t timeout_ms = runtime->config.session_timeout_ms;
         if (runtime->waiting_for_approval && timeout_ms < 180000) timeout_ms = 180000;

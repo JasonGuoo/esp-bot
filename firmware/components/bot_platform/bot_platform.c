@@ -294,3 +294,61 @@ esp_err_t bot_platform_save_camera_orientation(bot_platform_t *p, uint8_t orient
     nvs_close(handle);
     return err;
 }
+
+/* One integer avoids partially saving a group of independently written keys.
+ * Do not persist the C struct: bool representation/padding is not a file format.
+ * v1: [31:24] version=1, [23] reserved=0, [22:16] night gain,
+ * [15] spoken answers, [14:8] wake threshold, [7] mute, [6:0] volume. */
+static uint32_t pack_voice_settings(const bot_voice_settings_t *s) {
+    return UINT32_C(0x01000000) | (uint32_t)s->volume_percent |
+        ((uint32_t)s->muted << 7) | ((uint32_t)s->wake_threshold_percent << 8) |
+        ((uint32_t)s->spoken_answers << 15) | ((uint32_t)s->night_gain_percent << 16);
+}
+
+esp_err_t bot_platform_load_voice_settings(bot_platform_t *p, bot_voice_settings_t *out) {
+    if (!p || !out) return ESP_ERR_INVALID_ARG;
+    if (!p->status.nvs_available) return ESP_ERR_INVALID_STATE;
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("espbot_ui", NVS_READONLY, &handle);
+    if (err != ESP_OK) return err == ESP_ERR_NVS_NOT_FOUND ? ESP_ERR_NOT_FOUND : err;
+    uint32_t value = 0;
+    err = nvs_get_u32(handle, "voice_settings", &value);
+    nvs_close(handle);
+    if (err != ESP_OK) return err == ESP_ERR_NVS_NOT_FOUND ? ESP_ERR_NOT_FOUND : err;
+    if ((value & UINT32_C(0xff800000)) != UINT32_C(0x01000000))
+        return ESP_ERR_INVALID_RESPONSE;
+    const bot_voice_settings_t decoded = {
+        .volume_percent = value & 0x7fU,
+        .muted = ((value >> 7) & 1U) != 0,
+        .wake_threshold_percent = (value >> 8) & 0x7fU,
+        .spoken_answers = ((value >> 15) & 1U) != 0,
+        .night_gain_percent = (value >> 16) & 0x7fU,
+    };
+    if (!bot_voice_settings_valid(&decoded)) return ESP_ERR_INVALID_RESPONSE;
+    *out = decoded;
+    return ESP_OK;
+}
+
+esp_err_t bot_platform_save_voice_settings(bot_platform_t *p,
+                                          const bot_voice_settings_t *settings) {
+    if (!p || !bot_voice_settings_valid(settings)) return ESP_ERR_INVALID_ARG;
+    if (!p->status.nvs_available) return ESP_ERR_INVALID_STATE;
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("espbot_ui", NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+    const uint32_t value = pack_voice_settings(settings);
+    uint32_t current = 0;
+    err = nvs_get_u32(handle, "voice_settings", &current);
+    if (err == ESP_OK && current == value) {
+        nvs_close(handle);
+        return ESP_OK;
+    }
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND && err != ESP_ERR_NVS_TYPE_MISMATCH) {
+        nvs_close(handle);
+        return err;
+    }
+    err = nvs_set_u32(handle, "voice_settings", value);
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    return err;
+}

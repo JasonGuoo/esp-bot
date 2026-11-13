@@ -27,11 +27,12 @@ menu "Xiaodai local runtime"
         default 60000
         help
             Hard upper bound between meaningful conversation transitions.
-            Includes continuous speech and continuous playback: neither raw
-            PCM nor caption updates refreshes this bound. On expiry the local
-            runtime stops output and closes the session. Set deliberately for
-            long narration; this is not a silence detector. Must exceed
-            WAKING_MS. The C API field is session_timeout_ms.
+            Capture/network PCM and caption updates do not refresh this bound.
+            Matching low-frequency hardware playback progress does, only after
+            real codec writes. On expiry the local runtime stops output and
+            closes the session. Input and output also have protocol size/time
+            limits. This is not a silence detector. Must exceed WAKING_MS.
+            The C API field is session_timeout_ms.
 
     config BOT_RUNTIME_WAKE_DEBOUNCE_MS
         int "Explicit wake debounce (milliseconds)"

@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: MIT
  * Official ESP-SR 2.6.1 MultiNet7 integration. Continuous custom-keyword use
  * follows XiaoZhi's CustomWakeWord design; no upstream recording/upload path.
- * This registers ONE whole phrase, never two detections of a shorter name.
+ * Passive graph: ONE whole phrase, never two shorter-name detections. The
+ * separate active-session graph adds only fixed local control commands.
  */
 #include "bot_audio_keyword.h"
 #include <math.h>
@@ -12,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_mn_models.h"
 #include "esp_mn_speech_commands.h"
+#include "esp_timer.h"
 
 #if CONFIG_BOT_AUDIO_MULTINET_WAKE_FALLBACK && !CONFIG_SR_MN_CN_MULTINET7_QUANT
 #error "Enable CONFIG_SR_MN_CN_MULTINET7_QUANT to package the actual mn7_cn wake fallback"
@@ -24,6 +26,21 @@
 #define WAKE_COMMAND_ID 1
 #define SILENCE_RESET_SAMPLES (BOT_AUDIO_SAMPLE_RATE * 600U / 1000U)
 #define SILENCE_DBFS (-48.0f)
+
+#if CONFIG_BOT_AUDIO_MULTINET_WAKE_FALLBACK
+typedef struct { bot_voice_command_t id; const char *phrase; } local_phrase_t;
+static const local_phrase_t s_commands[] = {
+    {BOT_VOICE_COMMAND_VOLUME_UP, "sheng yin da yi dian"},
+    {BOT_VOICE_COMMAND_VOLUME_DOWN, "sheng yin xiao yi dian"},
+    {BOT_VOICE_COMMAND_QUIET, "an jing yi dian"},
+    {BOT_VOICE_COMMAND_STOP, "ting zhi"},
+    {BOT_VOICE_COMMAND_SLEEP, "wan an"},
+    {BOT_VOICE_COMMAND_THEME_BLUE, "huan cheng lan se"},
+    {BOT_VOICE_COMMAND_HAPPY, "kai xin yi dian"},
+    {BOT_VOICE_COMMAND_REPEAT, "zai shuo yi bian"},
+    {BOT_VOICE_COMMAND_UNMUTE, "hui fu sheng yin"},
+};
+#endif
 
 static void clear_frame(bot_audio_keyword_t *keyword)
 {
@@ -69,27 +86,15 @@ esp_err_t bot_audio_keyword_open(bot_audio_keyword_t *keyword, char *model_name,
         return ESP_ERR_NO_MEM;
     }
     clear_frame(keyword);
-    const float threshold = CONFIG_BOT_AUDIO_MULTINET_THRESHOLD_PERCENT / 100.0f;
-    /* S31's interface does not document a positive success value; negative
-     * means rejection. The independent result-score gate below is mandatory. */
-    if (mn->set_det_threshold(keyword->data, threshold) < 0 ||
-        esp_mn_commands_alloc(mn, keyword->data) != ESP_OK ||
-        esp_mn_commands_clear() != ESP_OK ||
-        esp_mn_commands_add(WAKE_COMMAND_ID, BOT_AUDIO_MULTINET_COMMAND) != ESP_OK ||
-        esp_mn_commands_update() != NULL) {
+    if (esp_mn_commands_alloc(mn, keyword->data) != ESP_OK ||
+        bot_audio_keyword_set_policy(keyword, false, CONFIG_BOT_AUDIO_MULTINET_THRESHOLD_PERCENT) != ESP_OK) {
         bot_audio_keyword_close(keyword);
         return ESP_FAIL;
     }
-    esp_mn_phrase_t *phrase = esp_mn_commands_get_from_index(0);
-    if (!phrase || phrase->command_id != WAKE_COMMAND_ID || !phrase->string ||
-        strcmp(phrase->string, BOT_AUDIO_MULTINET_COMMAND) != 0 ||
-        esp_mn_commands_get_from_index(1) != NULL) {
-        bot_audio_keyword_close(keyword);
-        return ESP_ERR_INVALID_STATE;
-    }
     mn->clean(keyword->data);
     ESP_LOGI("bot_audio", "MultiNet7: one complete '%s' command; model=%s, threshold=%.2f, window=%d ms",
-             BOT_AUDIO_MULTINET_COMMAND, model_name, threshold, CONFIG_BOT_AUDIO_MULTINET_WINDOW_MS);
+             BOT_AUDIO_MULTINET_COMMAND, model_name, keyword->threshold_percent / 100.0,
+             CONFIG_BOT_AUDIO_MULTINET_WINDOW_MS);
     ESP_LOGI("bot_audio", "MultiNet input frame=%u samples; AFE=%u samples; one bounded PSRAM staging frame",
              (unsigned)keyword->samples, (unsigned)afe_samples);
     ESP_LOGI("bot_audio", "MultiNet initialization free heap: internal %u -> %u, PSRAM %u -> %u bytes",
@@ -105,6 +110,53 @@ esp_err_t bot_audio_keyword_open(bot_audio_keyword_t *keyword, char *model_name,
 #endif
 }
 
+esp_err_t bot_audio_keyword_set_policy(bot_audio_keyword_t *keyword, bool commands_enabled,
+                                       uint8_t wake_threshold_percent)
+{
+#if CONFIG_BOT_AUDIO_MULTINET_WAKE_FALLBACK
+    if (!keyword->data || !keyword->iface) return ESP_ERR_NOT_SUPPORTED;
+    if (wake_threshold_percent < BOT_VOICE_WAKE_THRESHOLD_MIN ||
+        wake_threshold_percent > BOT_VOICE_WAKE_THRESHOLD_MAX) return ESP_ERR_INVALID_ARG;
+    if (keyword->available && keyword->commands_enabled == commands_enabled &&
+        keyword->threshold_percent == wake_threshold_percent) return ESP_OK;
+    bot_audio_keyword_reset(keyword);
+    const bool rebuild = !keyword->available || keyword->commands_enabled != commands_enabled;
+    keyword->available = false;
+    unsigned native_percent = wake_threshold_percent;
+    if (commands_enabled && native_percent > CONFIG_BOT_AUDIO_LOCAL_COMMAND_THRESHOLD_PERCENT)
+        native_percent = CONFIG_BOT_AUDIO_LOCAL_COMMAND_THRESHOLD_PERCENT;
+    /* A separate top-result gate retains the wake/command-specific threshold. */
+    if (keyword->iface->set_det_threshold(keyword->data, native_percent / 100.0f) < 0) return ESP_FAIL;
+    if (rebuild) {
+        if (esp_mn_commands_clear() != ESP_OK ||
+            esp_mn_commands_add(WAKE_COMMAND_ID, BOT_AUDIO_MULTINET_COMMAND) != ESP_OK) return ESP_FAIL;
+        if (commands_enabled) {
+            for (size_t i = 0; i < sizeof(s_commands) / sizeof(s_commands[0]); ++i)
+                if (esp_mn_commands_add(s_commands[i].id, s_commands[i].phrase) != ESP_OK) return ESP_FAIL;
+        }
+        if (esp_mn_commands_update() != NULL) return ESP_FAIL;
+        const size_t expected = 1 + (commands_enabled ? sizeof(s_commands) / sizeof(s_commands[0]) : 0);
+        for (size_t i = 0; i < expected; ++i) {
+            esp_mn_phrase_t *phrase = esp_mn_commands_get_from_index((int)i);
+            int id = i ? s_commands[i - 1].id : WAKE_COMMAND_ID;
+            const char *text = i ? s_commands[i - 1].phrase : BOT_AUDIO_MULTINET_COMMAND;
+            if (!phrase || phrase->command_id != id || !phrase->string || strcmp(phrase->string, text))
+                return ESP_ERR_INVALID_STATE;
+        }
+        if (esp_mn_commands_get_from_index((int)expected) != NULL) return ESP_ERR_INVALID_STATE;
+    }
+    keyword->commands_enabled = commands_enabled;
+    keyword->threshold_percent = wake_threshold_percent;
+    keyword->available = true;
+    return ESP_OK;
+#else
+    (void)keyword;
+    (void)commands_enabled;
+    (void)wake_threshold_percent;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
 void bot_audio_keyword_reset(bot_audio_keyword_t *keyword)
 {
 #if CONFIG_BOT_AUDIO_MULTINET_WAKE_FALLBACK
@@ -115,11 +167,11 @@ void bot_audio_keyword_reset(bot_audio_keyword_t *keyword)
     clear_frame(keyword);
 }
 
-bool bot_audio_keyword_detect(bot_audio_keyword_t *keyword, int16_t *samples, size_t count,
-                               float volume_dbfs, bool allowed)
+int bot_audio_keyword_detect(bot_audio_keyword_t *keyword, int16_t *samples, size_t count,
+                              float volume_dbfs, bool allowed)
 {
 #if CONFIG_BOT_AUDIO_MULTINET_WAKE_FALLBACK
-    if (!keyword->data) return false;
+    if (!keyword->data || !keyword->available) return 0;
     if (!allowed || !samples || !count || count > 4096 || !isfinite(volume_dbfs)) {
         bot_audio_keyword_reset(keyword);
         return false;
@@ -149,21 +201,38 @@ bool bot_audio_keyword_detect(bot_audio_keyword_t *keyword, int16_t *samples, si
         offset += copy;
         if (keyword->buffered < keyword->samples) break;
         keyword->dirty = true;
+        int64_t before = esp_timer_get_time();
         esp_mn_state_t state = keyword->iface->detect(keyword->data, keyword->frame);
+        int64_t elapsed = esp_timer_get_time() - before;
+        keyword->last_us = elapsed > UINT32_MAX ? UINT32_MAX : (uint32_t)elapsed;
+        if (keyword->last_us > keyword->max_us) keyword->max_us = keyword->last_us;
+        keyword->runs++;
         clear_frame(keyword);
         if (state == ESP_MN_STATE_DETECTED) {
             esp_mn_results_t *result = keyword->iface->get_results(keyword->data);
             /* Only the highest-scoring complete command qualifies. A lower-ranked
              * candidate, partial name, silence, or VAD alone never emits a wake. */
-            bool accepted = result && result->state == ESP_MN_STATE_DETECTED &&
+            bool valid = result && result->state == ESP_MN_STATE_DETECTED &&
                 result->num > 0 && result->num <= ESP_MN_RESULT_MAX_NUM &&
-                result->command_id[0] == WAKE_COMMAND_ID && result->phrase_id[0] == 0 &&
-                isfinite(result->prob[0]) && result->prob[0] <= 1.0f &&
-                result->prob[0] >= CONFIG_BOT_AUDIO_MULTINET_THRESHOLD_PERCENT / 100.0f;
+                isfinite(result->prob[0]) && result->prob[0] >= 0.0f && result->prob[0] <= 1.0f;
+            int accepted = 0;
+            if (valid) {
+                const int id = result->command_id[0], index = result->phrase_id[0];
+                keyword->last_candidate_score = result->prob[0];
+                keyword->last_candidate_command = id;
+                if (id == WAKE_COMMAND_ID && index == 0 &&
+                    result->prob[0] >= keyword->threshold_percent / 100.0f) accepted = id;
+                if (keyword->commands_enabled && index > 0 &&
+                    (size_t)index <= sizeof(s_commands) / sizeof(s_commands[0]) &&
+                    id == (int)s_commands[index - 1].id &&
+                    result->prob[0] >= CONFIG_BOT_AUDIO_LOCAL_COMMAND_THRESHOLD_PERCENT / 100.0f) accepted = id;
+            }
             if (accepted) keyword->last_score = result->prob[0];
+            else keyword->rejections++;
             bot_audio_keyword_reset(keyword);
-            if (accepted) return true;
+            if (accepted) return accepted;
         } else if (state == ESP_MN_STATE_TIMEOUT) {
+            keyword->timeouts++;
             /* Continuous local keyword mode: timeout starts a fresh window. */
             bot_audio_keyword_reset(keyword);
         } else if (state != ESP_MN_STATE_DETECTING) {

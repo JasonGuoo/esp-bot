@@ -1,5 +1,17 @@
 # Integration contract (API defined before main wiring)
 
+## Voice additions, 2026-11-13
+
+Load persisted `bot_voice_settings_t` into `config.voice_settings` before runtime creation. UI submits `BOT_EVENT_VOICE_SETTINGS` or `BOT_EVENT_SOUND_PREVIEW`; it does not call playback directly. `play_wake_response` and `play_sound_preview` receive an explicit relative PCM gain. A preview token has a nonzero epoch and zero session/turn, uses the PREVIEW audio source, and grants no capture permission. Closing settings or Stop cancels it.
+
+Map AUDIO `CAPTURE_READY.available` and LINK `CAPTURE_READY.data.capture.ready` independently to the bus, preserving the current capture token. `capture_ready` and `transport_ready` are different observed facts. Pass `retain_start`, `waiting_for_followup`, `local_commands`, and separately authenticated `deliver_pcm` through `bot_audio_set_session_ex`; preserve the same token when only transport readiness changes. The normal WAITING phase already owns its next-turn token and has `followup_armed=true`; VAD START consumes it without another token change. Never transfer cached PCM between tokens.
+
+Map `LOCAL_COMMAND` with its original token and native score. The audio owner immediately consumes that capture lease; runtime invalidates the remote turn and applies only its fixed known action. Keep passive wake separate. Map PREVIEW and LOCAL_RESPONSE playback source flags explicitly. Match real `PLAYBACK_PROGRESS` by token/id/source before extending progress; no network PCM event may impersonate it.
+
+`BOT_COMMAND_REPLY_PRESENT` stores text while a spoken reply is pending. Hardware completion, in either order with PRESENT, arms the next turn. Text-only `REPLY_DONE` arms it immediately. Keep `reading_token` and image/display receipts independent during prepared follow-up; do not clear the old result merely because the capture token changed. IMAGE_FAILED may target this retained result lease while follow-up is armed.
+
+These changes have targeted host runtime checks, not S31 IDF or physical-device acceptance. The current application wiring is in `main/app_main.c` and the user test guide is [voice-interaction.md](../../../docs/voice-interaction.md).
+
 Create `bot_bus_t` via `bot_bus_create()`, then `bot_runtime_create(bus, config, ops, ctx, now_ms, &runtime)`.
 Call `bot_runtime_step(runtime, now_ms)` from a single owner task every ~20 ms; use local `esp_timer_get_time()/1000` low 32 bits.
 
@@ -34,7 +46,7 @@ LAN ingress stamps `command.received_ms` locally and queues `bot_command_t`. Lin
 
 Critical queue overflow latches a separate fault signal. Runtime invalidates the session, revokes uplink and stops output. A subsequent explicit local recovery is required; old queued wake/commands do not restart it.
 
-`runtime.token.focus_generation` stays zero because audio/session authority is independent of visual focus. Focus-bound commands use `runtime.focus.generation` explicitly. Barge-in is off by default; the current audio adapter reports echo_safe=false and remains in that mode. VAD_STARTED in WAITING creates a new turn but does not mark the old-token utterance active. `apply_state` immediately calls `bot_audio_set_session` with the new token; its AFE/VAD fence emits a fresh START under that token if speech continues. Only that fresh START may be completed by a matching END. A very short utterance entirely before the fence is dropped, never re-labelled or uploaded as a new operation.
+`runtime.token.focus_generation` stays zero because audio/session authority is independent of visual focus. Focus-bound commands use `runtime.focus.generation` explicitly. Barge-in is off by default; the current audio adapter reports echo_safe=false. The next turn is prepared before WAITING; VAD_STARTED must already belong to this new token and is never relabelled. Only a matching END may complete it. Explicit wake/barge-in cancellation still establishes a fresh DMA/AFE fence.
 
 
 ## Source-level integration follow-up
@@ -42,7 +54,7 @@ Critical queue overflow latches a separate fault signal. Runtime invalidates the
 - Set `ops.now_ms` to an owner-safe wrapper of `bot_platform_now_ms()`, and refresh the clock again for downstream reconciliation after `step()`. Otherwise the caller must synchronously bound all input by the supplied step timestamp.
 - `main.audio_event` must copy nonzero `source->playback_id` into `event.data.playback.id` for all three local playback event kinds (CANCELLED maps to FAILED with the same id). Runtime checks both the original token and playback id, so an old stream cannot complete a newer stream within the same turn.
 - `runtime.token.focus_generation` stays zero: the current main `set_session` mapping will therefore not reset VAD when only visual focus changes.
-- The existing audio source resets native AFE/VAD and its local speech state on a new gate epoch. Runtime now deliberately waits for that new-token START after WAITING/automatic barge-in creates a new turn.
-- `session_timeout_ms` is a hard **conversation progress gap**, including ongoing continuous utterance and playback, not an inactivity-only timeout. Default 60s is intentionally bounded; neither PCM frames nor cosmetic network updates extend it. `Kconfig` exposes this as `BOT_RUNTIME_PROGRESS_TIMEOUT_MS`.
+- The audio source resets native AFE/VAD and its local speech state on a new gate epoch. Prepare the next epoch before waiting for follow-up speech; same-token transport changes preserve the bounded authorized onset window.
+- `session_timeout_ms` is a **conversation progress gap**. Default 60s is bounded; capture/network PCM and cosmetic updates do not extend it. Only matching real hardware playback progress does. `Kconfig` exposes this as `BOT_RUNTIME_PROGRESS_TIMEOUT_MS`.
 - Runtime automatically expires per-kind ordering history every step and clears the stopped-camera latest snapshot; sparse events and long camera sleeps cannot retain comparison anchors across the 32-bit half-range.
-- New defaults live in component `Kconfig`; callers may still override `bot_runtime_config_t`. No test/build/device verification has been performed.
+- New lifecycle defaults live in component `Kconfig`; callers may still override `bot_runtime_config_t`. Voice preferences use validated `bot_voice` defaults and platform NVS. Verification of the current source is described above, separately from earlier delivery records.

@@ -1,5 +1,7 @@
 # bot_runtime：本地行为与会话授权
 
+**2026-11-13 声音扩展：** 本组件新增声音偏好、设置内显式试听、活动会话固定语音指令、手动睡眠、实际收音就绪、预授权追问，以及图文与真实语音播放完成的仲裁。详见 [声音交互指南](../../../docs/voice-interaction.md)。新路径的主机运行时检查通过；该版本未做 S31 IDF 构建或实板验收，下文原有板上验证只适用于其注明的旧功能。
+
 **状态：日间清醒/短暂困倦及环境亮度休眠策略已构建并烧录；模拟亮度已完成板上闭环测试。** 完整 20 分钟周期、真实关灯亮度和实夜切换尚未实机验证；时间边界使用模拟测试。当前目标是 ESP32-S31-Korvo-1 V1.1。这个组件不依赖摄像头、麦克风或 LCD 的具体驱动，也不启动自己的任务；应用以约 20ms 周期从唯一任务调用 `bot_runtime_step()`。
 
 ## 职责
@@ -32,13 +34,13 @@ runtime 是本地行为状态的唯一主控。音频、视觉、UI 和网络都
 
 ## 会话与打断
 
-`waking/engaged` 内的子状态是 `listening → thinking → speaking → waiting`；文字回复可直接从 thinking 进入 waiting。`ending` 是撤销权限时的短暂发布状态，随后回到被动生命周期。默认 60 秒无会话状态进展会结束会话。这是**硬性进展时限**：持续说话超过 60 秒，或一次连续播放超过 60 秒，也会被本地停止；它不是仅在静音时累计的空闲计时器。PCM 帧、表情和字幕更新不延长这个时限。长篇讲解须明确提高 `session_timeout_ms`（菜单项 `BOT_RUNTIME_PROGRESS_TIMEOUT_MS`），后续若区分长篇播放和输入时限，应在 runtime 增加独立策略。
+`waking/engaged` 内的子状态是 `listening → thinking → speaking → waiting`；文字回复可直接从 thinking 进入 waiting。`ending` 是撤销权限时的短暂发布状态，随后回到被动生命周期。默认 60 秒无会话状态进展会结束会话。输入 PCM、网络到包、表情和字幕更新不延长这个时限；只有当前原始 token、播放 id、来源都匹配的低频 `PLAYBACK_PROGRESS` 可以按真实硬件写入更新播放进展。连续输入仍受收音上限和会话时限约束，输出另受协议 PCM 长度上限约束；卡住的硬件不会因网络不断到包而续期。
 
-音频 `VAD_STARTED` 仅在已有会话、音频可用且 token 匹配时生效。在 waiting 收到新一轮有效 VAD 时，runtime 建立新 turn。thinking/speaking 时的自动打断还需要 `allow_barge_in=true` 和 `echo_safe=true`，默认都不具备。建立新 turn 的旧 token START 只触发重绑定，并不设置 `utterance_active`。`apply_state` 立即向音频 owner 提交新 token；音频清空 AFE/VAD 历史，在新 token 下重新观察到语音后发送新的 START。只有该 START 可以由同 token END 完成。完全发生在这个边界之前的极短话语会被舍弃，不会被重标或作为新一轮声音上传。不能用收到迟到回调时的“最新 token”重标旧消息。
+音频 `VAD_STARTED` 仅在已有会话、音频可用且 token 匹配时生效。回复完成时先分配下一 turn，再进入 `WAITING/followup_armed`；允许当前 token 的本地起音缓存和网络准备，但不允许上传等待中的环境 PCM。该 token 的 VAD START 清除 `followup_armed`，无需再次换 token 或冲刷起音。thinking/speaking 时的自动打断仍需要 `allow_barge_in=true` 和 `echo_safe=true`，默认都不具备。任何迟到的旧 token START/END/PCM 均不能改成最新 token。
 
 本地 VAD 结束只能说明声音结束；runtime 保持倾听，只有当前可信链路发来有效的
 `BOT_COMMAND_THINKING` 才进入思考状态。没有可信媒体上行时，本地声音不会被当作
-会话进展，也不会因为环境噪声持续刷新会话时限。当前板上没有 WSS 媒体客户端。
+会话进展，也不会因为环境噪声持续刷新会话时限。当前应用使用既有 `brain_secure` WSS 控制和媒体适配器。
 
 本地停止走 `bot_bus_request_stop()` 的独立锁存位，不会排在普通队列后，也不会因队列已满而丢失。runtime 在每个处理批次及消息之间查看这个锁存位。处理顺序是：
 

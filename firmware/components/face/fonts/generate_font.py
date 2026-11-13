@@ -11,17 +11,22 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--converter", default="lv_font_conv")
     parser.add_argument("--font", type=Path, required=True)
+    parser.add_argument("--settings-only", action="store_true",
+                        help="Regenerate only the small 22 px settings font")
     args = parser.parse_args()
     out = Path(__file__).resolve().parent
     ranges = ("0x20-0x7E,0xA0-0xFF,0x2000-0x206F,0x3000-0x3029,"
               "0x3038-0x303F,0x4E00-0x9FFF,0xFF00-0xFFEF")
     # Settings uses fixed strings plus the generated theme and expression names.
-    settings_sources = [out.parent / "face_settings.c", *sorted((out.parent / "include").glob("*_generated.h"))]
+    settings_sources = [*sorted(out.parent.glob("face*settings.c")),
+                        *sorted((out.parent / "include").glob("*_generated.h"))]
     symbols = "".join(sorted({ch for path in settings_sources for ch in path.read_text()
-                              if 0x3000 <= ord(ch) <= 0xFFEF}))
+                              if 0x2000 <= ord(ch) <= 0xFFEF}))
     with tempfile.TemporaryDirectory(prefix="xiaodai-font-") as tmp:
-        for size, bpp, charset in [(30, 2, ["--range", ranges]),
-                                   (22, 4, ["--range", "0x20-0x7E,0xA0-0xFF", "--symbols", symbols])]:
+        variants = [(22, 4, ["--range", "0x20-0x7E,0xA0-0xFF", "--symbols", symbols])]
+        if not args.settings_only:
+            variants.insert(0, (30, 2, ["--range", ranges]))
+        for size, bpp, charset in variants:
             name = f"xiaodai_font_sc_{size}"
             path = Path(tmp) / f"{name}.c"
             subprocess.run([args.converter, "--size", str(size), "--bpp", str(bpp), "--font", str(args.font),

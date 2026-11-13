@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "lvgl.h"
+#include "bot_voice.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -62,6 +63,15 @@ esp_err_t bot_platform_save_theme(bot_platform_t *platform, const char *theme_id
 /** One atomic NVS value: bit 0 horizontal mirror, bit 1 vertical flip. */
 esp_err_t bot_platform_load_camera_orientation(bot_platform_t *platform, uint8_t *orientation);
 esp_err_t bot_platform_save_camera_orientation(bot_platform_t *platform, uint8_t orientation);
+/** One versioned NVS value for sound preferences. Load leaves out unchanged on
+ * missing, invalid or unavailable storage; missing maps to ESP_ERR_NOT_FOUND.
+ * Save validates before writing and
+ * commits only if the packed value changed. Never erases other preferences,
+ * network credentials, pairing or partitions. Call from the application owner. */
+esp_err_t bot_platform_load_voice_settings(bot_platform_t *platform,
+                                          bot_voice_settings_t *out);
+esp_err_t bot_platform_save_voice_settings(bot_platform_t *platform,
+                                          const bot_voice_settings_t *settings);
 #ifdef __cplusplus
 }
 #endif

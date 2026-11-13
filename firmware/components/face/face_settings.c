@@ -7,19 +7,22 @@
  * and the app owns persistence.
  */
 #include "face_settings.h"
+#include "face_sound_settings.h"
 #include "face_renderer.h"
 #include "fonts/xiaodai_font.h"
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef enum { PAGE_CLOSED, PAGE_SETTINGS, PAGE_APPEARANCE } settings_page_t;
+typedef enum { PAGE_CLOSED, PAGE_SETTINGS, PAGE_APPEARANCE, PAGE_SOUND } settings_page_t;
 
 struct face_settings {
     lv_obj_t *root, *settings_page, *appearance_page;
     lv_obj_t *settings_title, *dismiss_button, *dismiss_label;
     lv_obj_t *appearance_row, *appearance_label, *appearance_description;
     lv_obj_t *active_swatch, *chevron;
+    lv_obj_t *sound_row, *sound_label, *sound_description, *sound_chevron;
+    face_sound_settings_t *sound;
     lv_obj_t *appearance_title, *back_button, *back_label, *help_label;
     lv_obj_t *theme_list, *preview_host, *preview_title, *preview_label;
     lv_obj_t *preview_prev, *preview_next, *preview_prev_label, *preview_next_label;
@@ -114,6 +117,7 @@ static void paint(face_settings_t *s) {
     lv_obj_set_style_bg_color(s->settings_page, bg, 0);
     lv_obj_set_style_bg_color(s->appearance_page, bg, 0);
     lv_obj_set_style_bg_color(s->appearance_row, tile, 0);
+    lv_obj_set_style_bg_color(s->sound_row, tile, 0);
     lv_obj_set_style_bg_color(s->dismiss_button, tile, 0);
     lv_obj_set_style_bg_color(s->back_button, tile, 0);
     lv_obj_set_style_bg_color(s->cancel_button, tile, 0);
@@ -128,10 +132,12 @@ static void paint(face_settings_t *s) {
         s->chevron, s->dismiss_label, s->appearance_title, s->help_label,
         s->back_label, s->cancel_label, s->preview_title, s->preview_label,
         s->preview_prev_label, s->preview_next_label,
+        s->sound_label, s->sound_description, s->sound_chevron,
     };
     for (size_t i = 0; i < sizeof(texts) / sizeof(texts[0]); i++)
         lv_obj_set_style_text_color(texts[i], fg, 0);
     lv_obj_set_style_text_color(s->apply_label, bg, 0);
+    face_sound_settings_set_palette(s->sound, bg, tile, fg, highlight);
 
     for (size_t i = 0; i < FACE_THEME_COUNT; i++) {
         const bool selected = i == s->pending_index;
@@ -155,6 +161,7 @@ static void settings_home(face_settings_t *s) {
     show(s->root, true);
     show(s->settings_page, true);
     show(s->appearance_page, false);
+    show(face_sound_settings_root(s->sound), false);
     paint(s);
 }
 
@@ -177,7 +184,22 @@ static void appearance_clicked(lv_event_t *e) {
     s->preview_index = 0;
     show(s->settings_page, false);
     show(s->appearance_page, true);
+    show(face_sound_settings_root(s->sound), false);
     paint(s);
+}
+
+static void sound_clicked(lv_event_t *e) {
+    face_settings_t *s = lv_event_get_user_data(e);
+    s->page = PAGE_SOUND;
+    show(s->settings_page, false);
+    show(s->appearance_page, false);
+    show(face_sound_settings_root(s->sound), true);
+    face_sound_settings_open(s->sound);
+    paint(s);
+}
+
+static void sound_back(void *context) {
+    settings_home(context);
 }
 
 static void back_clicked(lv_event_t *e) {
@@ -247,6 +269,17 @@ face_settings_t *face_settings_create(lv_obj_t *parent,
     lv_obj_set_style_radius(s->active_swatch, LV_RADIUS_CIRCLE, 0);
     s->chevron = label(s->appearance_row, ">", ">");
 
+    s->sound_row = button(s->settings_page);
+    lv_obj_add_event_cb(s->sound_row, sound_clicked, LV_EVENT_CLICKED, s);
+    s->sound_label = label(s->sound_row, "声音", "Sound");
+    s->sound_description = label(s->sound_row, "音量、唤醒与语音回答", "Volume, wake and spoken replies");
+    s->sound_chevron = label(s->sound_row, ">", ">");
+    s->sound = face_sound_settings_create(s->root, sound_back, s);
+    if (!s->sound) {
+        face_settings_destroy(s);
+        return NULL;
+    }
+
     s->appearance_title = label(s->appearance_page, "外观", "Appearance");
     s->back_button = button(s->appearance_page);
     s->back_label = label(s->back_button, "<", "<");
@@ -304,6 +337,7 @@ face_settings_t *face_settings_create(lv_obj_t *parent,
 
 void face_settings_destroy(face_settings_t *s) {
     if (!s) return;
+    face_sound_settings_destroy(s->sound);
     face_renderer_destroy(s->preview_renderer);
     for (size_t i = 0; i < FACE_THEME_COUNT; i++) {
         if (s->theme_renderers[i]) face_renderer_destroy(s->theme_renderers[i]);
@@ -331,6 +365,24 @@ void face_settings_set_active_theme(face_settings_t *s, const char *id) {
     paint(s);
 }
 
+void face_settings_on_sound_settings_request(face_settings_t *s,
+    bool (*callback)(const bot_voice_settings_t *, void *), void *context) {
+    if (s) face_sound_settings_on_request(s->sound, callback, context);
+}
+void face_settings_on_sound_preview_request(face_settings_t *s,
+    bool (*callback)(void *), void *context) {
+    if (s) face_sound_settings_on_preview(s->sound, callback, context);
+}
+void face_settings_set_sound_settings(face_settings_t *s, const bot_voice_settings_t *value) {
+    if (s) face_sound_settings_set_value(s->sound, value);
+}
+void face_settings_set_sound_diagnostics(face_settings_t *s, const bot_voice_diagnostics_t *value) {
+    if (s) face_sound_settings_set_diagnostics(s->sound, value);
+}
+void face_settings_set_sound_notice(face_settings_t *s, const char *notice) {
+    if (s) face_sound_settings_set_notice(s->sound, notice);
+}
+
 void face_settings_layout(face_settings_t *s, int w, int h) {
     if (!s || w < 350 || h < 240) return;
     put(s->root, 0, 0, w, h);
@@ -338,11 +390,16 @@ void face_settings_layout(face_settings_t *s, int w, int h) {
     put(s->appearance_page, 0, 0, w, h);
     put(s->settings_title, 62, 44, 320, 34);
     put(s->dismiss_button, w - 98, 28, 56, 48);
-    put(s->appearance_row, w * 8 / 100, h * 32 / 100, w * 84 / 100, 116);
+    put(s->appearance_row, w * 8 / 100, h * 27 / 100, w * 84 / 100, 116);
     put(s->appearance_label, 30, 24, 300, 32);
     put(s->appearance_description, 30, 66, 340, 32);
     put(s->active_swatch, w * 66 / 100, 35, 40, 40);
     put(s->chevron, w * 73 / 100, 38, 40, 40);
+    put(s->sound_row, w * 8 / 100, h * 56 / 100, w * 84 / 100, 116);
+    put(s->sound_label, 30, 24, 300, 32);
+    put(s->sound_description, 30, 66, w * 66 / 100, 32);
+    put(s->sound_chevron, w * 73 / 100, 38, 40, 40);
+    face_sound_settings_layout(s->sound, w, h);
     put(s->back_button, 37, 28, 52, 47);
     put(s->appearance_title, 110, 43, 320, 30);
     put(s->help_label, 38, 93, w - 76, 31);

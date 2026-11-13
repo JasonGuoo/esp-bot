@@ -5,6 +5,7 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "vision_attention.h"
+#include "bot_voice.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -49,6 +50,12 @@ typedef enum {
     BOT_EVENT_SOUND_ACTIVITY,
     BOT_EVENT_RESULT_DISMISSED,
     BOT_EVENT_LOCAL_RESPONSE_FAILED, /* local queue/decoder failure before hardware completion */
+    BOT_EVENT_VOICE_SETTINGS,
+    BOT_EVENT_SOUND_PREVIEW,
+    BOT_EVENT_CAPTURE_READY, /* AUDIO: DMA fence clear; LINK: current media transport ready */
+    BOT_EVENT_LOCAL_COMMAND,
+    BOT_EVENT_CAPTURE_OVERFLOW,
+    BOT_EVENT_PLAYBACK_PROGRESS, /* successful hardware writes, bounded low frequency */
     BOT_EVENT_COUNT
 } bot_event_kind_t;
 
@@ -70,7 +77,7 @@ typedef struct {
         struct { bot_wake_phrase_t phrase; float confidence; bool echo_safe; bool confidence_available; } wake;
         struct { bool intentional; } touch;
         struct { bool echo_safe; } utterance;
-        struct { uint32_t id; bool local_response; } playback; /* real bot_audio operation */
+        struct { uint32_t id; bool local_response; bool preview; } playback; /* real bot_audio operation */
         struct { bool connected, authenticated, encrypted; } link;
         struct { bool available; esp_err_t error; } health;
         struct { bool awake; bool sleep_supported; bool full_blackout_verified; esp_err_t error; } display;
@@ -78,6 +85,9 @@ typedef struct {
         struct { bool clock_valid; bool night; uint8_t local_hour; } night;
         struct { uint32_t code; } fault;
         struct { bool direction_valid; float azimuth_deg, quality; } sound;
+        bot_voice_settings_t voice_settings;
+        struct { bool ready; } capture;
+        struct { bot_voice_command_t command; float score; } local_command;
     } data;
 } bot_event_t;
 
@@ -89,7 +99,8 @@ typedef enum {
     BOT_COMMAND_PROGRESS,
     BOT_COMMAND_FAILURE_CAPTION,
     BOT_COMMAND_IMAGE_FAILED,
-    BOT_COMMAND_END_SESSION
+    BOT_COMMAND_END_SESSION,
+    BOT_COMMAND_REPLY_PRESENT /* retain text while real hardware audio is still pending */
 } bot_command_kind_t;
 
 typedef struct {

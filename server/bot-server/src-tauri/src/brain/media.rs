@@ -26,8 +26,12 @@ impl AudioInput {
         let capture_ms = u64::from_le_bytes(bytes[12..20].try_into().map_err(|_|"audio_time_header")?);
         let pcm = &bytes[HEADER..];
         if stream != self.stream_id || sequence != self.sequence { return Err("audio_sequence_mismatch".into()); }
-        if pcm.len() % 2 != 0 || self.pcm.len() + pcm.len() > MAX_INPUT_PCM || self.started.elapsed().as_secs() > 35 { return Err("audio_limit_exceeded".into()); }
+        if pcm.len() % 2 != 0 || self.pcm.len() + pcm.len() > MAX_INPUT_PCM
+            || (self.sequence > 0 && self.started.elapsed().as_secs() > 35) { return Err("audio_limit_exceeded".into()); }
         if sequence > 0 && capture_ms < self.last_capture_ms { return Err("audio_timestamp_regressed".into()); }
+        // An explicitly activated follow-up may prepare its transport while
+        // the user reads. The recording budget begins with actual PCM.
+        if self.sequence == 0 { self.started = std::time::Instant::now(); }
         self.pcm.extend_from_slice(pcm); self.sequence += 1; self.last_capture_ms = capture_ms;
         Ok(())
     }

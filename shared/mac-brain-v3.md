@@ -1,8 +1,10 @@
 # 小呆 Mac Brain v3：设备控制与音频协议
 
-**2026-11-08 更新：** Mac 服务端和 ESP32-S31 固件均有 v3 适配源码；当前构建、
-刷写与实机验收结果见 [本次整合记录](../docs/server-integration-2026-11-08.md)。
-协议示例不代表已完成设备到模型的端到端语音验收。
+**2026-11-13 更新：** Mac 服务端和 ESP32-S31 固件加入可选自由问答语音、播放就绪/
+硬件回执、同回合起音保留与下一句预连接的源码。默认仍为静默图文，用户开启设备
+“语音回答”后才协商音频。以下是源代码契约；本次环境没有 Cargo、S31 ESP-IDF
+或实板，未做 Rust/固件构建、真实 TTS/模型调用或扬声器验收。已有实机记录见
+[接入验收](../docs/specs/server-voice-tasks/acceptance.md)，不能用于声称本次新增链路已跑通。
 
 Mac 监听后通过 Bonjour 公布 `_espbot-brain._tcp.local.`。SRV 提供本次监听的主机名和端口，
 TXT 包含 `proto=3`、`path=/v3/brain/ws` 和公有配对 CA 的 DER SHA-256 小写十六进制
@@ -62,7 +64,7 @@ TLS 使用服务端证书认证，设备凭据使用 Bearer；当前没有客户
   "v": 3,
   "type": "welcome",
   "device_id": "xiaodai-001",
-  "capabilities": ["assistant.text", "audio.pcm16", "speaker.candidate", "scene.cards"],
+  "capabilities": ["assistant.text", "audio.pcm16", "speaker.candidate", "scene.cards", "display.reply.v1", "audio.reply.v1"],
   "sample_rate": 16000,
   "max_audio_seconds": 30,
   "requires_activation": true
@@ -148,6 +150,8 @@ Mac 生成的会话格式为 `device-<device_id>-<32 位 UUID>`，内部回合�
 | `assistant.text` | 已打开会话，没有采集、执行或播放 | 使用设备已有 ASR / 明确文本，完成整个回合后响应 |
 | `audio.begin` | 已打开会话，没有采集、执行或播放 | 在内存开始接收一段 PCM，立即响应 |
 | `audio.commit` | 已打开会话，存在对应 PCM，当前未执行或播放 | 封装 WAV，调用 Mac ASR，再完成回合后响应 |
+| `audio.playback.ready` | 当前回复声明 `playback_ack=hardware_v1`；令牌和 stream 匹配 | 设备已保留唯一硬件播放队列，Mac 才开始发送 PCM |
+| `audio.playback.report` | 当前播放的完整令牌和 stream 匹配 | 上报 `started / finished / failed / cancelled`，终态释放 Mac 播放状态 |
 | `assistant.cancel` | 无需 runtime 参数 | 取消本连接采集、回合和音频下行，保留已打开会话 |
 | `session.close` | 无需 runtime 参数 | 同上，并结束本连接会话 |
 
@@ -186,6 +190,22 @@ Mac 生成的会话格式为 `device-<device_id>-<32 位 UUID>`，内部回合�
 再次打开未关闭的会话返回 `session_already_open`。重连后没有旧会话恢复，需要再次
 依据实际明确激活发送 `session.open`，不能自动重放旧麦克风内容。
 
+### 4.1.1 图文和语音能力
+
+当前固件在上述 payload 内额外发送：
+
+```json
+{"output":{"version":1,"audio":false,"cards":["text","image"],"image":{"mime":"image/jpeg","max_width":480,"max_height":272,"max_bytes":65536}}}
+```
+
+用户开启设备的 `spoken_answers` 设置且 Mac 广告 `audio.reply.v1` 时，`audio`
+改为 `true`。Mac 在 `payload.output` 原样确认音频选择，之后每轮按此会话值设置
+`TurnInput.speak`，继续调用既有 Mac 本地 TTS。默认 `false` 不调用回复 TTS。
+该选项不会改变 OpenCode、GLM Coding Plan → DeepSeek Flash 路线或工具权限。
+只有旧的 `display.reply.v1` 能力时，设备继续图文模式并记录需要更新 Mac 的日志。
+没有图文能力或确认值不同则停止此次会话。没有 `output` 的旧 v3 客户端保留原先的
+完整响应/音频行为，不要求新增硬件回执；Mac 控制台仍使用自己的语音选项。
+
 ### 4.2 设备已经有 ASR 时：文本输入
 
 ```json
@@ -200,7 +220,8 @@ Mac 生成的会话格式为 `device-<device_id>-<32 位 UUID>`，内部回合�
 
 文本不能为空白，原始输入最多 4,000 个字符；提交后会裁去首尾空白。本路径跳过 Mac
 ASR，也不从文字进行声纹识别。设备不能通过请求指定 `profile_id` 或授予工具权限。
-当前设备回合请求本地 TTS；TTS 不可用时仍可返回文字和场景，并在 `warnings` 中说明。
+本地 TTS 是否执行来自已协商的 `output.audio`；旧客户端沿用原行为。TTS 不可用时
+仍返回文字和场景，现代设备响应的 `payload.audio_status` 标明原因。
 
 提交被接受后，服务端先发送 `turn.accepted` 事件（包含请求 `id` 和 `runtime`），
 最终响应仍在 ASR（如需）、harness、场景整理和可选 TTS 完成后返回。这个事件不代表
@@ -235,6 +256,17 @@ ASR，也不从文字进行声纹识别。设备不能通过请求指定 `profil
 
 服务端也接受省略 `transport` 的客户端，并让其使用 WSS Binary；当前固件明确请求
 `plain_tcp_v1`，失败时不会自动切换。
+
+设备将“本地采集就绪”和“网络可发送”分别上报为带完整令牌的
+`BOT_EVENT_CAPTURE_READY`（来源分别为 AUDIO / LINK）。TCP 连接完成只表示后者，
+不会单独打开麦克风上行。已明确激活后，音频 owner 可以在本轮 RX DMA/AFE fence
+之后保留最多配置量的短起音（默认 800 ms，PSRAM）；网络未就绪时不发送，释放时
+仍使用原令牌和采集时间。被动/唤醒前音频、上一回合音频不能填入该缓存。
+
+回复完成后 runtime 可先分配下一句的新令牌并提前 `audio.begin`，同时继续显示
+上一轮结果。`followup_armed` 期间 PCM 上行仍关闭；有效的本地 VAD START 消费同一
+预授权令牌后才能交付。改变 token、停止、设置打断、播放或本地固定命令会清理
+缓存。35 秒采集墙钟从首个有效 PCM 开始，阅读时间不算录音；会话空闲期限仍生效。
 
 ### 4.4 提交音频
 
@@ -312,7 +344,7 @@ HMAC 覆盖类型与数据。上行类型为 `I`，下行类型为 `O`，数据�
 
 ## 6. 完整回复与屏幕内容
 
-以下是带音频的最终响应结构。回复正文保留 `payload.audio: null`，音频已经从本地
+以下是未协商 `output` 的旧客户端完整响应结构。回复正文保留 `payload.audio: null`，音频已经从本地
 WAV 转为所选通道的 PCM 二进制；可播放音频的描述在**顶层 `audio`**。
 
 ```json
@@ -354,7 +386,7 @@ WAV 转为所选通道的 PCM 二进制；可播放音频的描述在**顶层 `a
 URL 不包含凭据，不允许非 443 端口、IP 字面量、localhost 或 `.local` 主机。
 场景不承载可执行 HTML、脚本、动作轨迹或摄像头启动命令。设备应按自己的屏幕能力
 选择展示方式；`image` 卡片并不等同于已实现 GIF 解码，`web` 卡片也不等同于板端
-已经有浏览器。现协议没有设备渲染能力协商或后台主动推送任务。
+已经有浏览器。渲染能力只协商已实现的文字和有界静态图，不支持后台主动推送任务。
 
 `identity_candidate` 是本地识别候选结果。它不是鉴权、家长确认、当前注意力对象或
 可自动使用个人记忆的证明；设备请求始终不携带受信任 profile。身份与记忆规则见
@@ -366,7 +398,21 @@ URL 不包含凭据，不允许非 443 端口、IP 字面量、localhost 或 `.l
 
 ## 7. 音频下行、完成与打断
 
-服务端先发完整成功响应，再约每 20 ms 发送最多 640 字节 PCM。序号从 0 开始，
+协商 `output.audio=true` 的新客户端收到紧凑图文结果及如下顶层音频描述：
+
+```json
+{"audio":{"stream_id":41,"format":"pcm_s16le","sample_rate":16000,"channels":1,"bytes":64000,"frame_samples":320,"playback_ack":"hardware_v1"}}
+```
+
+设备校验完整令牌、格式、非零 stream 和 120 秒总字节上限，先用
+`BOT_COMMAND_REPLY_PRESENT` 保留可读结果，再以原 token 预留唯一硬件播放队列。
+成功后发送：
+
+```json
+{"v":3,"type":"request","id":"r-ready-2","method":"audio.playback.ready","payload":{"runtime":{"epoch":7,"session_id":12,"turn_id":2,"focus_generation":0},"stream_id":41}}
+```
+
+Mac 收到 ready 后才约每 20 ms 发送最多 640 字节 PCM。序号从 0 开始，
 最后一帧可以不足 640 字节；调度延迟使用 Delay 策略，不会为追赶时钟而主动补发
 一串过期 tick。这里的节拍仍不是实时播放时序保证，设备需要有限的播放缓冲。
 
@@ -377,10 +423,35 @@ URL 不包含凭据，不允许非 443 端口、IP 字面量、localhost 或 `.l
 ```
 
 **`audio.complete` 不表示孩子已经听完。** 明文 TCP 路径上，WSS 和音频是独立连接，
-设备以经过校验的 `E` 帧作为网络音频结束标记，再等待自己的输出缓冲排空。当前没有
-`audio.ack`、`playback.finished` 或扬声器播放进度回报；服务端此时即释放播放状态。
+设备以经过校验的 `E` 帧作为网络音频结束标记，检查累计帧数和字节数都与描述一致，
+再等待唯一音频 owner 的真实 DMA 排空事件。收到 E 只进入 DRAINING，不推进会话。
+设备队列暂满时保留原 TCP 帧及序号，最多重试 2 秒；乱序、错误 stream/HMAC、
+时间戳或长度不会被跳过。所有异步回调仍绑定原 token 和 playback ID。
 
-当前链路按半双工工作：服务器正在发送音频时，新的 begin/text 返回 `session_busy`。
+硬件 STARTED / DONE / FAILED / CANCELLED 分别映射为：
+
+```json
+{"v":3,"type":"request","id":"r-played-2","method":"audio.playback.report","payload":{"runtime":{"epoch":7,"session_id":12,"turn_id":2,"focus_generation":0},"stream_id":41,"status":"finished","frames":100,"bytes":64000,"code":""}}
+```
+
+`status` 可为 `started / finished / failed / cancelled`。finished 仅在服务器已发送
+完整内容、已收到 started、帧数和字节数吻合时接纳。重复终态回执幂等；新流不会
+接纳旧流回执。Mac 后端事件/回执流的 `device.audio` 记录 ready、硬件状态或 unavailable/unconfirmed，
+不将“排队/发完”记为“听完”。无 ready 最多等 5 秒，ready 后最多等 PCM 时长加
+10 秒，超时释放媒体并发带原 token/stream 的 `audio.cancelled`。
+本轮没有新增 Mac 前端的细分播放状态面板；以上状态是后端事件与日志契约。
+
+正常硬件 DONE 由 runtime 开启下一句；如果预留失败，或首个 STARTED 前硬件失败，
+保留已接纳的文字并按文字回复结束。TTS 失败、WAV 格式错误或超长时，顶层 audio
+为 null，`payload.audio_status={requested,available,code}` 和 Mac `device.audio`
+说明原因，不发送半条截断 PCM。硬件完成仍不能证明扬声器连线、音量或人耳确实听到；
+实板验收独立进行。旧的无 output 客户端保持发完即释放的旧行为。
+
+夜间且时钟有效时，每条回复在预留时锁存 `night_gain_percent`，设备对 PCM 缩放
+一次；codec 仍应用用户音量和静音，网络路径不会解除静音。真实硬件写入进展刷新
+本轮无进展计时，WSS 心跳或网络发送进度不会延长硬件播放许可。
+
+当前链路按半双工工作：新协商客户端等待实际硬件终态期间，新的 begin/text 返回 `session_busy`。
 需要打断时，设备先在本地立即停播并清空旧缓冲，再发：
 
 ```json
@@ -428,7 +499,8 @@ cancel/close 会清空播放状态并返回确认；不能要求此路径一定�
 | `audio.cancelled` | 对应音频下行被家长取消；停止该 stream 并丢弃其剩余帧 |
 | `audio.complete` | 服务端结束发送流程；明文音频还需等待独立通道的 `E` 帧和本地播放缓冲排空 |
 
-前两个无关联请求 ID，例如 `{"v":3,"type":"event","event":"session.expired"}`。
+前两个无关联请求 ID，新 Server 携带实际采集/回合的完整 runtime；设备仍兼容旧 Server
+省略 runtime 的整会话取消。音频取消必须校验原 token 和 stream。
 全局取消还可能先结束活动请求、发音频取消事件。客户端不能假定始终存在一个活动请求。
 
 | 边界 | 当前值与处理 |
@@ -441,9 +513,9 @@ cancel/close 会清空播放状态并返回确认；不能要求此路径一定�
 | 心跳 | 每 15 秒发原生 WS Ping；收到任意 WS 消息刷新连接活跃时间 |
 | 无上行消息 | 心跳检查时超过 50 秒则断开；不是精确 50 秒定时器 |
 | 会话空闲 | 默认 300 秒，可配置 30–1,800 秒；按 15 秒心跳检查 |
-| 空闲计时刷新 | 打开会话、audio.begin、提交 text/commit；单个二进制帧不刷新此计时 |
+| 空闲计时刷新 | 打开会话、audio.begin、有效输入 PCM、提交 text/commit；播放回执、图片读取和心跳不刷新 |
 | 上行 PCM | 最多 960,000 字节 = 30 秒；原始媒体仅保存在本次内存流程 |
-| 采集墙钟时长 | 超过 35 整秒后，在 push 或心跳检查中清空；心跳清空不保证另发专属事件 |
+| 采集墙钟时长 | 首个有效 PCM 后超过 35 整秒，在 push 或心跳检查中清空；预连接阅读不计入录音 |
 | 下行 PCM | 最多 3,840,000 字节 = 120 秒；本地 WAV base64 先受 6 MiB 字符串上限约束 |
 | 请求去重 | 每连接最近 128 个请求 ID |
 | 取消广播 | 容量 64；接收落后按全局取消处理 |
@@ -472,6 +544,8 @@ cancel/close 会清空播放状态并返回确认；不能要求此路径一定�
 | `audio_frame_invalid` / `audio_sequence_mismatch` | 放弃本段，重新 begin；不补传旧帧 |
 | `audio_timestamp_regressed` / `audio_limit_exceeded` | 修正单调时间、帧/总量/墙钟边界 |
 | `audio_too_short` / `asr_no_speech` | 仅在用户仍明确交互时重新采集有用语音 |
+| `audio_playback_stale` | 回执不属于当前完整 token/stream；不重新播放旧流 |
+| `audio_playback_incomplete` | finished 的帧/字节或 STARTED 证据不完整；保留未确认状态 |
 | `cancelled` | 当前回合已经结束；不再等待其成功响应 |
 | `unsupported_device_method` | 此方法未暴露给设备，不能改用家长 RPC 越过边界 |
 

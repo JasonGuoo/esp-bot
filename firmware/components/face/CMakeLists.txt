@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "face.c"
         "face_settings.c"
+        "face_sound_settings.c"
         "face_renderer.c"
         "renderer_outline.c"
         "renderer_pill.c"
@@ -10,6 +11,6 @@ idf_component_register(
         "fonts/xiaodai_font_sc_30.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."
-    REQUIRES lvgl__lvgl
+    REQUIRES lvgl__lvgl bot_voice
     EMBED_FILES "fonts/xiaodai_glyph_bitmap.bin"
 )

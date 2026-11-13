@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "bot_voice.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,7 @@ typedef enum {
 typedef enum {
     BOT_AUDIO_PLAYBACK_SESSION = 0,
     BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE,
+    BOT_AUDIO_PLAYBACK_PREVIEW,
 } bot_audio_playback_source_t;
 
 typedef enum {
@@ -51,6 +53,11 @@ typedef enum {
     BOT_AUDIO_EVENT_PLAYBACK_CANCELLED,
     BOT_AUDIO_EVENT_PLAYBACK_FAILED,
     BOT_AUDIO_EVENT_AMBIENT_SOUND,
+    BOT_AUDIO_EVENT_LOCAL_COMMAND,
+    BOT_AUDIO_EVENT_CAPTURE_READY,
+    BOT_AUDIO_EVENT_BUFFER_OVERFLOW,
+    BOT_AUDIO_EVENT_CONTROLS_APPLIED,
+    BOT_AUDIO_EVENT_PLAYBACK_PROGRESS, /* successful PCM writes only, <=1 event/s */
 } bot_audio_event_kind_t;
 
 typedef struct {
@@ -67,6 +74,8 @@ typedef struct {
     uint32_t playback_id;
     bot_audio_playback_source_t playback_source; /* playback events only */
     int wake_word_index;
+    bot_voice_command_t command;  /* LOCAL_COMMAND; runtime alone executes it */
+    uint32_t controls_revision;
     bool direction_valid;         /* official DOA quality gate passed; orientation uncalibrated */
     bool speech;                  /* ESP-SR VAD; false may be a non-speech sound */
     float azimuth_deg, direction_quality;
@@ -110,9 +119,18 @@ typedef struct {
 } bot_audio_config_t;
 
 typedef struct {
+    bool deliver_pcm;             /* current authenticated transport is ready */
+    bool retain_start;            /* explicit post-wake, same-token RAM capture */
+    bool waiting_for_followup;    /* stricter VAD onset; no implicit token change */
+    bool local_commands;          /* fixed local commands only in an active session */
+} bot_audio_session_options_t;
+
+typedef struct {
     bool started, capture_running, afe_running, playback_running;
     bool session_open, pcm_delivery_enabled;
     bool self_playback_blocked;       /* reservation, playback, tail or RX/AFE cleanup still active */
+    bool capture_ready;              /* current token's DMA/AFE fence is complete */
+    bool retain_start_enabled, local_commands_available, command_consumed;
     bool codec_available, vad_available, wake_available;
     bool hardware_capture_timestamps; /* false */
     bool aec_available;               /* false; no fabricated reference */
@@ -136,6 +154,21 @@ typedef struct {
     uint32_t rx_discard_frames;       /* remaining DMA FIFO fence before PCM release */
     uint32_t playback_id;
     bot_audio_playback_source_t playback_source;
+    bot_voice_settings_t controls_requested, controls_applied;
+    uint32_t controls_revision, controls_applied_revision;
+    esp_err_t controls_error;
+    uint32_t buffered_samples, buffer_high_water;
+    uint64_t buffered_drops, replayed_frames;
+    uint64_t local_commands, keyword_runs, keyword_timeouts, keyword_rejections;
+    uint64_t afe_feed_rejections, capture_overruns;
+    uint32_t read_us, read_max_us, afe_us, afe_max_us, keyword_us, keyword_max_us;
+    uint32_t processing_us, processing_max_us, output_queue_high_water;
+    uint32_t afe_recovery_attempts, afe_recoveries;
+    int64_t last_wake_us, last_command_us, last_capture_ready_us;
+    int64_t last_playback_begin_us, last_playback_started_us, last_playback_done_us;
+    float last_wake_score, last_candidate_score;
+    bool last_wake_score_available;
+    int last_candidate_command;
     char model_name[BOT_AUDIO_MODEL_NAME_BYTES + 1];
     char reason[BOT_AUDIO_REASON_BYTES + 1];
 } bot_audio_status_t;
@@ -157,10 +190,13 @@ esp_err_t bot_audio_stop(bot_audio_t *audio, uint32_t timeout_ms);
 esp_err_t bot_audio_destroy(bot_audio_t *audio, uint32_t timeout_ms);
 
 /** Runtime's explicit permission gate. NULL token closes the local session.
- * deliver_pcm is a SECOND permission for a currently authenticated, encrypted
- * transport; it must stay false for local-only/unauthenticated sessions.
- * No wake/VAD event opens this gate automatically. New gates discard the entire
+ * deliver_pcm is a SECOND permission for a currently authenticated media
+ * session using the project's negotiated transport; keep it false for
+ * local-only/unauthenticated sessions.
+ * No wake/VAD event opens this gate automatically. New tokens discard the entire
  * possible RX DMA backlog before emitting raw PCM; no vad_cache is released.
+ * Same-token transport readiness changes preserve the capture fence. This
+ * compatibility API enables neither RAM retention nor local commands.
  * Idempotent for an unchanged token/permission. Thread-safe, nonblocking.
  * Playback reservation, playback itself and its tail suppress PCM delivery even
  * when deliver_pcm=true. Session changes cancel SESSION playback only; runtime
@@ -169,6 +205,28 @@ esp_err_t bot_audio_destroy(bot_audio_t *audio, uint32_t timeout_ms);
  * already in progress. Never make network/filesystem calls in these callbacks. */
 esp_err_t bot_audio_set_session(bot_audio_t *audio, const bot_audio_token_t *token,
                                 bool deliver_pcm);
+
+/** Explicit capture lease. retain_start permits a bounded RAM-only prefix AFTER
+ * the new token's RX fence; it never captures passive/pre-wake audio. Changing
+ * only transport readiness or waiting mode preserves the SAME token's prefix.
+ * A different token, permission revocation, playback BEGIN, local command or
+ * stop clears it. Old PCM is never relabelled. Consumers must still validate the
+ * original token. NULL token/options closes all capture/command permissions.
+ * A local command latches PCM closed for that token until runtime replaces it.
+ * Calls are nonblocking and idempotent; runtime is the sole permission owner. */
+esp_err_t bot_audio_set_session_ex(bot_audio_t *audio, const bot_audio_token_t *token,
+                                   const bot_audio_session_options_t *options);
+
+/** Queue settings for the capture owner, including before start. Does no
+ * codec/model I/O on the caller. Identical requests remain idempotent on error.
+ * Volume is 0..60; mute preserves its value and gates PA, never ES8389 ADC mute.
+ * Only volume/mute/wake threshold are applied here; night gain and Mac TTS
+ * preference are retained for the composing runtime. Status/events acknowledge
+ * the revision actually applied. Persistence belongs to the platform owner. */
+esp_err_t bot_audio_set_controls(bot_audio_t *audio, const bot_voice_settings_t *settings);
+/** Queue a bounded AFE reset retry using the existing model/codec. No reboot,
+ * allocation or microphone ownership transfer; an AFE never created cannot retry. */
+esp_err_t bot_audio_retry_afe(bot_audio_t *audio);
 
 /** Keep VAD local while an active conversation waits for audible follow-up speech. */
 esp_err_t bot_audio_wait_for_followup(bot_audio_t *audio, const bot_audio_token_t *token);
@@ -190,6 +248,11 @@ esp_err_t bot_audio_playback_begin(bot_audio_t *audio, const bot_audio_token_t *
  * BEGIN immediately blocks wake/VAD/uplink through the eventual playback tail. */
 esp_err_t bot_audio_playback_begin_local(bot_audio_t *audio, const bot_audio_token_t *runtime_token,
                                         uint32_t *playback_id);
+/** Explicit settings-page preview lease. Event token is {preview_epoch,0,0,0}.
+ * Never opens mic/session permissions. Runtime/UI must cancel when settings
+ * close or preview authority expires; source is BOT_AUDIO_PLAYBACK_PREVIEW. */
+esp_err_t bot_audio_playback_begin_preview(bot_audio_t *audio, uint32_t preview_epoch,
+                                          uint32_t *playback_id);
 esp_err_t bot_audio_playback_write(bot_audio_t *audio, uint32_t playback_id,
                                   const int16_t *samples, size_t sample_count);
 esp_err_t bot_audio_playback_end(bot_audio_t *audio, uint32_t playback_id);

@@ -603,6 +603,24 @@ void face_on_theme_applied(face_view_t *f,
     f->on_applied_context = context;
 }
 
+void face_on_sound_settings_request(face_view_t *f,
+                                    face_sound_settings_request_cb_t callback, void *context) {
+    if (f) face_settings_on_sound_settings_request(f->settings, callback, context);
+}
+void face_on_sound_preview_request(face_view_t *f,
+                                   face_sound_preview_request_cb_t callback, void *context) {
+    if (f) face_settings_on_sound_preview_request(f->settings, callback, context);
+}
+void face_set_sound_settings(face_view_t *f, const bot_voice_settings_t *settings) {
+    if (f) face_settings_set_sound_settings(f->settings, settings);
+}
+void face_set_sound_diagnostics(face_view_t *f, const bot_voice_diagnostics_t *diagnostics) {
+    if (f) face_settings_set_sound_diagnostics(f->settings, diagnostics);
+}
+void face_set_sound_notice(face_view_t *f, const char *notice) {
+    if (f) face_settings_set_sound_notice(f->settings, notice);
+}
+
 void face_on_event(face_view_t *f, face_event_cb_t callback, void *context) {
     if (!f) return;
     f->on_event = callback;

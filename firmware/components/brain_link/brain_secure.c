@@ -32,16 +32,22 @@
 static const char *TAG = "brain_secure";
 enum { URL_SIZE = 256, CERT_SIZE = 2048, TOKEN_SIZE = 65, RX_SIZE = 8192,
        PCM_SAMPLES = 320, PCM_QUEUE_FRAMES = 96, PLAIN_RX_SIZE = 4096, PLAIN_MAC_SIZE = 32,
-       IMAGE_ERROR_CODE_BYTES = 40 };
+       IMAGE_ERROR_CODE_BYTES = 40, MAX_REPLY_PCM_BYTES = 120 * 16000 * 2 };
 typedef struct { uint32_t version; char url[URL_SIZE], cert[CERT_SIZE], token[TOKEN_SIZE]; } provision_t;
 typedef struct { bot_session_token_t token; uint64_t timestamp_ms; uint16_t count; int16_t pcm[PCM_SAMPLES]; } pcm_frame_t;
-typedef enum { DOWN, WELCOME, READY, OPENING, OPEN, BEGINNING, PLAIN_CONNECTING, CAPTURING, COMMITTED, PLAYING, WAIT_NEXT } phase_t;
+typedef enum { DOWN, WELCOME, READY, OPENING, OPEN, BEGINNING, PLAIN_CONNECTING,
+    CAPTURING, COMMITTED, PLAYBACK_PENDING, PLAYING, DRAINING, WAIT_NEXT } phase_t;
 typedef struct {
     phase_t phase;
-    bool authenticated, active, utterance, audio_allowed, silent_supported;
+    bool authenticated, active, utterance, audio_allowed, pcm_permitted, silent_supported;
+    bool audio_supported, spoken_answers, session_spoken, followup_armed;
+    bool result_valid, result_admitted, playback_cancel_requested, cancel_before_next;
     bot_activation_t activation;
-    bot_session_token_t desired, remote;
+    bot_session_token_t desired, remote, result_token, playback_token;
     uint32_t stream, sequence, playback_id, playback_stream, playback_sequence;
+    uint32_t playback_expected, playback_received;
+    uint8_t reply_gain_percent, playback_gain_percent;
+    int64_t playback_started_us;
     uint32_t progress_seq;
     int64_t commit_started_us;
     char open_id[24], begin_id[24], commit_id[24];
@@ -65,6 +71,15 @@ static bot_audio_t *s_audio;
 static QueueHandle_t s_pcm;
 static esp_websocket_client_handle_t s_ws;
 static atomic_bool s_overflow;
+static bot_session_token_t s_overflow_token; /* s_lock */
+static atomic_bool s_playback_event_overflow;
+typedef struct {
+    bot_audio_event_kind_t kind;
+    bot_session_token_t token;
+    uint32_t playback_id, stream, frames, bytes;
+    esp_err_t error;
+} playback_event_t;
+static QueueHandle_t s_playback_events;
 static char *s_rx;
 static uint8_t *s_pcm_storage;
 static StaticQueue_t s_pcm_control;
@@ -77,6 +92,7 @@ static int s_plain_fd = -1;
 static uint8_t s_plain_key[32];
 static uint8_t *s_plain_rx;
 static size_t s_plain_used;
+static int64_t s_plain_blocked_us;
 typedef enum { IMAGE_DESCRIPTOR, IMAGE_CHUNK } image_message_kind_t;
 typedef struct {
     image_message_kind_t kind;
@@ -137,7 +153,7 @@ void brain_secure_image_failed(bot_session_token_t token, const char *asset_id, 
     if (asset_id_valid(asset_id)) snprintf(failure.asset_id,sizeof(failure.asset_id),"%s",asset_id);
     snprintf(failure.code,sizeof(failure.code),"%s",image_error_code_valid(code)?code:"image_request_failed");
     portENTER_CRITICAL(&s_lock);
-    if (s.authenticated && s.active && same(token,s.desired) && same(token,s.remote) &&
+    if (s.authenticated && s.result_valid && same(token,s.result_token) &&
         (!s_image_failure.generation || !same(token,s_image_failure.token))) {
         failure.generation=s_image_failure.generation+1;
         if (!failure.generation) failure.generation=1;
@@ -153,8 +169,7 @@ static bool image_failed_for(bot_session_token_t token) {
 }
 static bool image_current(bot_session_token_t token) {
     portENTER_CRITICAL(&s_lock);
-    bool current=s.authenticated && s.active && s.phase==WAIT_NEXT &&
-        same(token,s.desired) && same(token,s.remote);
+    bool current=s.authenticated && s.result_valid && same(token,s.result_token);
     portEXIT_CRITICAL(&s_lock);
     return current;
 }
@@ -165,18 +180,29 @@ static void link_event(bool online) {
         .data.link={.connected=online,.authenticated=online,.encrypted=online}};
     if (bot_bus_post(s_bus, &e, 0) != ESP_OK) bot_bus_request_stop(s_bus, e.observed_ms);
 }
-static void fail_session(const char *reason) {
-    ESP_LOGW(TAG, "%s", reason);
+static void capture_event(bot_session_token_t token, bool ready) {
+    if (!s_bus || !token.session_id) return;
+    const bot_event_t event={.kind=BOT_EVENT_CAPTURE_READY,.source=BOT_SOURCE_LINK,
+        .observed_ms=(uint32_t)(esp_timer_get_time()/1000),.token=token,
+        .data.capture={.ready=ready}};
+    (void)bot_bus_post(s_bus,&event,0);
+}
+static void fail_session_token(const char *reason, const bot_session_token_t *expected) {
     portENTER_CRITICAL(&s_lock);
+    if (expected && !same(*expected,s.desired)) {portEXIT_CRITICAL(&s_lock);return;}
     s.audio_allowed = false;
+    s.phase=s.authenticated?WAIT_NEXT:DOWN;
     bool active = s.active;
     const bot_session_token_t token = s.desired;
+    const bot_session_token_t remote = s.remote;
     const uint32_t playback = s.playback_id;
-    s.playback_id = 0;
+    s.playback_cancel_requested = playback != 0;
     portEXIT_CRITICAL(&s_lock);
+    ESP_LOGW(TAG, "%s", reason);
     /* Transport owns only its own playback lease. A disconnect or late error
      * must not cancel an independent local wake acknowledgement. */
     if (s_audio && playback) bot_audio_playback_cancel(s_audio, playback);
+    capture_event(remote,false);
     if (active && s_bus) {
         const bot_event_t event = {.kind = BOT_EVENT_SESSION_END, .source = BOT_SOURCE_SYSTEM,
             .observed_ms = (uint32_t)(esp_timer_get_time()/1000), .token = token};
@@ -185,10 +211,12 @@ static void fail_session(const char *reason) {
         (void)bot_bus_post(s_bus, &event, 0);
     }
 }
+static void fail_session(const char *reason) { fail_session_token(reason,NULL); }
+static void fail_operation(bot_session_token_t token,const char *reason) { fail_session_token(reason,&token); }
 void brain_secure_network_down(void) {
     portENTER_CRITICAL(&s_lock);
     bool was = s.authenticated;
-    s.authenticated = false; s.audio_allowed = false; s.phase = DOWN;
+    s.authenticated = false; s.audio_allowed = false; s.result_valid=false; s.phase = DOWN;
     portEXIT_CRITICAL(&s_lock);
     if (was) { link_event(false); fail_session("Secure connection lost; session stopped"); }
 }
@@ -246,7 +274,20 @@ void brain_secure_update(const bot_runtime_snapshot_t *state) {
     portENTER_CRITICAL(&s_lock);
     s.active=state->audio_session_requested; s.utterance=state->utterance_active;
     s.activation=state->activation; s.desired=state->token;
-    if (!s.active || !state->audio_uplink_permitted || !same(s.desired,s.remote)) s.audio_allowed=false;
+    s.pcm_permitted=state->audio_uplink_permitted;
+    s.followup_armed=state->followup_armed;
+    s.spoken_answers=state->voice_settings.spoken_answers;
+    s.reply_gain_percent=state->clock_valid && state->night_policy?state->voice_settings.night_gain_percent:100;
+    if (!s.active || !same(s.desired,s.remote)) s.audio_allowed=false;
+    if (s.result_valid) {
+        if (same(state->reading_token,s.result_token)) s.result_admitted=true;
+        // Admission may lag the WSS callback by one runtime tick. A prepared
+        // follow-up has a new capture token but still owns the previous result.
+        if ((s.result_admitted && !same(state->reading_token,s.result_token)) ||
+            (!same(state->token,s.result_token) && !state->followup_armed)) {
+            s.result_valid=false;
+        }
+    }
     portEXIT_CRITICAL(&s_lock);
 }
 bool brain_secure_uplink(const bot_session_token_t *token) {
@@ -260,30 +301,56 @@ void brain_secure_pcm(const bot_audio_pcm_t *frame) {
     if (!frame || !s_pcm || frame->sample_rate!=16000) return;
     bot_session_token_t token={frame->token.epoch,frame->token.session_id,frame->token.turn_id,frame->token.focus_generation};
     if (!brain_secure_uplink(&token)) return;
+    portENTER_CRITICAL(&s_lock);
+    bool permitted=s.pcm_permitted && same(token,s.desired);
+    portEXIT_CRITICAL(&s_lock);
+    if (!permitted) return;
     for (size_t at=0; at<frame->sample_count;) {
         size_t n=frame->sample_count-at; if (n>PCM_SAMPLES) n=PCM_SAMPLES;
         pcm_frame_t packet={.token=token,.timestamp_ms=(uint64_t)(frame->observed_us/1000),.count=(uint16_t)n};
         memcpy(packet.pcm,frame->samples+at,n*sizeof(int16_t));
-        if (xQueueSend(s_pcm,&packet,0)!=pdTRUE) { atomic_store(&s_overflow,true); return; }
+        if (xQueueSend(s_pcm,&packet,0)!=pdTRUE) {
+            portENTER_CRITICAL(&s_lock);
+            if (same(token,s.desired)) {s_overflow_token=token;atomic_store(&s_overflow,true);}
+            portEXIT_CRITICAL(&s_lock);
+            return;
+        }
         at+=n;
     }
+}
+
+void brain_secure_audio_event(const bot_audio_event_t *event) {
+    if (!event || !s_playback_events || event->playback_source!=BOT_AUDIO_PLAYBACK_SESSION ||
+        (event->kind!=BOT_AUDIO_EVENT_PLAYBACK_STARTED && event->kind!=BOT_AUDIO_EVENT_PLAYBACK_DONE &&
+         event->kind!=BOT_AUDIO_EVENT_PLAYBACK_CANCELLED && event->kind!=BOT_AUDIO_EVENT_PLAYBACK_FAILED)) return;
+    const bot_session_token_t token={event->token.epoch,event->token.session_id,
+        event->token.turn_id,event->token.focus_generation};
+    portENTER_CRITICAL(&s_lock);
+    bool current=event->playback_id && same(token,s.playback_token) &&
+        (event->playback_id==s.playback_id || (!s.playback_id && s.phase==PLAYBACK_PENDING));
+    playback_event_t copied={.kind=event->kind,.token=token,.playback_id=event->playback_id,
+        .stream=s.playback_stream,.frames=s.playback_sequence,.bytes=s.playback_received,.error=event->error};
+    portEXIT_CRITICAL(&s_lock);
+    if (current && xQueueSend(s_playback_events,&copied,0)!=pdTRUE)
+        atomic_store(&s_playback_event_overflow,true);
 }
 
 static void command(bot_command_kind_t kind, bot_session_token_t token, const char *text) {
     bot_command_t c={.kind=kind,.token=token,.received_ms=(uint32_t)(esp_timer_get_time()/1000),.ttl_ms=2000};
     if (text && kind==BOT_COMMAND_SET_EXPRESSION) snprintf(c.data.expression,sizeof(c.data.expression),"%s",text);
-    if (text && (kind==BOT_COMMAND_SET_CAPTION || kind==BOT_COMMAND_FAILURE_CAPTION || kind==BOT_COMMAND_REPLY_DONE)) {
+    if (text && (kind==BOT_COMMAND_SET_CAPTION || kind==BOT_COMMAND_FAILURE_CAPTION ||
+        kind==BOT_COMMAND_REPLY_DONE || kind==BOT_COMMAND_REPLY_PRESENT)) {
         size_t n=strlen(text); if (n>BOT_CAPTION_MAX_BYTES) n=BOT_CAPTION_MAX_BYTES;
         while (n && ((unsigned char)text[n]&0xc0)==0x80) --n;
         memcpy(c.data.caption,text,n); c.data.caption[n]=0;
     }
-    if (bot_bus_submit_command(s_bus,&c,0)!=ESP_OK) fail_session("Secure response queue full");
+    if (bot_bus_submit_command(s_bus,&c,0)!=ESP_OK) fail_operation(token,"Secure response queue full");
 }
 static void progress_command(bot_session_token_t token, bool waiting_for_approval) {
     bot_command_t c={.kind=BOT_COMMAND_PROGRESS,.token=token,
         .received_ms=(uint32_t)(esp_timer_get_time()/1000),.ttl_ms=2000};
     c.data.waiting_for_approval=waiting_for_approval;
-    if (bot_bus_submit_command(s_bus,&c,0)!=ESP_OK) fail_session("Secure response queue full");
+    if (bot_bus_submit_command(s_bus,&c,0)!=ESP_OK) fail_operation(token,"Secure response queue full");
 }
 static bool array_has_string(cJSON *array, const char *value) {
     cJSON *item;
@@ -305,10 +372,15 @@ static const char *request_error(cJSON *root) {
 }
 static void finish_with_message(bot_session_token_t token, const char *message, bool reply_done) {
     portENTER_CRITICAL(&s_lock);
+    if (!s.authenticated || !s.active || !same(s.desired,token)) {
+        portEXIT_CRITICAL(&s_lock);
+        return;
+    }
     s.audio_allowed=false;
     s.remote=token;
     s.phase=WAIT_NEXT;
     portEXIT_CRITICAL(&s_lock);
+    capture_event(token,false);
     command(BOT_COMMAND_FAILURE_CAPTION,token,message);
     if (reply_done) command(BOT_COMMAND_REPLY_DONE,token,NULL);
 }
@@ -396,20 +468,35 @@ static bool decode_key(const char *hex,uint8_t out[32]) {
     }
     return true;
 }
-static void binary(const unsigned char *data,size_t n) {
-    if (n<22 || n>660 || memcmp(data,"XDAI",4) || (n-20)%2) { fail_session("Invalid audio response"); return; }
+/* Only secure_task consumes the authenticated TCP stream. A full hardware
+ * queue leaves the original frame unconsumed for a bounded retry. */
+static esp_err_t playback_frame(const unsigned char *data,size_t n) {
+    if (n<22 || n>660 || memcmp(data,"XDAI",4) || (n-20)%2) return ESP_ERR_INVALID_ARG;
     uint32_t stream=read32(data+4), seq=read32(data+8), playback;
+    uint64_t timestamp=0;
+    for (unsigned i=0;i<8;i++) timestamp|=(uint64_t)data[12+i]<<(8*i);
     portENTER_CRITICAL(&s_lock);
     bool valid=s.authenticated && s.active && s.phase==PLAYING && same(s.desired,s.remote) &&
-        stream==s.playback_stream && seq==s.playback_sequence;
-    if (valid) ++s.playback_sequence;
+        stream==s.playback_stream && seq==s.playback_sequence && timestamp==(uint64_t)seq*20 &&
+        s.playback_received<=s.playback_expected && n-20<=s.playback_expected-s.playback_received &&
+        (n==660 || n-20==s.playback_expected-s.playback_received);
     playback=s.playback_id;
+    uint8_t gain=s.playback_gain_percent;
     portEXIT_CRITICAL(&s_lock);
-    if (!valid) return; /* includes late audio after local stop */
+    if (!valid || !playback) return ESP_ERR_INVALID_STATE;
     int16_t samples[PCM_SAMPLES];
     size_t count=(n-20)/2;
-    for (size_t i=0;i<count;i++) samples[i]=(int16_t)((uint16_t)data[20+2*i]|((uint16_t)data[21+2*i]<<8));
-    if (bot_audio_playback_write(s_audio,playback,samples,count)!=ESP_OK) fail_session("Audio playback backpressure");
+    for (size_t i=0;i<count;i++) {
+        int16_t sample=(int16_t)((uint16_t)data[20+2*i]|((uint16_t)data[21+2*i]<<8));
+        samples[i]=(int16_t)((int32_t)sample*gain/100);
+    }
+    esp_err_t error=bot_audio_playback_write(s_audio,playback,samples,count);
+    if (error==ESP_OK) {
+        portENTER_CRITICAL(&s_lock);
+        if (s.playback_id==playback) {++s.playback_sequence;s.playback_received+=(uint32_t)(n-20);}
+        portEXIT_CRITICAL(&s_lock);
+    }
+    return error;
 }
 static void text_message(const char *data,size_t n) {
     cJSON *root=cJSON_ParseWithLength(data,n); if (!root) { fail_session("Invalid secure response"); return; }
@@ -420,7 +507,9 @@ static void text_message(const char *data,size_t n) {
         cJSON *version=cJSON_GetObjectItemCaseSensitive(root,"v"),*dev=cJSON_GetObjectItemCaseSensitive(root,"device_id");
         if (cJSON_IsNumber(version) && version->valueint==3 && cJSON_IsString(dev) && !strcmp(dev->valuestring,CONFIG_ESPBOT_DEVICE_ID)) {
             bool supported=array_has_string(cJSON_GetObjectItemCaseSensitive(root,"capabilities"),"display.reply.v1");
-            portENTER_CRITICAL(&s_lock); s.authenticated=true; s.silent_supported=supported; s.phase=READY; portEXIT_CRITICAL(&s_lock);
+            bool audio_supported=array_has_string(cJSON_GetObjectItemCaseSensitive(root,"capabilities"),"audio.reply.v1");
+            portENTER_CRITICAL(&s_lock); s.authenticated=true; s.silent_supported=supported;
+            s.audio_supported=audio_supported; s.phase=READY; portEXIT_CRITICAL(&s_lock);
             link_event(true); ESP_LOGI(TAG,"Authenticated Mac gateway connected");
         } else fail_session("Gateway welcome invalid");
     } else if (!strcmp(kind,"response") && cJSON_IsString(id)) {
@@ -429,14 +518,19 @@ static void text_message(const char *data,size_t n) {
         phase_t phase=s.phase; bool opening=phase==OPENING&&!strcmp(id->valuestring,s.open_id);
         bool beginning=phase==BEGINNING&&!strcmp(id->valuestring,s.begin_id);
         bool completing=phase==COMMITTED&&!strcmp(id->valuestring,s.commit_id);
-        bool image_reply=phase==WAIT_NEXT && *s.image_request_id && !strcmp(id->valuestring,s.image_request_id);
+        bool image_reply=s.result_valid && *s.image_request_id && !strcmp(id->valuestring,s.image_request_id);
         bot_session_token_t current=s.remote; bool fresh=s.authenticated&&s.active&&same(s.desired,current);
+        bot_session_token_t result_token=s.result_token;
+        bool image_fresh=s.authenticated && s.result_valid;
+        bool session_spoken=s.session_spoken;
+        uint32_t begin_stream=s.stream;
         if (image_reply) {
             memcpy(requested_asset,s.image_asset_id,sizeof(requested_asset));
             s.image_request_id[0]='\0';
         }
         portEXIT_CRITICAL(&s_lock);
-        if (fresh && image_reply) {
+        if (image_fresh && image_reply) {
+            current=result_token;
             if (!cJSON_IsTrue(ok)) {
                 cJSON *error=cJSON_GetObjectItemCaseSensitive(root,"error");
                 cJSON *code=cJSON_GetObjectItemCaseSensitive(error,"code");
@@ -479,7 +573,8 @@ static void text_message(const char *data,size_t n) {
             cJSON *audio=cJSON_GetObjectItemCaseSensitive(output,"audio");
             bot_session_token_t returned;
             if (!json_token(cJSON_GetObjectItemCaseSensitive(payload,"runtime"),&returned) || !same(returned,current) ||
-                !cJSON_IsNumber(version) || version->valuedouble!=1 || !cJSON_IsFalse(audio) ||
+                !cJSON_IsNumber(version) || version->valuedouble!=1 ||
+                !(session_spoken?cJSON_IsTrue(audio):cJSON_IsFalse(audio)) ||
                 !array_has_string(cJSON_GetObjectItemCaseSensitive(output,"cards"),"text")) {
                 finish_with_message(current,"请更新 Mac 小呆服务",false);
             } else {
@@ -491,9 +586,13 @@ static void text_message(const char *data,size_t n) {
             cJSON *host=cJSON_GetObjectItemCaseSensitive(plain,"host");
             cJSON *port=cJSON_GetObjectItemCaseSensitive(plain,"port");
             cJSON *key=cJSON_GetObjectItemCaseSensitive(plain,"key");
+            cJSON *runtime=cJSON_GetObjectItemCaseSensitive(payload,"runtime");
             uint8_t decoded[32]={0};
+            uint32_t returned_stream=0;bot_session_token_t returned;
             struct in_addr address;
-            bool valid=cJSON_IsString(host) && cJSON_IsNumber(port) && cJSON_IsString(key) &&
+            bool valid=json_uint(cJSON_GetObjectItemCaseSensitive(payload,"stream_id"),UINT32_MAX,&returned_stream) &&
+                returned_stream==begin_stream && (!runtime || (json_token(runtime,&returned) && same(returned,current))) &&
+                cJSON_IsString(host) && cJSON_IsNumber(port) && cJSON_IsString(key) &&
                 strlen(host->valuestring)<sizeof(s.plain_host) &&
                 inet_pton(AF_INET,host->valuestring,&address)==1 &&
                 port->valuedouble>=1 && port->valuedouble<=65535 &&
@@ -508,7 +607,7 @@ static void text_message(const char *data,size_t n) {
                     s.phase=PLAIN_CONNECTING;
                 }
                 portEXIT_CRITICAL(&s_lock);
-            } else fail_session("Plain audio negotiation failed");
+            } else fail_operation(current,"Plain audio negotiation failed");
             memset(decoded,0,sizeof(decoded));
             if (cJSON_IsString(key) && key->valuestring) memset(key->valuestring,0,strlen(key->valuestring));
         } else if (fresh && cJSON_IsTrue(ok) && completing) {
@@ -517,16 +616,36 @@ static void text_message(const char *data,size_t n) {
             cJSON *payload=cJSON_GetObjectItemCaseSensitive(root,"payload"),*scene=cJSON_GetObjectItemCaseSensitive(payload,"scene"),
                   *speech=cJSON_GetObjectItemCaseSensitive(scene,"speech"),*expression=cJSON_GetObjectItemCaseSensitive(scene,"expression"),
                   *audio=cJSON_GetObjectItemCaseSensitive(root,"audio");
-            if (cJSON_IsString(speech)) command(BOT_COMMAND_SET_CAPTION,current,speech->valuestring);
-            if (cJSON_IsString(expression)) command(BOT_COMMAND_SET_EXPRESSION,current,expression->valuestring);
-            cJSON *stream=cJSON_GetObjectItemCaseSensitive(audio,"stream_id");
-            if (cJSON_IsNumber(stream) && stream->valuedouble>0 && stream->valuedouble<=4294967295.0) {
+            uint32_t stream=0,bytes=0,rate=0,channels=0,samples=0;
+            bool has_audio=audio && !cJSON_IsNull(audio);
+            cJSON *format=cJSON_GetObjectItemCaseSensitive(audio,"format");
+            cJSON *ack=cJSON_GetObjectItemCaseSensitive(audio,"playback_ack");
+            bool valid_audio=cJSON_IsObject(audio) && session_spoken &&
+                json_uint(cJSON_GetObjectItemCaseSensitive(audio,"stream_id"),UINT32_MAX,&stream) && stream &&
+                json_uint(cJSON_GetObjectItemCaseSensitive(audio,"bytes"),MAX_REPLY_PCM_BYTES,&bytes) && bytes && !(bytes%2) &&
+                json_uint(cJSON_GetObjectItemCaseSensitive(audio,"sample_rate"),16000,&rate) && rate==16000 &&
+                json_uint(cJSON_GetObjectItemCaseSensitive(audio,"channels"),1,&channels) && channels==1 &&
+                json_uint(cJSON_GetObjectItemCaseSensitive(audio,"frame_samples"),PCM_SAMPLES,&samples) && samples==PCM_SAMPLES &&
+                cJSON_IsString(format) && !strcmp(format->valuestring,"pcm_s16le") &&
+                cJSON_IsString(ack) && !strcmp(ack->valuestring,"hardware_v1");
+            if (has_audio && !valid_audio) {
+                portENTER_CRITICAL(&s_lock);s.cancel_before_next=true;portEXIT_CRITICAL(&s_lock);
                 finish_with_message(current,"Mac 回复格式有误，请更新服务",true);
-            } else {
-                command(BOT_COMMAND_REPLY_DONE,current,cJSON_IsString(speech) ? speech->valuestring : NULL);
-                portENTER_CRITICAL(&s_lock); s.phase=WAIT_NEXT; portEXIT_CRITICAL(&s_lock);
-                queue_image_descriptor(scene,current);
+                goto done;
             }
+            portENTER_CRITICAL(&s_lock);
+            s.result_token=current;s.result_valid=true;s.result_admitted=false;
+            s.phase=valid_audio?PLAYBACK_PENDING:WAIT_NEXT;
+            if (valid_audio) {
+                s.playback_token=current;s.playback_stream=stream;s.playback_sequence=0;
+                s.playback_expected=bytes;s.playback_received=0;s.playback_cancel_requested=false;
+                s.playback_started_us=esp_timer_get_time();
+            }
+            portEXIT_CRITICAL(&s_lock);
+            if (cJSON_IsString(expression)) command(BOT_COMMAND_SET_EXPRESSION,current,expression->valuestring);
+            command(valid_audio?BOT_COMMAND_REPLY_PRESENT:BOT_COMMAND_REPLY_DONE,current,
+                cJSON_IsString(speech)?speech->valuestring:NULL);
+            queue_image_descriptor(scene,current);
         }
     } else if (!strcmp(kind,"event") && cJSON_IsString(event)) {
         bot_session_token_t token;
@@ -553,6 +672,7 @@ static void text_message(const char *data,size_t n) {
             else if (!strcmp(stage->valuestring,"working")) message="正在处理";
             else if (!strcmp(stage->valuestring,"awaiting_parent")) {message="请在 Mac 上确认";approval=true;}
             else if (!strcmp(stage->valuestring,"preparing_image")) message="正在准备图片";
+            else if (!strcmp(stage->valuestring,"synthesizing")) message="正在准备语音";
             if (!message) goto done;
             portENTER_CRITICAL(&s_lock);
             bool valid=s.phase==COMMITTED && s.authenticated && s.active && same(s.desired,returned) &&
@@ -568,10 +688,32 @@ static void text_message(const char *data,size_t n) {
         } else if (!strcmp(event->valuestring,"audio.complete") && fresh && phase==PLAYING) {
             /* TCP and WSS are independent; the authenticated plain-audio end
              * frame, not this control event, closes local playback. */
-        } else if (!strcmp(event->valuestring,"audio.cancelled") || !strcmp(event->valuestring,"session.cancelled") || !strcmp(event->valuestring,"session.expired")) {
-            fail_session("Server cancelled or expired the session");
+        } else if (!strcmp(event->valuestring,"audio.cancelled")) {
+            bot_session_token_t returned;uint32_t stream;
+            portENTER_CRITICAL(&s_lock);
+            bool current=json_token(cJSON_GetObjectItemCaseSensitive(root,"runtime"),&returned) &&
+                json_uint(cJSON_GetObjectItemCaseSensitive(root,"stream_id"),UINT32_MAX,&stream) &&
+                s.playback_stream==stream && same(returned,s.playback_token) && same(returned,s.desired);
+            portEXIT_CRITICAL(&s_lock);
+            if (current) fail_operation(returned,"Server cancelled the current playback");
+        } else if (!strcmp(event->valuestring,"session.cancelled") || !strcmp(event->valuestring,"session.expired")) {
+            bot_session_token_t returned;
+            cJSON *runtime=cJSON_GetObjectItemCaseSensitive(root,"runtime");
+            /* Older servers omit the token; their whole authenticated session
+             * cancellation remains supported, never an old audio stream event. */
+            if (fresh && (!runtime || (json_token(runtime,&returned) && same(returned,token))))
+                fail_operation(token,"Server cancelled or expired the session");
         }
-    } else if (!strcmp(kind,"error")) fail_session("Gateway rejected audio");
+    } else if (!strcmp(kind,"error")) {
+        cJSON *runtime=cJSON_GetObjectItemCaseSensitive(root,"runtime");
+        bot_session_token_t returned;
+        portENTER_CRITICAL(&s_lock);
+        returned=s.remote;
+        bool current=s.authenticated && s.active && same(s.desired,s.remote) &&
+            (!runtime || (json_token(runtime,&returned) && same(returned,s.remote)));
+        portEXIT_CRITICAL(&s_lock);
+        if (current) fail_operation(returned,"Gateway rejected current audio");
+    }
 done:
     cJSON_Delete(root);
 }
@@ -647,7 +789,7 @@ static void ws_event(void *arg,esp_event_base_t base,int32_t id,void *event_data
         memcpy(s_rx+s_rx_used,e->data_ptr,e->data_len);s_rx_used+=(size_t)e->data_len;
         if (s_rx_used==(size_t)e->payload_len) {
             if (s_rx_opcode==1) {s_rx[s_rx_used]=0;text_message(s_rx,s_rx_used);}
-            else if (s_rx_opcode==2) binary((unsigned char *)s_rx,s_rx_used);
+            else if (s_rx_opcode==2) fail_session("Audio used an unnegotiated transport");
             memset(s_rx,0,s_rx_used);s_rx_used=0;
         }
     }
@@ -664,7 +806,7 @@ static bool send_text(const char *text) {
 }
 static void plain_close(void) {
     if (s_plain_fd>=0) close(s_plain_fd);
-    s_plain_fd=-1;s_plain_used=0;
+    s_plain_fd=-1;s_plain_used=0;s_plain_blocked_us=0;
     memset(s_plain_key,0,sizeof(s_plain_key));
     if (s_plain_rx) memset(s_plain_rx,0,PLAIN_RX_SIZE);
 }
@@ -722,45 +864,59 @@ static bool plain_send_all(const unsigned char *data,size_t length,bot_session_t
 }
 static bool plain_receive(void) {
     if (s_plain_fd<0 || !s_plain_rx) return false;
-    for (;;) {
-        if (s_plain_used>=PLAIN_RX_SIZE) return false;
-        int n=recv(s_plain_fd,s_plain_rx+s_plain_used,PLAIN_RX_SIZE-s_plain_used,MSG_DONTWAIT);
-        if (n==0) return false;
-        if (n<0) {
-            if (errno==EAGAIN || errno==EWOULDBLOCK || errno==EINTR) break;
-            return false;
-        }
-        s_plain_used+=(size_t)n;
-        while (s_plain_used>=4) {
+    /* Read only after parsing the buffered frame. Backpressure must never
+     * consume a sequence number or drop bytes from the authenticated stream. */
+    for (unsigned packets=0;packets<8;) {
+        if (s_plain_used>=4) {
             size_t length=((size_t)s_plain_rx[0]<<24)|((size_t)s_plain_rx[1]<<16)|
                 ((size_t)s_plain_rx[2]<<8)|s_plain_rx[3];
             if (length<1+PLAIN_MAC_SIZE || length>2048) return false;
-            if (s_plain_used<4+length) break;
-            unsigned char *body=s_plain_rx+4;
-            size_t content=length-PLAIN_MAC_SIZE;
-            unsigned char tag[PLAIN_MAC_SIZE];
-            if (!plain_hmac(body,content,tag)) return false;
-            unsigned char mismatch=0;
-            for (size_t i=0;i<sizeof(tag);i++) mismatch|=tag[i]^body[content+i];
-            memset(tag,0,sizeof(tag));
-            if (mismatch) return false;
-            if (body[0]=='O') {
-                binary(body+1,content-1);
-            } else if (body[0]=='E' && content==9) {
-                uint32_t stream=read32(body+1), frames=read32(body+5), playback;
-                portENTER_CRITICAL(&s_lock);
-                bool valid=s.authenticated && s.active && s.phase==PLAYING &&
-                    same(s.desired,s.remote) && stream==s.playback_stream && frames==s.playback_sequence;
-                playback=s.playback_id;
-                portEXIT_CRITICAL(&s_lock);
-                if (!valid || bot_audio_playback_end(s_audio,playback)!=ESP_OK) return false;
-                portENTER_CRITICAL(&s_lock);s.phase=WAIT_NEXT;portEXIT_CRITICAL(&s_lock);
-                s_plain_used=0;return true;
-            } else return false;
-            size_t consumed=4+length;
-            memmove(s_plain_rx,s_plain_rx+consumed,s_plain_used-consumed);
-            s_plain_used-=consumed;
+            if (s_plain_used>=4+length) {
+                unsigned char *body=s_plain_rx+4;
+                size_t content=length-PLAIN_MAC_SIZE;
+                unsigned char tag[PLAIN_MAC_SIZE];
+                if (!plain_hmac(body,content,tag)) return false;
+                unsigned char mismatch=0;
+                for (size_t i=0;i<sizeof(tag);i++) mismatch|=tag[i]^body[content+i];
+                memset(tag,0,sizeof(tag));
+                if (mismatch) return false;
+                esp_err_t accepted=ESP_ERR_INVALID_ARG;
+                bool ending=body[0]=='E' && content==9;
+                if (body[0]=='O') accepted=playback_frame(body+1,content-1);
+                else if (ending) {
+                    uint32_t stream=read32(body+1),frames=read32(body+5),playback;
+                    portENTER_CRITICAL(&s_lock);
+                    bool valid=s.authenticated && s.active && s.phase==PLAYING &&
+                        same(s.desired,s.remote) && stream==s.playback_stream &&
+                        frames==s.playback_sequence && s.playback_received==s.playback_expected;
+                    playback=s.playback_id;
+                    portEXIT_CRITICAL(&s_lock);
+                    if (!valid || !playback || s_plain_used!=4+length) return false;
+                    accepted=bot_audio_playback_end(s_audio,playback);
+                    if (accepted==ESP_OK) {
+                        portENTER_CRITICAL(&s_lock);
+                        if (s.playback_id==playback && s.phase==PLAYING) s.phase=DRAINING;
+                        portEXIT_CRITICAL(&s_lock);
+                    }
+                }
+                if (accepted==ESP_ERR_TIMEOUT) {
+                    if (!s_plain_blocked_us) s_plain_blocked_us=esp_timer_get_time();
+                    return esp_timer_get_time()-s_plain_blocked_us<2000000;
+                }
+                if (accepted!=ESP_OK) return false;
+                s_plain_blocked_us=0;
+                size_t consumed=4+length;
+                memmove(s_plain_rx,s_plain_rx+consumed,s_plain_used-consumed);
+                s_plain_used-=consumed;++packets;
+                if (ending) return true; /* hardware DONE, not E, finishes the turn */
+                continue;
+            }
         }
+        if (s_plain_used>=PLAIN_RX_SIZE) return false;
+        int n=recv(s_plain_fd,s_plain_rx+s_plain_used,PLAIN_RX_SIZE-s_plain_used,MSG_DONTWAIT);
+        if (n==0) return false;
+        if (n<0) return errno==EAGAIN || errno==EWOULDBLOCK || errno==EINTR;
+        s_plain_used+=(size_t)n;
     }
     return true;
 }
@@ -773,6 +929,90 @@ static bool simple_request(const char *method) {
     char msg[180], id[24]; request_id(id,sizeof(id));
     snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"%s\",\"payload\":{}}",id,method);
     return send_text(msg);
+}
+static bool playback_report(const playback_event_t *event, const char *status, const char *code) {
+    char id[24],runtime[180],message[480];
+    request_id(id,sizeof(id));runtime_json(runtime,sizeof(runtime),event->token);
+    int n=snprintf(message,sizeof(message),
+        "{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"audio.playback.report\",\"payload\":{\"runtime\":%s,\"stream_id\":%lu,\"status\":\"%s\",\"frames\":%lu,\"bytes\":%lu,\"code\":\"%s\"}}",
+        id,runtime,(unsigned long)event->stream,status,(unsigned long)event->frames,
+        (unsigned long)event->bytes,code?code:"");
+    return n>0 && (size_t)n<sizeof(message) && send_text(message);
+}
+static bool playback_event_poll(void) {
+    playback_event_t event;
+    while (s_playback_events && xQueuePeek(s_playback_events,&event,0)==pdTRUE) {
+        portENTER_CRITICAL(&s_lock);
+        bool current=event.playback_id==s.playback_id && same(event.token,s.playback_token);
+        bool authenticated=s.authenticated;
+        bool live=s.active && same(event.token,s.desired);
+        portEXIT_CRITICAL(&s_lock);
+        if (!current) {(void)xQueueReceive(s_playback_events,&event,0);continue;}
+        const char *status=event.kind==BOT_AUDIO_EVENT_PLAYBACK_STARTED?"started":
+            event.kind==BOT_AUDIO_EVENT_PLAYBACK_DONE?"finished":
+            event.kind==BOT_AUDIO_EVENT_PLAYBACK_CANCELLED?"cancelled":"failed";
+        const char *code=event.kind==BOT_AUDIO_EVENT_PLAYBACK_FAILED?
+            (event.playback_id?"hardware_playback_failed":"playback_unavailable"):"";
+        if (authenticated && !playback_report(&event,status,code)) {
+            /* Keep both receipt and stream lease. Starting the next capture
+             * here would race a Mac still waiting for this hardware terminal. */
+            ESP_LOGW(TAG,"Playback receipt pending; next transport waits for delivery");
+            return false;
+        }
+        (void)xQueueReceive(s_playback_events,&event,0);
+        ESP_LOGI(TAG,"Reply audio %s: stream=%lu frames=%lu bytes=%lu",status,
+            (unsigned long)event.stream,(unsigned long)event.frames,(unsigned long)event.bytes);
+        if (event.kind!=BOT_AUDIO_EVENT_PLAYBACK_STARTED) {
+            portENTER_CRITICAL(&s_lock);
+            if (s.playback_id==event.playback_id) {
+                s.playback_id=0;s.playback_cancel_requested=false;
+                if (s.phase==PLAYING || s.phase==DRAINING || s.phase==PLAYBACK_PENDING) s.phase=WAIT_NEXT;
+            }
+            portEXIT_CRITICAL(&s_lock);
+            /* A first codec write can fail before STARTED. Runtime cannot infer
+             * a hardware completion in that case; preserve the presented text
+             * and explicitly finish its text-only fallback. A later/stale
+             * command cannot advance a newer turn. */
+            if (live && authenticated && event.kind!=BOT_AUDIO_EVENT_PLAYBACK_DONE) {
+                command(BOT_COMMAND_FAILURE_CAPTION,event.token,"语音未播放，文字仍可阅读");
+                command(BOT_COMMAND_REPLY_DONE,event.token,NULL);
+            }
+        }
+    }
+    return true;
+}
+static void playback_prepare(const secure_state_t *state) {
+    const bot_audio_token_t token={state->remote.epoch,state->remote.session_id,
+        state->remote.turn_id,state->remote.focus_generation};
+    uint32_t playback=0;
+    esp_err_t error=bot_audio_playback_begin(s_audio,&token,&playback);
+    if (error!=ESP_OK) {
+        if (esp_timer_get_time()-state->playback_started_us<1500000 &&
+            (error==ESP_ERR_TIMEOUT || error==ESP_ERR_INVALID_STATE)) return;
+        const playback_event_t failed={.kind=BOT_AUDIO_EVENT_PLAYBACK_FAILED,
+            .token=state->remote,.stream=state->playback_stream,.error=error};
+        if (xQueueSend(s_playback_events,&failed,0)!=pdTRUE)
+            fail_operation(state->remote,"Playback failure receipt queue full");
+        return;
+    }
+    portENTER_CRITICAL(&s_lock);
+    bool valid=s.authenticated && s.active && s.phase==PLAYBACK_PENDING &&
+        same(s.desired,state->remote) && same(s.remote,state->remote);
+    /* Retain the exact lease even when cancellation raced BEGIN, so its
+     * terminal event can be reported without ever cancelling a newer clip. */
+    s.playback_id=playback;s.playback_token=state->remote;
+    if (valid) {s.phase=PLAYING;s.playback_gain_percent=s.reply_gain_percent;}
+    else s.playback_cancel_requested=true;
+    portEXIT_CRITICAL(&s_lock);
+    if (!valid) {bot_audio_playback_cancel(s_audio,playback);return;}
+    char id[24],runtime[180],message[380];
+    request_id(id,sizeof(id));runtime_json(runtime,sizeof(runtime),state->remote);
+    snprintf(message,sizeof(message),
+        "{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"audio.playback.ready\",\"payload\":{\"runtime\":%s,\"stream_id\":%lu}}",
+        id,runtime,(unsigned long)state->playback_stream);
+    if (!send_text(message)) fail_operation(state->remote,"Could not acknowledge playback readiness");
+    else ESP_LOGI(TAG,"Reply audio ready: stream=%lu bytes=%lu playback=%lu",
+        (unsigned long)state->playback_stream,(unsigned long)state->playback_expected,(unsigned long)playback);
 }
 typedef struct {
     bot_session_token_t token;
@@ -799,8 +1039,7 @@ static bool image_request(image_download_t *download) {
         id,runtime,download->id,(unsigned long)download->offset);
     if (n<0 || n>=sizeof(message)) return false;
     portENTER_CRITICAL(&s_lock);
-    if (!s.authenticated || !s.active || s.phase!=WAIT_NEXT ||
-        !same(download->token,s.desired) || !same(download->token,s.remote)) {
+    if (!s.authenticated || !s.result_valid || !same(download->token,s.result_token)) {
         portEXIT_CRITICAL(&s_lock);
         return false;
     }
@@ -849,8 +1088,7 @@ static void image_failure_poll(image_download_t *download) {
     image_failure_t failure;
     portENTER_CRITICAL(&s_lock);
     failure=s_image_failure;
-    bool fresh=s.authenticated && s.active && s.phase==WAIT_NEXT &&
-        same(failure.token,s.desired) && same(failure.token,s.remote);
+    bool fresh=s.authenticated && s.result_valid && same(failure.token,s.result_token);
     portEXIT_CRITICAL(&s_lock);
     if (!failure.pending) return;
     if (fresh) {
@@ -932,7 +1170,7 @@ static void image_poll(image_download_t *download) {
     display_report_t report;
     if (s_display_reports && xQueuePeek(s_display_reports,&report,0)==pdTRUE) {
         portENTER_CRITICAL(&s_lock);
-        bool fresh=s.authenticated && s.active && same(report.token,s.desired) && same(report.token,s.remote);
+        bool fresh=s.authenticated && s.result_valid && same(report.token,s.result_token);
         portEXIT_CRITICAL(&s_lock);
         if (!fresh || (report.rendered && !strcmp(report.part,"image") && image_failed_for(report.token))) {
             (void)xQueueReceive(s_display_reports,&report,0);
@@ -967,18 +1205,42 @@ static void secure_task(void *unused) {
     int64_t ending_us=0, started_us=0, diagnostic_started_us=0;
     image_download_t download={0};
     for (;;) {
+        if (!playback_event_poll()) {vTaskDelay(pdMS_TO_TICKS(20));continue;}
+        image_poll(&download);
         secure_state_t state;
         portENTER_CRITICAL(&s_lock); state=s; portEXIT_CRITICAL(&s_lock);
-        image_poll(&download);
+        if (atomic_exchange(&s_playback_event_overflow,false)) {
+            fail_session("Hardware playback event queue overflow");
+            /* The missing terminal cannot keep an otherwise revoked network
+             * lease forever. fail_session already cancelled its exact ID. */
+            portENTER_CRITICAL(&s_lock);s.playback_id=0;portEXIT_CRITICAL(&s_lock);
+            continue;
+        }
+        if (state.playback_id && (!state.authenticated || !state.active || !same(state.desired,state.playback_token))) {
+            if (!state.playback_cancel_requested) {
+                portENTER_CRITICAL(&s_lock);
+                if (s.playback_id==state.playback_id) s.playback_cancel_requested=true;
+                portEXIT_CRITICAL(&s_lock);
+                bot_audio_playback_cancel(s_audio,state.playback_id);
+            }
+            /* The terminal hardware report must precede the next audio.begin.
+             * Root may already have reserved a newer token; never relabel it. */
+            if (state.authenticated) {vTaskDelay(pdMS_TO_TICKS(10));continue;}
+        }
         if (state.authenticated && !state.active && diagnostic_paused) {
             if (bot_lan_resume_auto()==ESP_OK) diagnostic_paused=false;
         }
         if (!state.authenticated) { plain_close();flush_pcm(); heard=false; ending=false; vTaskDelay(pdMS_TO_TICKS(50)); continue; }
-        if (atomic_exchange(&s_overflow,false)) { flush_pcm(); fail_session("Secure audio queue overflow"); }
+        if (atomic_exchange(&s_overflow,false)) {
+            portENTER_CRITICAL(&s_lock);bot_session_token_t token=s_overflow_token;portEXIT_CRITICAL(&s_lock);
+            flush_pcm();fail_operation(token,"Secure audio queue overflow");continue;
+        }
         if (!state.active) {
+            if (state.phase==CAPTURING) capture_event(state.remote,false);
             plain_close();
             if (state.phase!=READY && state.phase!=WELCOME) {
-                (void)simple_request("session.close"); flush_pcm();
+                flush_pcm();
+                if (!simple_request("session.close")) {vTaskDelay(pdMS_TO_TICKS(30));continue;}
                 portENTER_CRITICAL(&s_lock); if (s.authenticated) {s.phase=READY;s.remote=(bot_session_token_t){0};s.audio_allowed=false;} portEXIT_CRITICAL(&s_lock);
             }
             heard=false;ending=false;vTaskDelay(pdMS_TO_TICKS(30));continue;
@@ -993,75 +1255,110 @@ static void secure_task(void *unused) {
              * by real-time Wi-Fi media. Pause it for the explicit interaction
              * and let its worker reconnect after the session finishes. */
             if (!diagnostic_paused && bot_lan_state()!=BOT_LAN_STOPPED) {
-                if (bot_lan_disconnect()!=ESP_OK) {fail_session("Could not pause diagnostic link for audio");continue;}
+                if (bot_lan_disconnect()!=ESP_OK) {fail_operation(state.desired,"Could not pause diagnostic link for audio");continue;}
                 diagnostic_paused=true;diagnostic_started_us=esp_timer_get_time();
             }
             if (diagnostic_paused && bot_lan_state()!=BOT_LAN_DISCONNECTED &&
                 bot_lan_state()!=BOT_LAN_STOPPED) {
-                if (esp_timer_get_time()-diagnostic_started_us>5000000) fail_session("Diagnostic link did not pause in time");
+                if (esp_timer_get_time()-diagnostic_started_us>5000000) fail_operation(state.desired,"Diagnostic link did not pause in time");
                 else vTaskDelay(pdMS_TO_TICKS(30));
                 continue;
             }
-            char id[24], runtime[180], msg[500]; request_id(id,sizeof(id)); runtime_json(runtime,sizeof(runtime),state.desired);
+            char id[24], runtime[180], msg[640]; request_id(id,sizeof(id)); runtime_json(runtime,sizeof(runtime),state.desired);
             const char *activation=state.activation==BOT_ACTIVATION_WAKE_WORD?"wake_word":"touch";
-            snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"session.open\",\"payload\":{\"activation\":\"%s\",\"keyword\":\"小呆小呆\",\"runtime\":%s,\"output\":{\"version\":1,\"audio\":false,\"cards\":[\"text\",\"image\"],\"image\":{\"mime\":\"image/jpeg\",\"max_width\":480,\"max_height\":272,\"max_bytes\":65536}}}}",id,activation,runtime);
-            portENTER_CRITICAL(&s_lock); s.remote=state.desired;snprintf(s.open_id,sizeof(s.open_id),"%s",id);s.phase=OPENING;portEXIT_CRITICAL(&s_lock);
-            if (!send_text(msg)) fail_session("Could not open secure session");
+            bool spoken=state.spoken_answers && state.audio_supported;
+            snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"session.open\",\"payload\":{\"activation\":\"%s\",\"keyword\":\"小呆小呆\",\"runtime\":%s,\"output\":{\"version\":1,\"audio\":%s,\"cards\":[\"text\",\"image\"],\"image\":{\"mime\":\"image/jpeg\",\"max_width\":480,\"max_height\":272,\"max_bytes\":65536}}}}",id,activation,runtime,spoken?"true":"false");
+            portENTER_CRITICAL(&s_lock); s.remote=state.desired;s.session_spoken=spoken;s.cancel_before_next=false;snprintf(s.open_id,sizeof(s.open_id),"%s",id);s.phase=OPENING;portEXIT_CRITICAL(&s_lock);
+            if (state.spoken_answers && !state.audio_supported) ESP_LOGW(TAG,"Mac lacks audio.reply.v1; continuing with text/image replies");
+            if (!send_text(msg)) fail_operation(state.desired,"Could not open secure session");
         } else if (state.remote.session_id!=state.desired.session_id) {
-            (void)simple_request("session.close");plain_close();flush_pcm();
+            capture_event(state.remote,false);
+            plain_close();flush_pcm();
+            if (!simple_request("session.close")) {vTaskDelay(pdMS_TO_TICKS(30));continue;}
             portENTER_CRITICAL(&s_lock);s.phase=READY;s.audio_allowed=false;s.remote=(bot_session_token_t){0};portEXIT_CRITICAL(&s_lock);
             heard=false;ending=false;
         } else if (!same(state.remote,state.desired)) {
             /* Runtime invalidates the old turn before publishing the new one. */
-            (void)simple_request("assistant.cancel");plain_close();flush_pcm();
-            portENTER_CRITICAL(&s_lock);s.remote=state.desired;s.audio_allowed=false;s.phase=OPEN;portEXIT_CRITICAL(&s_lock);
+            capture_event(state.remote,false);
+            plain_close();flush_pcm();
+            if (!(state.phase==WAIT_NEXT && state.followup_armed && !state.cancel_before_next)) {
+                if (!simple_request("assistant.cancel")) {vTaskDelay(pdMS_TO_TICKS(30));continue;}
+            }
+            portENTER_CRITICAL(&s_lock);s.remote=state.desired;s.audio_allowed=false;s.cancel_before_next=false;s.phase=OPEN;portEXIT_CRITICAL(&s_lock);
             heard=false;ending=false;
         } else if (state.phase==OPEN) {
             char id[24], runtime[180], msg[500]; request_id(id,sizeof(id));runtime_json(runtime,sizeof(runtime),state.desired);
             uint32_t stream=esp_random();if (!stream) stream=1;
             snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"audio.begin\",\"payload\":{\"stream_id\":%lu,\"format\":\"pcm_s16le\",\"sample_rate\":16000,\"channels\":1,\"transport\":\"plain_tcp_v1\",\"runtime\":%s}}",id,(unsigned long)stream,runtime);
             portENTER_CRITICAL(&s_lock);s.stream=stream;s.sequence=0;snprintf(s.begin_id,sizeof(s.begin_id),"%s",id);s.phase=BEGINNING;portEXIT_CRITICAL(&s_lock);
-            if (!send_text(msg)) fail_session("Could not start secure audio");
-            heard=false;ending=false;started_us=esp_timer_get_time();
+            if (!send_text(msg)) fail_operation(state.remote,"Could not start secure audio");
+            heard=false;ending=false;started_us=0;
         } else if (state.phase==PLAIN_CONNECTING) {
-            if (!plain_connect(&state)) fail_session("Plain audio connection failed");
+            if (!plain_connect(&state)) fail_operation(state.remote,"Plain audio connection failed");
             else {
                 portENTER_CRITICAL(&s_lock);
-                if (s.phase==PLAIN_CONNECTING && s.authenticated && s.active && same(s.desired,s.remote)) {
+                bool ready=s.phase==PLAIN_CONNECTING && s.authenticated && s.active &&
+                    same(s.desired,state.remote) && same(s.remote,state.remote);
+                if (ready) {
                     memset(s.plain_key,0,sizeof(s.plain_key));
                     s.phase=CAPTURING;s.audio_allowed=true;
                 }
                 portEXIT_CRITICAL(&s_lock);
-                ESP_LOGI(TAG,"Plain LAN audio connected; capture enabled");
-                command(BOT_COMMAND_SET_CAPTION,state.remote,"请说");
-                started_us=esp_timer_get_time();
+                if (ready) {
+                    ESP_LOGI(TAG,"Plain LAN audio ready; runtime retains PCM permission");
+                    capture_event(state.remote,true);
+                } else plain_close();
+                started_us=0;
             }
         } else if (state.phase==CAPTURING) {
-            if (state.utterance) {heard=true;ending=false;}
+            if (state.utterance) {heard=true;ending=false;if (!started_us) started_us=esp_timer_get_time();}
             else if (heard && !ending) {ending=true;ending_us=esp_timer_get_time();}
             pcm_frame_t packet;
             if (xQueueReceive(s_pcm,&packet,pdMS_TO_TICKS(20))==pdTRUE) {
-                portENTER_CRITICAL(&s_lock); bool allowed=s.authenticated&&s.audio_allowed&&s.phase==CAPTURING&&same(packet.token,s.desired)&&same(packet.token,s.remote);uint32_t seq=s.sequence,stream=s.stream;portEXIT_CRITICAL(&s_lock);
-                if (allowed && !send_packet(&packet,stream,seq)) fail_session("Secure audio send failed");
-                else if (allowed) {portENTER_CRITICAL(&s_lock);s.sequence++;portEXIT_CRITICAL(&s_lock);}
+                portENTER_CRITICAL(&s_lock); bool allowed=s.authenticated&&s.active&&s.audio_allowed&&s.pcm_permitted&&s.phase==CAPTURING&&same(packet.token,s.desired)&&same(packet.token,s.remote);uint32_t seq=s.sequence,stream=s.stream;portEXIT_CRITICAL(&s_lock);
+                if (allowed && !send_packet(&packet,stream,seq)) fail_operation(packet.token,"Secure audio send failed");
+                else if (allowed) {
+                    if (!started_us) started_us=esp_timer_get_time();
+                    heard=true;
+                    portENTER_CRITICAL(&s_lock);if (s.phase==CAPTURING && same(packet.token,s.remote)) s.sequence++;portEXIT_CRITICAL(&s_lock);
+                }
                 memset(&packet,0,sizeof(packet));
             }
-            if (esp_timer_get_time()-started_us>29000000) { fail_session("Speech capture timed out"); }
+            if (started_us && esp_timer_get_time()-started_us>29000000) { fail_operation(state.remote,"Speech capture timed out"); }
             else if (ending && esp_timer_get_time()-ending_us>200000 && uxQueueMessagesWaiting(s_pcm)==0) {
                 char id[24],runtime[180],msg[400];request_id(id,sizeof(id));runtime_json(runtime,sizeof(runtime),state.remote);
                 uint32_t frames;
                 portENTER_CRITICAL(&s_lock);frames=s.sequence;portEXIT_CRITICAL(&s_lock);
                 snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"audio.commit\",\"payload\":{\"stream_id\":%lu,\"frames\":%lu,\"runtime\":%s}}",id,(unsigned long)state.stream,(unsigned long)frames,runtime);
-                portENTER_CRITICAL(&s_lock);s.audio_allowed=false;s.progress_seq=0;s.commit_started_us=esp_timer_get_time();snprintf(s.commit_id,sizeof(s.commit_id),"%s",id);s.phase=COMMITTED;portEXIT_CRITICAL(&s_lock);
-                if (!send_text(msg)) fail_session("Could not submit secure audio");
+                portENTER_CRITICAL(&s_lock);
+                bool current=s.authenticated && s.active && s.phase==CAPTURING &&
+                    same(s.desired,state.remote) && same(s.remote,state.remote);
+                if (current) {
+                    s.audio_allowed=false;s.progress_seq=0;s.commit_started_us=esp_timer_get_time();
+                    snprintf(s.commit_id,sizeof(s.commit_id),"%s",id);s.phase=COMMITTED;
+                }
+                portEXIT_CRITICAL(&s_lock);
+                if (!current) continue;
+                capture_event(state.remote,false);
+                if (!send_text(msg)) fail_operation(state.remote,"Could not submit secure audio");
                 else ESP_LOGI(TAG,"Plain LAN audio submitted (%lu frames)",(unsigned long)frames);
                 heard=false;ending=false;
             }
         } else if (state.phase==COMMITTED && esp_timer_get_time()-state.commit_started_us>=180000000) {
-            (void)simple_request("assistant.cancel");
+            bool cancelled=simple_request("assistant.cancel");
+            portENTER_CRITICAL(&s_lock);s.cancel_before_next=!cancelled;portEXIT_CRITICAL(&s_lock);
             finish_with_message(state.remote,"处理超时，请再试一次",true);
+        } else if (state.phase==PLAYBACK_PENDING) {
+            playback_prepare(&state);
+            vTaskDelay(pdMS_TO_TICKS(10));
         } else if (state.phase==PLAYING) {
-            if (!plain_receive()) fail_session("Plain audio response failed");
+            if (!plain_receive()) fail_operation(state.remote,"Plain audio response failed");
+            vTaskDelay(pdMS_TO_TICKS(10));
+        } else if (state.phase==DRAINING) {
+            plain_close();
+            if (esp_timer_get_time()-state.playback_started_us>
+                (int64_t)state.playback_expected*1000000/32000+10000000)
+                fail_operation(state.remote,"Hardware playback completion timed out");
             vTaskDelay(pdMS_TO_TICKS(10));
         } else if (state.phase==WAIT_NEXT) {
             plain_close();vTaskDelay(pdMS_TO_TICKS(20));
@@ -1093,11 +1390,14 @@ esp_err_t brain_secure_start(bot_bus_t *bus,bot_audio_t *audio) {
     s_image_messages=xQueueCreate(2,sizeof(image_message_t *));
     s_image_results=xQueueCreate(1,sizeof(bot_display_image_t));
     s_display_reports=xQueueCreate(4,sizeof(display_report_t));
-    if (!s_image_messages || !s_image_results || !s_display_reports) {
+    s_playback_events=xQueueCreate(8,sizeof(playback_event_t));
+    if (!s_image_messages || !s_image_results || !s_display_reports || !s_playback_events) {
         if (s_image_messages) vQueueDelete(s_image_messages);
         if (s_image_results) vQueueDelete(s_image_results);
         if (s_display_reports) vQueueDelete(s_display_reports);
+        if (s_playback_events) vQueueDelete(s_playback_events);
         s_image_messages=NULL;s_image_results=NULL;s_display_reports=NULL;
+        s_playback_events=NULL;
         vQueueDelete(s_pcm);s_pcm=NULL;esp_websocket_client_destroy(s_ws);s_ws=NULL;
         heap_caps_free(s_rx);heap_caps_free(s_pcm_storage);heap_caps_free(s_plain_rx);
         s_rx=NULL;s_pcm_storage=NULL;s_plain_rx=NULL;return ESP_ERR_NO_MEM;
@@ -1113,8 +1413,9 @@ esp_err_t brain_secure_start(bot_bus_t *bus,bot_audio_t *audio) {
         atomic_store(&s_discovery_enabled,false);
         esp_websocket_client_stop(s_ws);esp_websocket_client_destroy(s_ws);s_ws=NULL;
         vQueueDelete(s_pcm);s_pcm=NULL;
-        vQueueDelete(s_image_messages);vQueueDelete(s_image_results);vQueueDelete(s_display_reports);
+        vQueueDelete(s_image_messages);vQueueDelete(s_image_results);vQueueDelete(s_display_reports);vQueueDelete(s_playback_events);
         s_image_messages=NULL;s_image_results=NULL;s_display_reports=NULL;
+        s_playback_events=NULL;
         heap_caps_free(s_rx);heap_caps_free(s_pcm_storage);heap_caps_free(s_plain_rx);s_rx=NULL;s_pcm_storage=NULL;s_plain_rx=NULL;
     }
     return err;

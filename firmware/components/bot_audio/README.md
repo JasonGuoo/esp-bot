@@ -19,7 +19,7 @@
 | 健康状态 | 麦克风读取、AFE 结果、播放错误、丢帧与唤醒状态计数及单调时钟 |
 | 夜间 | 屏幕熄灭无需停止音频 owner；保持本地检测 |
 
-本组件不包含开放词汇 ASR、TTS、Opus/MP3 解码、重采样、网络、磁盘录音、声纹身份识别。MultiNet 是有限命令识别器，此处只识别完整唤醒词。上层本地应答或 Mac/harness 应提供符合格式的 PCM。`voice_identity_available` 保持 false。
+本组件不包含开放词汇 ASR、TTS、Opus/MP3 解码、重采样、网络、磁盘录音、声纹身份识别。MultiNet 是有限命令识别器：待机只识别完整唤醒词；明确授权的收听会话可增加下文九条固定控制命令。上层本地应答或 Mac/harness 提供符合格式的 PCM。`voice_identity_available` 保持 false。2026-11-13 新增运行时声音设置、会话内起音缓存、固定命令、试听来源与播放进度；这些新增路径尚无 IDF 构建或实板验收。
 
 ### codec 与总线所有权
 
@@ -35,7 +35,7 @@
 
 | 情况 | 状态与行为 |
 | --- | --- |
-| 专用模型名、完整关键词元数据均匹配，AFE 创建成功 | `READY / WAKENET`，不创建 MultiNet 实例 |
+| 专用模型名、完整关键词元数据均匹配，AFE 创建成功 | `READY / WAKENET`；若仍打包 `mn7_cn`，同一 MN 实例仅在授权会话中用于固定命令，待机不做 MN 推理 |
 | 专用模型未配置、缺失或元数据不符，但默认 `mn7_cn` 可加载 | `READY / MULTINET7`，只注册完整四音节命令 |
 | 分区不存在、空白、目录损坏或两个可用后端都缺失 | `BOT_AUDIO_WAKE_MODEL_MISSING`；保留 codec/manual/VAD，不把损坏目录交给模型 loader |
 | `mn7_cn` 格式、分配或命令注册失败 | `BOT_AUDIO_WAKE_UNAVAILABLE`；保留已创建的 AFE/VAD 与手动会话 |
@@ -46,7 +46,25 @@
 
 默认 MultiNet 路径复用小智 `CustomWakeWord` 已采用的持续命令检测方式，但只选择 `mn7_cn`，不跨语言回退。初始化会清空内置命令，用官方 `esp_mn_commands_add(1, "xiao dai xiao dai")` 和 `esp_mn_commands_update()` 安装**唯一一条完整命令**。只接受最高候选的 command ID 1 / phrase ID 0，以及有限、达到默认 0.80 的模型分数。没有单独 `xiao dai` 命令，也没有两次短名字计数器。**VAD 无论多强、多长都不能产生唤醒事件。**
 
-检测、原生 3000 ms 超时、会话权限变化、播放抑制和连续 600 ms 低于 −48 dBFS 的静音会清理 MultiNet 状态；接受的完整唤醒默认至少间隔 2000 ms。静音判断使用官方 AFE 的 pre-AGC `data_volume`，不把它当另一个识别器。0.80 与静音阈值是待实板调整的策略起点，不能据此承诺零误触发：有限词表模型仍可能把普通声音、单独“小呆”或相似读音误判为完整短语，必须做相应负例验收。
+检测、原生 3000 ms 超时、新 token/关闭、命令图变化、播放抑制和连续 600 ms 低于 −48 dBFS 的静音会清理 MultiNet 状态；同 token 的网络就绪或 WAITING→收听不会重置进行中的识别。接受的完整唤醒默认至少间隔 2000 ms，此唤醒冷却不阻止已授权会话中的固定命令。静音判断使用官方 AFE 的 pre-AGC `data_volume`，不把它当另一个识别器。0.80 与静音阈值是待实板调整的策略起点，不能据此承诺零误触发：有限词表模型仍可能把普通声音、单独“小呆”或相似读音误判为完整短语，必须做相应负例验收。
+
+### 明确唤醒后的固定离线命令
+
+只有 `set_session_ex(..., local_commands=true)`、新 token 的 RX/AFE 清理完成、且没有自播屏蔽时，capture owner 才安装并运行包含下列命令的图。退出收听后重新安装单条完整唤醒图。最高候选必须同时匹配 command ID、phrase index 与独立的默认 0.85 命令分数门槛；没有开放词汇转写，也不接受任意云端新增命令。
+
+| 说法 | ID | 官方中文命令 API 的拼音 |
+| --- | --- | --- |
+| 声音大一点 | 10 | `sheng yin da yi dian` |
+| 声音小一点 | 11 | `sheng yin xiao yi dian` |
+| 安静一点 | 12 | `an jing yi dian` |
+| 停止 | 13 | `ting zhi` |
+| 晚安 | 14 | `wan an` |
+| 换成蓝色 | 15 | `huan cheng lan se` |
+| 开心一点 | 16 | `kai xin yi dian` |
+| 再说一遍 | 17 | `zai shuo yi bian` |
+| 恢复声音 | 18 | `hui fu sheng yin` |
+
+命中后先锁闭该 token 的 PCM 回调并清除缓存，再发 `LOCAL_COMMAND`，由 runtime 决定动作。重复 reconcile 同 token 不会解除锁存。识别完成之前已经传给 Mac 的句首无法收回，runtime 必须取消旧轮，防止云端继续处理同一句；不能把这条机制描述成整句从未上传。播放时命令识别也被屏蔽，“停止”不是免唤醒或声学打断词，播放中的立即停止仍使用触摸取消。关闭 MultiNet fallback 可以节省模型资源，同时也会关闭这些本地命令。
 
 分区目录检查只做边界与基本格式保护，不是模型签名验证；修改元数据不能替代真实训练好的声学权重。模型来源及真实性由模型部署流程负责。
 
@@ -115,16 +133,19 @@ ESP-SR 2.6.1 的 CMake 在 `CONFIG_PARTITION_TABLE_CUSTOM` 开启且找到 `mode
 
 启动不会开启对话，也不会授权 PCM 外发。待机麦克风只喂给本地 AFE；不调用网络或文件 API，不输出 AFE 的 `data`、`raw_data` 或 `vad_cache`。本地检测需要短暂 DMA/AFE RAM 缓冲，这不等于保存录音。本组件不把前唤醒缓冲追加给后续对话。
 
-`bot_audio_set_session(audio, token, deliver_pcm)` 有两个独立含义：
+主程序使用 `bot_audio_set_session_ex(audio, token, &options)`。`token!=NULL` 保留当前轮次的播放授权；收听权限由 `deliver_pcm`、`retain_start`、`local_commands` 显式区分。`deliver_pcm` 必须等待同 token 的认证 WSS/音频协议就绪；旧 LAN v1 诊断连接不能授权 PCM。THINKING/REPLY_PRESENT 可以保留 token 并将三项都关闭，随后仍能接收本轮 SESSION 播放。NULL token/options 关闭会话。兼容接口 `set_session` 不自动开启缓存或固定命令。
 
-- `token!=NULL`：允许这个运行时会话产生本地 VAD 事件。
-- `deliver_pcm=true`：另外允许 `on_pcm` 接收会话后采集的数据。上层必须先完成明确激活及设备认证，并按用户选择的音频传输策略接线；当前设备使用独立的局域网明文 TCP 音频通道，旧 LAN v1 诊断连接不能授权此回调。
+当前主程序仅在认证加密 WSS 控制连接可用、可以协商本轮媒体时开启 retain；它与实际 PCM transport-ready 分开。Mac 离线时继续 `local_commands=true`，但 retain 为 false，避免有限上传缓存超时打断较长的离线控制短句。此处加密指控制连接，PCM 保留项目既有的媒体传输策略。
 
-回答后等待下一句话时，运行时调用 `bot_audio_wait_for_followup(audio, token)`。此时只有官方 AFE 同时报告语音且帧音量达到 −42 dBFS 才触发追问。沿用 AFE 的 `data_volume` 和 Mac ASR 的活跃帧门槛。已经开始的语音由 VAD 判断结束，主动触摸后的首句沿用原有灵敏度。
+新 token 或关闭会话增加 gate epoch。新采集窗口丢弃至少官方 I2S DMA 容量加一个采集块，再重置 AFE/VAD；完成后才发 `CAPTURE_READY.available=true`。它是本地收音条件，不等于网络已就绪。同 token 改网络就绪或 waiting 模式不会重置 RX/AFE，也不会把正在说的首字再次丢掉。完整 token、请求选项不变时调用严格幂等。
 
-任何 token 字段、传输权限或等待模式变化，以及关闭或重新开启会话，都会增加内部 gate epoch，并清理关键词部分状态。新的采集窗口先丢弃至少官方 I2S DMA 容量加一个采集块的数据，再重置 AFE ring buffer 与 VAD 状态。重置返回值不成功时，检测被关闭。相同 token、权限和等待模式重复调用是幂等操作，可用于主程序每 20 ms 的 reconcile。
+运行时在进入 WAITING **之前**预分配下一 turn token，可以提前协商同轮网络；此时设置 `waiting_for_followup=true`、`retain_start=true`、`deliver_pcm=false`。只有官方 AFE 报语音且帧音量达到 −42 dBFS 才发追问 START，已开始的语音由 VAD 判断结束。START 消费预分配的同一 token，不再分配新 token；随后在传输条件满足时开启 deliver。被动环境声音仍不能开启会话。
 
-会话切换还会取消旧 token 的 `SESSION` 播放；不会自动取消 runtime 独立授权的 `LOCAL_RESPONSE`，后者由 runtime 在会话结束或替换时显式取消。VAD 的 speech 状态按 epoch 重建：如果孩子持续说话且上层更换 turn token，新 epoch 在拿到新的语音结果后重新发 START，然后用该 token 发 END。因此运行时在 WAITING 收到 START 后建立新轮次的模式可以接续。DMA 丢弃和检测重置可能截断轮次开头的少量音频，这是当前显式授权边界的取舍；没有偷偷补发旧 `vad_cache`。
+`retain_start` 明确授权 RX/AFE fence **之后**的 RAM 缓存。默认按完整采集帧保留最多 800 ms，PCM 上限 25,600 bytes，另有每帧元数据；范围 300..1500 ms，不写盘、不上传未授权音频。初始收听和 WAITING 在尚无 VAD START 时都只保留最新窗口，静默等待网络不会因时间超过窗口而失败。START 后按本地观察时刻及配置的 256 ms VAD onset/delay 余量保护起音；若传输仍未就绪并将覆盖受保护部分，立即清空并锁闭该 token，发 `BUFFER_OVERFLOW`，runtime 取消并提示重说。VAD 不可用或漏检时无法保证首字完整，不能把该 RAM 窗口当作录音或可靠转写缓存。
+
+网络就绪后按原顺序释放缓存，每次 capture 最多回调四个历史帧，然后接当前帧；每块保留原 token、sequence 和 read/observed 时刻。每次回调前重新核对权限。关闭、换 token、retain 撤销、已有发送权限撤销、播放 BEGIN、命令消费、读取失败与停止都会清零；不重贴旧 token，也不输出 ESP-SR 的 `vad_cache`。`buffered_drops` 统计已发现会影响受保护起音的样本丢弃，正常尚未开口的滚动覆盖不计入。
+
+会话切换自动取消旧 SESSION 播放；LOCAL_RESPONSE/PREVIEW 分别由 runtime 的原操作/试听 lease 显式撤销。换 token 总会建立新边界，可能丢弃当时已在 DMA 中的音频；连续追问应使用上述同 token 预备流程，不能靠事后补贴标记绕过边界。
 
 回调可能与撤销权限并发。接收方必须复制原始 token 并在真正发送/消费前再次比较当前 token；不得把旧回调改贴为新 token。`samples`、`event.reason` 只在回调期间有效。回调来自不同音频任务，必须线程安全、短且非阻塞，通过有界队列转交主运行时/传输线程；不能在回调里直接读写网络、文件、调用 start/stop/destroy。
 
@@ -132,9 +153,11 @@ ESP-SR 2.6.1 的 CMake 在 `CONFIG_PARTITION_TABLE_CUSTOM` 开启且找到 `mode
 
 输入格式固定为 **16 kHz、mono、signed PCM16 little-endian**。`bot_audio_playback_write()` 每次接受 1..320 个样本，并复制到队列；不保留调用者指针。默认 12 个队列槽，满帧约 240 ms；END 标记也占一个槽。`ESP_ERR_TIMEOUT` 是背压，发送方应在当前 token 仍有效时重试；不能当作成功发送。
 
-操作顺序：`playback_begin(token,&id)` → 多次 `playback_write(id,...)` → `playback_end(id)`。BEGIN 到首块之间保持功放关闭；首块前开启功放，再发 STARTED。正常 END 推入足够零样本，让此前 DMA 中的音频离开队列，随后关闭功放并发 DONE。ES8389 1.5.11 的 codec `set_mute` 实际写 ADC 静音位，因此正常播放结束不调用它，避免关闭麦克风。API 的 DONE 是本地提交/排空完成，不是经过外部麦克风测量的实际声学结束。
+操作顺序：`playback_begin(token,&id)` → 多次 `playback_write(id,...)` → `playback_end(id)`。BEGIN 到首块之间保持功放关闭；未静音时首块前开启功放，首块实际 codec write 成功后才发 STARTED。后续仅在真实 PCM write 成功后每约一秒发 `PLAYBACK_PROGRESS`，带原 token/id/source；缺帧补零、DMA 排空、收到网络字节都不会制造进度。正常 END 推入足够零样本，让此前 DMA 中的音频离开队列，随后关闭功放并发 DONE。ES8389 1.5.11 的 codec `set_mute` 实际写 ADC 静音位，因此正常播放结束不调用它，避免关闭麦克风。API 的 DONE 是本地提交/排空完成，不是经过外部麦克风测量的实际声学结束。
 
 本地预置应答使用 `bot_audio_playback_begin_local(audio,&runtime_token,&id)`，然后复用 write/end/cancel。它不要求网络音频 session，也不开放麦克风权限；四字段 token 由 runtime 提供，`epoch/session_id` 必须非零。STARTED/DONE/CANCELLED/FAILED 的 `playback_source` 为 `BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE`；原 begin 的事件为 `BOT_AUDIO_PLAYBACK_SESSION`。所有路径仍只允许一个播放 reservation，竞争的 begin 返回 `ESP_ERR_INVALID_STATE`。runtime 根据 source/token/id 处理真正的音频完成，不能用推测时长切到下一状态；也必须在原本地操作失效时 cancel，不能依赖网络 session 切换代替撤销。
+
+声音设置页的显式试听调用 `bot_audio_playback_begin_preview(audio, preview_epoch, &id)`，source 为 `PREVIEW`、token 为 `{epoch,0,0,0}`。它不授权麦克风，不伪造对话 session；runtime 独立核对试听 lease，关闭设置/停止时取消。三种来源复用同一播放器和屏蔽边界。
 
 `playback_cancel(id)` 或 `playback_cancel(0)` 不经过播放队列，不会因队列已满而丢失取消。它锁存取消并直接关闭功放，worker 随后静音、清理 TX DMA、丢弃队列并报告 CANCELLED。没有关闭 ADC。若 codec 写入/静音/排空失败，会报告 FAILED；排空失败后锁住新播放，必须成功停止并重启 owner 后恢复，避免下一次解除静音播放残留数据。
 
@@ -152,6 +175,16 @@ Wake 事件的 `echo_safe=true` 只表示当时自播屏蔽窗口及其缓冲清
 
 所有时间来自 `esp_timer_get_time()`：`read_started_us` 是进入 codec read 的时刻，`observed_us` 是读取或事件被观察到的时刻。它们不是 I2S 硬件采样时间，也不是与 Mac 同步的墙上时钟。`hardware_capture_timestamps=false`。序号在一次 start 生命周期内递增，丢弃帧也消耗序号；下游应接受间隔。
 
+### 运行时设置、元数据诊断与有限恢复
+
+`bot_audio_set_controls()` 只复制 `bot_voice_settings_t` 请求并递增 revision，允许 create 后、start 前调用；相同请求严格幂等，即使上一轮失败也不会在主循环里反复尝试。capture owner 串行应用 codec 音量和模型门槛，发 `CONTROLS_APPLIED`，状态同时保留 requested/applied/revision/error。主程序先读取 NVS，再以 `muted ? 0 : volume` 创建 codec 配置、提交完整设置、启动；启动状态清理不会丢掉预提交设置。
+
+音量范围 0..60，mute 独立保存原音量。静音通过 PA GPIO7 和零输出帧实现，**不调用会影响 ES8389 ADC 的 runtime `set_out_mute`**。播放任务每块检查请求/已应用静音状态，capture owner 负责 codec 变化；UI 不接触 codec。唤醒门槛范围 40..99，既更新官方 native threshold，也更新 MN 最高候选门槛；WakeNet 使用官方 AFE `set_wakenet_threshold(afe,1,value)`。`night_gain_percent` 和 `spoken_answers` 只作为完整设置保留，具体夜间 PCM 缩放、Mac 语音选项由上层实现。修改后的成功写入 NVS也由平台负责，音频任务不执行闪存持久化。
+
+状态只记录数字：双麦峰值/均值、capture/read errors、AFE feed 拒绝、MN runs/timeouts/rejections/最后候选分数、缓存水位和受保护丢样、播放队列水位/underruns、有限恢复次数，以及最后 wake/capture-ready/playback begin/首块/完成的时刻。`read_us` 包含阻塞读取；`afe_us` 是 feed/fetch、模型推理及事件处理的墙钟区间；`keyword_us` 是最近一次 native detect 调用；`processing_us` 是 read 完成后的完整本轮处理墙钟区间。各有 max；processing 超过单采集块时长时增加 `capture_overruns`。这些不是独立 CPU 占用、I2S 硬件丢帧量或声学端到端延迟。
+
+连续 20 次 AFE fetch 错误/超时，或官方 feed/reset 错误，会停用本地检测。默认最多自动尝试两次已有 AFE 的 buffer/VAD reset，间隔至少 1.5 s，且避开自播屏蔽窗口；成功后重新建立 RX/AFE 边界。`bot_audio_retry_afe()` 可显式排队一次同类恢复；它不重新加载模型、不重启 I2S、不释放工作中的内存，初始 AFE 根本未创建时拒绝。失败保留 manual/raw 采集路径并明确报告状态。它不是硬件故障自动修复保证。
+
 ## 7. 配置和主程序接线
 
 | 配置 | 默认值 | 含义 |
@@ -160,6 +193,9 @@ Wake 事件的 `echo_safe=true` 只表示当时自播屏蔽窗口及其缓冲清
 | `CONFIG_BOT_AUDIO_MULTINET_WAKE_FALLBACK` | y | 完整四音节中文命令作为离线唤醒 |
 | `CONFIG_BOT_AUDIO_MULTINET_THRESHOLD_PERCENT` | 80 | 内部模型分数门槛，待实板标定 |
 | `CONFIG_BOT_AUDIO_MULTINET_WINDOW_MS` | 3000 | 原生检测窗口；超时清理后继续识别 |
+| `CONFIG_BOT_AUDIO_LOCAL_COMMAND_THRESHOLD_PERCENT` | 85 | 授权会话的固定命令门槛，未校准 |
+| `CONFIG_BOT_AUDIO_START_BUFFER_MS` | 800 | 显式授权同 token 的 PSRAM 窗口，300..1500 ms |
+| `CONFIG_BOT_AUDIO_AFE_RECOVERY_LIMIT` | 2 | 每次启动最多自动重置 AFE 的次数 |
 | `CONFIG_BOT_AUDIO_MODEL_PARTITION` | `model` | 与官方自动打包/flash 路径一致 |
 | `CONFIG_BOT_AUDIO_OUTPUT_VOLUME` | 30 | codec 百分比，上限 60；不是声学分贝限值 |
 | `CONFIG_BOT_AUDIO_MIC_GAIN_DB` | 36 | 双麦输入增益，范围 0..42 dB；沿用官方该板 DOA 示例 |
@@ -168,7 +204,7 @@ Wake 事件的 `echo_safe=true` 只表示当时自播屏蔽窗口及其缓冲清
 | `CONFIG_BOT_AUDIO_PLAYBACK_QUEUE_FRAMES` | 12 | 有界播放队列槽数 |
 | `CONFIG_BOT_AUDIO_WORKER_PRIORITY` | 8 | 采集/AFE 与播放两个应用音频任务的优先级 |
 
-主程序使用 `bot_audio_default_config()`，设置 `on_event`、`on_pcm` 与 context 后 create/start。仅在明确会话、设备认证和音频通道就绪时允许 PCM 回调；未经唤醒或触摸时 `deliver_pcm=false`。VAD、wake、playback 回调与运行时状态的映射见 [INTEGRATION.md](INTEGRATION.md)，实板验证状态见 [整合记录](../../../docs/server-integration-2026-11-08.md)。
+主程序使用 `bot_audio_default_config()`，设置 `on_event`、`on_pcm` 与 context 后 create、提交已保存的 controls，再 start。仅在明确会话、本地 capture-ready、设备认证和音频通道就绪时允许 PCM 回调；未经唤醒或触摸时无 session、无 retain。VAD、wake、playback 回调与运行时状态的映射见 [INTEGRATION.md](INTEGRATION.md)，较早的实板验证状态见 [整合记录](../../../docs/server-integration-2026-11-08.md)。
 
 要求项目配置 `CONFIG_CODEC_ES8389_SUPPORT=y`、`CONFIG_MODEL_IN_FLASH=y`、可供官方 AFE 使用的 PSRAM，以及 ESP32-S31 BSP 所需配置。`CONFIG_BSP_ERROR_CHECK=n` 允许可恢复的 BSP 错误返回上层，而不是在 BSP 宏内 abort。运行时仍必须处理 start 返回错误和健康状态变化。
 
@@ -191,6 +227,6 @@ Wake 事件的 `echo_safe=true` 只表示当时自播屏蔽窗口及其缓冲清
 
 ### 尚待完成的声学验证
 
-此前 codec/采集/AFE 的上板结果以历史记录为准，不能把它扩展为新增功能已经验证。此次新增 MultiNet7 持续识别、本地应答来源隔离、播放后缓冲清理仍需在 S31 编译并实测；重点包括内部堆和 PSRAM 峰值、与视觉/Wi-Fi 并行的 CPU 余量、完整短语召回率、单独“小呆”及长间隔负例、实际扬声器自播、重复检测、取消与恢复。声学停止时延同样没有测量结果。
+此前 codec/采集/AFE 的上板结果以历史记录为准，不能把它扩展为新增功能已经验证。本次使用固定 ESP-SR 2.6.1 原始接口头和最小平台声明，对四个音频源文件完成主机 C11 `-Wall -Wextra -Werror -fsyntax-only` 检查；这不是 IDF 链接或 S31 执行验证。MultiNet7 持续识别、授权固定命令、图切换开销、运行时音量/静音/门槛、起音重放与过载、三类播放及尾音清理仍需在 S31 编译并实测；重点包括内部堆和 PSRAM 峰值、视觉/Wi-Fi 并行余量、完整短语及九条命令的召回/误触发、实际扬声器自播、长语音进度、取消与恢复。声学停止和追问首字时延没有测量结果。
 
 AEC 和自动打断需要另行测量回声参考通道及同步关系后再实现；这份代码没有将其标记为已完成。当前 30% 默认电气音量不代表儿童耳边的安全声压，必须结合实际扬声器、外壳与距离确定使用音量。以上都是尚未执行的硬件验证项，不是本次验证结果。

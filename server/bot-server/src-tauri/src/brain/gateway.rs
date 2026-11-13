@@ -15,6 +15,7 @@ pub const PATH: &str = "/v3/brain/ws";
 const MAX_JSON: usize = 4_500_000;
 const DEVICE_CAPTION_BYTES: usize = 383;
 const DISPLAY_REPLY_CAPABILITY: &str = "display.reply.v1";
+const AUDIO_REPLY_CAPABILITY: &str = "audio.reply.v1";
 
 pub struct RunningGateway {
     shutdown: watch::Sender<bool>,
@@ -141,13 +142,13 @@ struct Engagement {
 }
 
 #[derive(Clone, Debug)]
-struct DeviceOutput { images:bool }
+struct DeviceOutput { images:bool, audio:bool }
 
 impl DeviceOutput {
     fn negotiate(payload: &Value) -> Result<Option<Self>, String> {
         let Some(output) = payload.get("output") else { return Ok(None) };
+        let audio = output.get("audio").and_then(Value::as_bool).ok_or("display_output_unsupported")?;
         if output.get("version").and_then(Value::as_u64) != Some(1)
-            || output.get("audio").and_then(Value::as_bool) != Some(false)
             || !output.get("cards").and_then(Value::as_array)
                 .is_some_and(|cards| cards.iter().any(|card| card.as_str() == Some("text"))) {
             return Err("display_output_unsupported".into());
@@ -158,14 +159,14 @@ impl DeviceOutput {
             && image["max_width"].as_u64().is_some_and(|n|n>=480)
             && image["max_height"].as_u64().is_some_and(|n|n>=272)
             && image["max_bytes"].as_u64().is_some_and(|n|n>=65536);
-        Ok(Some(Self {images}))
+        Ok(Some(Self {images,audio}))
     }
 
     fn confirmed(&self) -> Value {
         if self.images {
-            json!({"version":1,"audio":false,"cards":["text","image"],"image":{"mime":"image/jpeg","max_width":480,"max_height":272,"max_bytes":65536}})
+            json!({"version":1,"audio":self.audio,"cards":["text","image"],"image":{"mime":"image/jpeg","max_width":480,"max_height":272,"max_bytes":65536}})
         } else {
-            json!({"version":1,"audio":false,"cards":["text"]})
+            json!({"version":1,"audio":self.audio,"cards":["text"]})
         }
     }
 }
@@ -177,7 +178,9 @@ fn device_turn_input(session: &Engagement, turn_id: String, text: Option<String>
         text,
         wav_base64,
         profile_id: None,
-        speak: Some(session.output.is_none()),
+        // Old clients without output negotiation retain the original v3 path.
+        // Modern devices explicitly opt in; the normal device default is silent.
+        speak: Some(session.output.as_ref().map_or(true, |output|output.audio)),
         device_display: session.output.as_ref().is_some_and(|output|output.images),
     }
 }
@@ -239,6 +242,7 @@ struct Completed {
     turn_id: String,
     token: RuntimeToken,
     compact: bool,
+    audio_requested: bool,
     processing_time: Duration,
     result: Result<TurnOutput, String>,
 }
@@ -266,7 +270,23 @@ impl DisplayResult {
             "data_base64":STANDARD.encode(&image.bytes[offset..end]),"eof":end==image.bytes.len()}))
     }
 }
-struct Playback {turn_id:String,stream_id:u32,token:RuntimeToken,pcm:Vec<u8>,offset:usize,sequence:u32}
+struct Playback {
+    turn_id:String, stream_id:u32, token:RuntimeToken, pcm:Vec<u8>, offset:usize, sequence:u32,
+    hardware_receipts:bool, ready:bool, sent_complete:bool, hardware_started:bool,
+    created:Instant, ready_at:Option<Instant>,
+}
+impl Playback {
+    fn current(&self, token:RuntimeToken, stream:u32)->bool {
+        self.token==token && self.stream_id==stream
+    }
+    fn expired(&self)->bool {
+        match self.ready_at {
+            Some(ready)=>ready.elapsed()>Duration::from_millis((self.pcm.len() as u64/32)+10_000),
+            None=>self.created.elapsed()>Duration::from_secs(5),
+        }
+    }
+}
+struct PlaybackReceipt {token:RuntimeToken,stream_id:u32,status:String}
 struct ActivePeer {
     turn_id:String, request_id:String, token:RuntimeToken, task:TurnTask,
     progress_seq:u32, last_stage:Option<&'static str>, last_progress:Instant,
@@ -277,6 +297,7 @@ fn progress_stage(event: &Value) -> Option<&'static str> {
         "turn.transcribing" => Some("transcribing"),
         "turn.understood" => Some("understood"),
         "turn.preparing_image" => Some("preparing_image"),
+        "turn.synthesizing" => Some("synthesizing"),
         "turn.thinking" | "harness_permission_replied" => Some("working"),
         "harness_tool_activity" if matches!(event["phase"].as_str(),
             Some("session.tool.called" | "session.tool.success" | "session.tool.failed" | "session.shell.started")) => Some("working"),
@@ -317,7 +338,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
     let _online_peer=OnlinePeer::new(device_id.clone(),online);
     let mut cancellations=brain.cancellations();
     let mut progress=brain.progress();
-    send(&mut socket, Message::Text(json!({"v":3,"type":"welcome","device_id":device_id,"capabilities":["assistant.text","audio.pcm16","speaker.candidate","scene.cards",DISPLAY_REPLY_CAPABILITY],"sample_rate":16000,"max_audio_seconds":30,"requires_activation":true}).to_string())).await.map_err(|_|"ws_write_failed")?;
+    send(&mut socket, Message::Text(json!({"v":3,"type":"welcome","device_id":device_id,"capabilities":["assistant.text","audio.pcm16","speaker.candidate","scene.cards",DISPLAY_REPLY_CAPABILITY,AUDIO_REPLY_CAPABILITY],"sample_rate":16000,"max_audio_seconds":30,"requires_activation":true}).to_string())).await.map_err(|_|"ws_write_failed")?;
     let mut engagement:Option<Engagement>=None;
     let mut audio:Option<(media::AudioInput,RuntimeToken)>=None;
     let mut plain:Option<plain_audio::PlainAudio>=None;
@@ -325,6 +346,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
     let (completion_tx,mut completion_rx)=mpsc::channel::<Completed>(1);
     let mut active:Option<ActivePeer>=None;
     let mut playback:Option<Playback>=None;
+    let mut playback_receipt:Option<PlaybackReceipt>=None;
     let mut display_result:Option<DisplayResult>=None;
     let mut audio_clock=interval(Duration::from_millis(20));
     audio_clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -359,6 +381,10 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>None,
                     Err(tokio::sync::broadcast::error::RecvError::Closed)=>break,
                 };
+                let cancelled_token=audio.as_ref().map(|(_,token)|*token)
+                    .or_else(||active.as_ref().map(|turn|turn.token))
+                    .or_else(||playback.as_ref().map(|clip|clip.token))
+                    .or_else(||engagement.as_ref().map(|session|session.token));
                 if active.as_ref().is_some_and(|turn|target.as_ref().map_or(true,|target|target==&turn.turn_id)) {
                     if let Some(turn)=active.take(){
                         turn.task.abort();
@@ -373,11 +399,25 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                 }
                 if target.is_none(){
                     audio=None;plain=None;engagement=None;display_result=None;
-                    if send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.cancelled"}).to_string())).await.is_err(){break;}
+                    if let Some(token)=cancelled_token {
+                        if send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.cancelled","runtime":token}).to_string())).await.is_err(){break;}
+                    }
                 }
             },
             _=audio_clock.tick(), if playback.is_some()=>{
                 let clip=playback.as_mut().ok_or("playback_missing")?;
+                if clip.expired() {
+                    let event=json!({"v":3,"type":"event","event":"audio.cancelled",
+                        "stream_id":clip.stream_id,"runtime":clip.token,"code":"playback_timeout"});
+                    brain.emit("device.audio",Some(&clip.turn_id),json!({"device_id":device_id,
+                        "status":"unconfirmed","code":"playback_timeout","runtime":clip.token}));
+                    playback=None;plain=None;
+                    if send(&mut socket,Message::Text(event.to_string())).await.is_err(){break;}
+                    continue;
+                }
+                // A new client reserves its one hardware queue before any TCP
+                // samples leave the Mac. WSS and PCM use independent sockets.
+                if !clip.ready || clip.sent_complete {continue;}
                 let end=(clip.offset+640).min(clip.pcm.len());
                 let frame=media::output_frame(clip.stream_id,clip.sequence,&clip.pcm[clip.offset..end]);
                 if let Some(transport)=plain.as_mut() {
@@ -396,17 +436,19 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                         if !matches!(timeout(Duration::from_secs(2),transport.outgoing.send(finish)).await,Ok(Ok(()))){break;}
                     }
                     let complete=json!({"v":3,"type":"event","event":"audio.complete","stream_id":clip.stream_id,"runtime":clip.token});
-                    playback=None;
+                    clip.sent_complete=true;
+                    if !clip.hardware_receipts {playback=None;}
                     if send(&mut socket, Message::Text(complete.to_string())).await.is_err(){break;}
                 }
             },
             _=heartbeat.tick()=>{
                 if last_packet.elapsed()>Duration::from_secs(50){break;}
                 if active.is_none() && playback.is_none() && engagement.as_ref().is_some_and(|e|e.last_user.elapsed().as_secs()>brain.config.conversation.idle_session_seconds){
+                    let token=audio.as_ref().map(|(_,token)|*token).or_else(||engagement.as_ref().map(|session|session.token));
                     engagement=None;audio=None;plain=None;display_result=None;
-                    if send(&mut socket, Message::Text(json!({"v":3,"type":"event","event":"session.expired"}).to_string())).await.is_err(){break;}
+                    if send(&mut socket, Message::Text(json!({"v":3,"type":"event","event":"session.expired","runtime":token}).to_string())).await.is_err(){break;}
                 }
-                if audio.as_ref().is_some_and(|(a,_)|a.started.elapsed().as_secs()>35){audio=None;plain=None;}
+                if audio.as_ref().is_some_and(|(a,_)|a.sequence>0 && a.started.elapsed().as_secs()>35){audio=None;plain=None;}
                 if send(&mut socket, Message::Ping(Vec::new())).await.is_err(){break;}
             },
             Some(completed)=completion_rx.recv()=>{
@@ -415,9 +457,16 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                     active=None;
                     match completed.result {
                         Ok(mut output)=>{
-                            let pcm=if completed.compact { None } else {
-                                output.audio.take().and_then(|a|a.get("wav_base64").and_then(Value::as_str).and_then(|wav|media::decode_output(wav).ok()))
+                            let (pcm,audio_error)=if !completed.audio_requested { output.audio=None; (None,None) } else {
+                                let decoded=output.audio.take().ok_or_else(||"tts_unavailable".to_string())
+                                    .and_then(|audio|audio.get("wav_base64").and_then(Value::as_str)
+                                        .ok_or_else(||"tts_wav_missing".to_string()).and_then(media::decode_output));
+                                match decoded {Ok(pcm)=>(Some(pcm),None),Err(code)=>(None,Some(code))}
                             };
+                            if let Some(code)=&audio_error {
+                                brain.emit("device.audio",Some(&completed.turn_id),json!({"device_id":device_id,
+                                    "status":"unavailable","code":code,"runtime":completed.token}));
+                            }
                             brain.emit("device.turn.completed",Some(&completed.turn_id),json!({
                                 "device_id":device_id,"transcript":output.transcript,
                                 "scene":output.scene,"provider_id":output.provider_id,"model_id":output.model_id,
@@ -430,6 +479,8 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                             let stream_id=u32::from_le_bytes(uuid::Uuid::new_v4().as_bytes()[..4].try_into().map_err(|_|"stream_id")?).max(1);
                             let payload=if completed.compact {
                                 let mut payload=device_scene(&output);
+                                payload["audio_status"]=json!({"requested":completed.audio_requested,
+                                    "available":pcm.is_some(),"code":audio_error.as_deref().unwrap_or("")});
                                 let image=output.display_image.take().map(|image|(format!("img-{}",uuid::Uuid::new_v4().simple()),image));
                                 if let Some((id,image))=&image {
                                     payload["scene"]["cards"]=json!([{"kind":"image","title":image.title,"body":"",
@@ -439,11 +490,20 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                 display_result=Some(DisplayResult{token:completed.token,turn_id:completed.turn_id.clone(),image,delivered:Instant::now()});
                                 payload
                             } else {serde_json::to_value(output).map_err(|_|"turn_response_invalid")?};
+                            let hardware_receipts=completed.compact && completed.audio_requested;
                             let response=json!({"v":3,"type":"response","id":completed.id,"ok":true,"runtime":completed.token,"payload":payload,
-                                "audio":pcm.as_ref().map(|data|json!({"stream_id":stream_id,"format":"pcm_s16le","sample_rate":16000,"channels":1,"bytes":data.len(),"frame_samples":320}))});
+                                "audio":pcm.as_ref().map(|data|{
+                                    let mut descriptor=json!({"stream_id":stream_id,"format":"pcm_s16le","sample_rate":16000,"channels":1,"bytes":data.len(),"frame_samples":320});
+                                    if hardware_receipts {descriptor["playback_ack"]=json!("hardware_v1");}
+                                    descriptor
+                                })});
                             if send(&mut socket, Message::Text(response.to_string())).await.is_err(){break;}
                             if let Some(pcm)=pcm {
-                                playback=Some(Playback{turn_id:completed.turn_id,stream_id,token:completed.token,pcm,offset:0,sequence:0});
+                                playback_receipt=None;
+                                let now=Instant::now();
+                                playback=Some(Playback{turn_id:completed.turn_id,stream_id,token:completed.token,pcm,offset:0,sequence:0,
+                                    hardware_receipts,ready:!hardware_receipts,sent_complete:false,hardware_started:false,
+                                    created:now,ready_at:if hardware_receipts{None}else{Some(now)}});
                                 audio_clock.reset();
                             }
                         },
@@ -465,8 +525,14 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                     _=>Err("plain_audio_disconnected".into()),
                 };
                 if let Err(error)=result {
+                    let token=audio.as_ref().map(|(_,token)|*token);
                     audio=None;plain=None;
-                    let _=send(&mut socket,Message::Text(json!({"v":3,"type":"error","code":error}).to_string())).await;
+                    let _=send(&mut socket,Message::Text(json!({"v":3,"type":"error","code":error,"runtime":token}).to_string())).await;
+                } else {
+                    // Opening the next transport does not dismiss the last
+                    // result. Only actual, authorized new speech does.
+                    display_result=None;
+                    if let Some(session)=engagement.as_mut(){session.last_user=Instant::now();}
                 }
             },
             incoming=socket.next()=>{
@@ -478,7 +544,11 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                     Message::Binary(bytes)=>{
                         let result=if plain.is_some(){Err("audio_wrong_transport".to_string())}
                             else {audio.as_mut().ok_or_else(||"audio_session_required".to_string()).and_then(|(audio,_)|audio.push(&bytes))};
-                        if let Err(error)=result{audio=None;let _=send(&mut socket, Message::Text(json!({"v":3,"type":"error","code":error}).to_string())).await;}
+                        if let Err(error)=result{
+                            let token=audio.as_ref().map(|(_,token)|*token);audio=None;
+                            let _=send(&mut socket, Message::Text(json!({"v":3,"type":"error","code":error,"runtime":token}).to_string())).await;
+                        }
+                        else {display_result=None;if let Some(session)=engagement.as_mut(){session.last_user=Instant::now();}}
                     },
                     Message::Text(text)=>{
                         let frame:RequestFrame=match serde_json::from_str(&text){Ok(frame)=>frame,Err(_)=>{let _=send(&mut socket, Message::Text(response_error("","invalid_request"))).await;continue;}};
@@ -513,7 +583,6 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     let session=engagement.as_mut().ok_or("explicit_session_required")?;
                                     if active.is_some() || audio.is_some() || playback.is_some(){return Err("session_busy".into());}
                                     let token=parse_runtime(&frame.payload)?;session.check_token(token)?;
-                                    display_result=None;
                                     if frame.payload.get("format").and_then(Value::as_str)!=Some("pcm_s16le") || frame.payload.get("sample_rate").and_then(Value::as_u64)!=Some(16000) || frame.payload.get("channels").and_then(Value::as_u64)!=Some(1){return Err("audio_format_unsupported".into());}
                                     let stream=stream_id(&frame.payload)?;
                                     let transport=frame.payload.get("transport").and_then(Value::as_str);
@@ -527,7 +596,53 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         _=>return Err("audio_transport_unsupported".into()),
                                     };
                                     audio=Some((media::AudioInput::new(stream),token));session.last_user=Instant::now();
-                                    Ok(json!({"stream_id":stream,"max_bytes":media::MAX_INPUT_PCM,"plain_audio":plain_config}))
+                                    Ok(json!({"stream_id":stream,"runtime":token,"max_bytes":media::MAX_INPUT_PCM,"plain_audio":plain_config}))
+                                },
+                                "audio.playback.ready"=>{
+                                    let token=parse_runtime(&frame.payload)?;
+                                    let stream=stream_id(&frame.payload)?;
+                                    let clip=playback.as_mut().filter(|clip|clip.hardware_receipts && clip.current(token,stream))
+                                        .ok_or("audio_playback_stale")?;
+                                    if !clip.ready {
+                                        clip.ready=true;clip.ready_at=Some(Instant::now());audio_clock.reset();
+                                        brain.emit("device.audio",Some(&clip.turn_id),json!({"device_id":device_id,
+                                            "stream_id":stream,"status":"ready","runtime":token}));
+                                    }
+                                    Ok(json!({"ready":true,"runtime":token,"stream_id":stream}))
+                                },
+                                "audio.playback.report"=>{
+                                    let token=parse_runtime(&frame.payload)?;
+                                    let stream=stream_id(&frame.payload)?;
+                                    let status=frame.payload["status"].as_str()
+                                        .filter(|status|matches!(*status,"started"|"finished"|"failed"|"cancelled"))
+                                        .ok_or("audio_playback_status_invalid")?;
+                                    if playback_receipt.as_ref().is_some_and(|receipt|
+                                        receipt.token==token && receipt.stream_id==stream && receipt.status==status) {
+                                        return Ok(json!({"recorded":true,"duplicate":true}));
+                                    }
+                                    let clip=playback.as_mut().filter(|clip|clip.hardware_receipts && clip.current(token,stream))
+                                        .ok_or("audio_playback_stale")?;
+                                    if status=="started" {
+                                        if !clip.ready || clip.sequence==0 {return Err("audio_playback_not_sent".into());}
+                                        if clip.hardware_started {return Ok(json!({"recorded":true,"duplicate":true}));}
+                                        clip.hardware_started=true;
+                                    } else if status=="finished" {
+                                        if !clip.sent_complete || !clip.hardware_started ||
+                                            frame.payload["frames"].as_u64()!=Some(clip.sequence as u64) ||
+                                            frame.payload["bytes"].as_u64()!=Some(clip.pcm.len() as u64) {
+                                            return Err("audio_playback_incomplete".into());
+                                        }
+                                    }
+                                    let code=frame.payload["code"].as_str().filter(|code|!code.is_empty() && code.len()<=40 &&
+                                        code.bytes().all(|byte|byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte==b'_'));
+                                    brain.emit("device.audio",Some(&clip.turn_id),json!({"device_id":device_id,
+                                        "stream_id":stream,"status":status,"code":code,"runtime":token,
+                                        "frames_sent":clip.sequence,"pcm_bytes":clip.pcm.len()}));
+                                    if status!="started" {
+                                        playback_receipt=Some(PlaybackReceipt{token,stream_id:stream,status:status.to_owned()});
+                                        playback=None;plain=None;
+                                    }
+                                    Ok(json!({"recorded":true}))
                                 },
                                 "display.asset.read"=>{
                                     let token=parse_runtime(&frame.payload)?;
@@ -574,13 +689,14 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     let id=format!("{}-{}",session.conversation_id,token.turn_id);
                                     let input=device_turn_input(session,id.clone(),text,wav);
                                     let compact=session.output.is_some();
+                                    let audio_requested=input.speak.unwrap_or(false);
                                     let turn_brain=Arc::clone(&brain);let tx=completion_tx.clone();let request_id=frame.id.clone();
                                     let completion_id=id.clone();
                                     let task=tokio::spawn(async move {
                                         let started = Instant::now();
                                         let result = turn_brain.turn(input, false).await;
                                         let _ = tx.send(Completed {
-                                            id: request_id, turn_id: completion_id, token, compact,
+                                            id: request_id, turn_id: completion_id, token, compact, audio_requested,
                                             processing_time: started.elapsed(), result,
                                         }).await;
                                     });
@@ -691,7 +807,10 @@ mod tests {
         let mut session = Engagement { conversation_id: "device-test".into(), token,
             last_turn: None, last_user: Instant::now(), output: None };
         assert_eq!(device_turn_input(&session,"old".into(),Some("hello".into()),None).speak,Some(true));
-        assert!(DeviceOutput::negotiate(&json!({"output":{"version":1,"audio":true,"cards":["text"]}})).is_err());
+        session.output=DeviceOutput::negotiate(&json!({"output":{"version":1,"audio":true,"cards":["text"]}})).unwrap();
+        assert_eq!(device_turn_input(&session,"spoken".into(),Some("hello".into()),None).speak,Some(true));
+        assert_eq!(session.output.as_ref().unwrap().confirmed()["audio"],true);
+        assert!(DeviceOutput::negotiate(&json!({"output":{"version":1,"cards":["text"]}})).is_err());
         session.output=DeviceOutput::negotiate(&json!({"output":{"version":1,"audio":false,"cards":["text"]}})).unwrap();
         assert_eq!(device_turn_input(&session,"new".into(),Some("hello".into()),None).speak,Some(false));
         assert!(!device_turn_input(&session,"new".into(),Some("hello".into()),None).device_display);
@@ -779,6 +898,7 @@ mod tests {
         let welcome:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(welcome["type"],"welcome");assert_eq!(welcome["device_id"],"test-bot");
         assert!(welcome["capabilities"].as_array().unwrap().iter().any(|v|v==DISPLAY_REPLY_CAPABILITY));
+        assert!(welcome["capabilities"].as_array().unwrap().iter().any(|v|v==AUDIO_REPLY_CAPABILITY));
         assert_eq!(brain.gateway.lock().await.as_ref().unwrap().status()["devices"].as_array().unwrap().len(),1);
         socket.send(Message::Text(json!({"v":3,"type":"request","id":"open1","method":"session.open",
             "payload":{"activation":"touch","runtime":{"epoch":7,"session_id":12,"turn_id":1,"focus_generation":0}}}).to_string())).await.unwrap();
@@ -790,7 +910,7 @@ mod tests {
         assert_eq!(closed["ok"],true);
         socket.send(Message::Text(json!({"v":3,"type":"request","id":"bad-open","method":"session.open",
             "payload":{"activation":"touch","runtime":{"epoch":7,"session_id":12,"turn_id":1,"focus_generation":0},
-                "output":{"version":1,"audio":true,"cards":["text"]}}}).to_string())).await.unwrap();
+                "output":{"version":2,"audio":true,"cards":["text"]}}}).to_string())).await.unwrap();
         let bad:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(bad["error"]["code"],"display_output_unsupported");
         socket.send(Message::Text(json!({"v":3,"type":"request","id":"silent-open","method":"session.open",

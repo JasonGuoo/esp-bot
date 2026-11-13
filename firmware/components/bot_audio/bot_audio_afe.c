@@ -188,13 +188,23 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
     afe->feed_samples = (size_t)samples;
     ESP_LOGI("bot_audio", "AFE frame samples: feed=%d fetch=%d, 16 kHz mono",
              samples, afe->iface->get_fetch_chunksize(afe->data));
+    /* Keep one official MN instance for explicitly authorized local controls,
+     * even when a dedicated WakeNet owns passive wake. It is not inferred in
+     * passive WakeNet mode. No second command/model owner is created. */
+    esp_err_t keyword_error = ESP_ERR_NOT_FOUND;
+    if (fallback_enabled && multinet_name) {
+        keyword_error = bot_audio_keyword_open(&afe->keyword, multinet_name, afe->feed_samples);
+        if (keyword_error != ESP_OK) {
+            bot_audio_keyword_close(&afe->keyword);
+            ESP_LOGE("bot_audio", "MultiNet7 unavailable: %s", esp_err_to_name(keyword_error));
+        }
+    }
     if (selected) {
         afe->wake_status = BOT_AUDIO_WAKE_READY;
         afe->wake_backend = BOT_AUDIO_WAKE_BACKEND_WAKENET;
         reason(afe, "Dedicated full 小呆小呆 WakeNet ready; AEC and automatic barge-in unavailable");
     } else if (fallback_enabled && multinet_name) {
-        esp_err_t err = bot_audio_keyword_open(&afe->keyword, multinet_name, afe->feed_samples);
-        if (err == ESP_OK) {
+        if (keyword_error == ESP_OK) {
             afe->wake_status = BOT_AUDIO_WAKE_READY;
             afe->wake_backend = BOT_AUDIO_WAKE_BACKEND_MULTINET7;
             snprintf(afe->model_name, sizeof(afe->model_name), "%s", multinet_name);
@@ -202,10 +212,8 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
         } else {
             /* A missing/failed keyword engine does not take manual VAD/codec
              * interaction down with it. No alternative word is accepted. */
-            bot_audio_keyword_close(&afe->keyword);
             afe->wake_status = BOT_AUDIO_WAKE_UNAVAILABLE;
             reason(afe, "MultiNet7 initialization failed; manual interaction and local VAD remain available");
-            ESP_LOGE("bot_audio", "Full-phrase MultiNet7 unavailable: %s", esp_err_to_name(err));
         }
     } else if (fallback_enabled && afe->models) {
         reason(afe, "WAKE_MODEL_MISSING: mn7_cn absent; build with SR_MN_CN_MULTINET7_QUANT and flash srmodels.bin");

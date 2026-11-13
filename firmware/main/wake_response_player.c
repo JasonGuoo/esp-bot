@@ -12,6 +12,8 @@ typedef struct {
     bot_session_token_t token;
     const bot_response_entry_t *entry;
     unsigned generation;
+    uint8_t gain_percent;
+    bool preview;
 } response_job_t;
 
 struct bot_response_player {
@@ -55,7 +57,8 @@ static void play(bot_response_player_t *player, const response_job_t *job)
     const int64_t start_deadline = esp_timer_get_time() + 300000;
     do {
         if (!current(player, job)) return;
-        error = bot_audio_playback_begin_local(player->audio, &token, &playback_id);
+        error = job->preview ? bot_audio_playback_begin_preview(player->audio, token.epoch, &playback_id) :
+            bot_audio_playback_begin_local(player->audio, &token, &playback_id);
         if (error != ESP_ERR_INVALID_STATE && error != ESP_ERR_TIMEOUT) break;
         vTaskDelay(pdMS_TO_TICKS(5)); /* allow the previous cancellation to drain */
     } while (esp_timer_get_time() < start_deadline);
@@ -70,10 +73,10 @@ static void play(bot_response_player_t *player, const response_job_t *job)
     }
     ESP_LOGI(TAG, "id=%s scene=%s expression=%s gain=%u samples=%lu playback=%lu",
              job->entry->id, job->entry->scene, job->entry->expression,
-             (unsigned)job->entry->gain_percent, (unsigned long)job->entry->pcm_samples,
+             (unsigned)job->gain_percent, (unsigned long)job->entry->pcm_samples,
              (unsigned long)playback_id);
     int16_t samples[BOT_AUDIO_PLAYBACK_SAMPLES];
-    const unsigned gain = job->entry->gain_percent <= 100 ? job->entry->gain_percent : 100;
+    const unsigned gain = job->gain_percent;
     const int64_t deadline = esp_timer_get_time() +
         (int64_t)job->entry->pcm_samples * 1000000 / BOT_RESPONSES_SAMPLE_RATE + 2000000;
     size_t count;
@@ -135,10 +138,23 @@ esp_err_t bot_response_player_create(bot_bus_t *bus, bot_audio_t *audio,
 
 bool bot_response_player_queue(bot_response_player_t *player,
                                 const bot_session_token_t *token,
-                                const bot_response_entry_t *entry)
+                                const bot_response_entry_t *entry, uint8_t gain_percent)
 {
-    if (!player || !token || !token->session_id || !token->turn_id || !entry) return false;
-    const response_job_t job = {*token, entry, atomic_fetch_add(&player->generation, 1) + 1};
+    if (!player || !token || !token->session_id || !token->turn_id || !entry || gain_percent > 100) return false;
+    const response_job_t job = { .token = *token, .entry = entry,
+        .generation = atomic_fetch_add(&player->generation, 1) + 1, .gain_percent = gain_percent };
+    return xQueueOverwrite(player->jobs, &job) == pdTRUE;
+}
+
+bool bot_response_player_preview(bot_response_player_t *player,
+                                  const bot_session_token_t *token,
+                                  const bot_response_entry_t *entry, uint8_t gain_percent)
+{
+    if (!player || !token || !token->epoch || token->session_id || token->turn_id ||
+        !entry || gain_percent > 100) return false;
+    const response_job_t job = { .token = *token, .entry = entry,
+        .generation = atomic_fetch_add(&player->generation, 1) + 1,
+        .gain_percent = gain_percent, .preview = true };
     return xQueueOverwrite(player->jobs, &job) == pdTRUE;
 }
 

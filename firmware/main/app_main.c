@@ -51,6 +51,11 @@ typedef struct {
     attention_controller_t attention;
     idle_attention_t idle_attention;
     bot_runtime_snapshot_t desired;
+    bot_voice_settings_t voice_persist_attempt;
+    bot_voice_diagnostics_t voice_diagnostics;
+    uint32_t last_voice_diagnostic_ms;
+    bool voice_preview_reported;
+    char voice_notice[96];
     uint8_t camera_orientation;
     QueueHandle_t theme_queue;
 #if CONFIG_ESPBOT_USB_DEBUG_PREVIEW
@@ -154,6 +159,8 @@ static void audio_pcm(void *context, const bot_audio_pcm_t *frame) {
 
 static void audio_event(void *context, const bot_audio_event_t *source) {
     app_t *app = context;
+    /* The transport only accepts SESSION-source hardware receipts. */
+    brain_secure_audio_event(source);
     bot_event_t event = { .source = BOT_SOURCE_AUDIO,
         .observed_ms = (uint32_t)(source->observed_us / 1000),
         .token = runtime_token(source->token) };
@@ -188,6 +195,25 @@ static void audio_event(void *context, const bot_audio_event_t *source) {
         event.kind = BOT_EVENT_UTTERANCE_ENDED;
         event.data.utterance.echo_safe = source->echo_safe;
         break;
+    case BOT_AUDIO_EVENT_CAPTURE_READY:
+        event.kind = BOT_EVENT_CAPTURE_READY;
+        event.data.capture.ready = source->available;
+        break;
+    case BOT_AUDIO_EVENT_BUFFER_OVERFLOW:
+        event.kind = BOT_EVENT_CAPTURE_OVERFLOW;
+        break;
+    case BOT_AUDIO_EVENT_LOCAL_COMMAND:
+        event.kind = BOT_EVENT_LOCAL_COMMAND;
+        event.data.local_command.command = source->command;
+        event.data.local_command.score = source->confidence;
+        ESP_LOGI(TAG, "Local voice command=%s score=%.3f epoch=%lu turn=%lu",
+                 bot_voice_command_name(source->command), (double)source->confidence,
+                 (unsigned long)source->token.epoch, (unsigned long)source->token.turn_id);
+        break;
+    case BOT_AUDIO_EVENT_CONTROLS_APPLIED:
+        ESP_LOGI(TAG, "Voice controls revision=%lu result=%s", (unsigned long)source->controls_revision,
+                 esp_err_to_name(source->error));
+        return;
     case BOT_AUDIO_EVENT_AMBIENT_SOUND:
         event.kind = BOT_EVENT_SOUND_ACTIVITY;
         event.data.sound.direction_valid = source->direction_valid;
@@ -201,17 +227,26 @@ static void audio_event(void *context, const bot_audio_event_t *source) {
         event.kind = BOT_EVENT_PLAYBACK_STARTED;
         event.data.playback.id = source->playback_id;
         event.data.playback.local_response = source->playback_source == BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE;
+        event.data.playback.preview = source->playback_source == BOT_AUDIO_PLAYBACK_PREVIEW;
+        break;
+    case BOT_AUDIO_EVENT_PLAYBACK_PROGRESS:
+        event.kind = BOT_EVENT_PLAYBACK_PROGRESS;
+        event.data.playback.id = source->playback_id;
+        event.data.playback.local_response = source->playback_source == BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE;
+        event.data.playback.preview = source->playback_source == BOT_AUDIO_PLAYBACK_PREVIEW;
         break;
     case BOT_AUDIO_EVENT_PLAYBACK_DONE:
         event.kind = BOT_EVENT_PLAYBACK_DONE;
         event.data.playback.id = source->playback_id;
         event.data.playback.local_response = source->playback_source == BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE;
+        event.data.playback.preview = source->playback_source == BOT_AUDIO_PLAYBACK_PREVIEW;
         break;
     case BOT_AUDIO_EVENT_PLAYBACK_CANCELLED:
     case BOT_AUDIO_EVENT_PLAYBACK_FAILED:
         event.kind = BOT_EVENT_PLAYBACK_FAILED;
         event.data.playback.id = source->playback_id;
         event.data.playback.local_response = source->playback_source == BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE;
+        event.data.playback.preview = source->playback_source == BOT_AUDIO_PLAYBACK_PREVIEW;
         break;
     default: return;
     }
@@ -394,19 +429,48 @@ static void theme_applied(const char *theme, void *context) {
     snprintf(value, sizeof(value), "%s", theme);
     if (app->theme_queue) xQueueOverwrite(app->theme_queue, value);
 }
+static bool sound_settings_request(const bot_voice_settings_t *settings, void *context) {
+    app_t *app = context;
+    if (!bot_voice_settings_valid(settings)) return false;
+    const bot_event_t event = { .kind = BOT_EVENT_VOICE_SETTINGS, .source = BOT_SOURCE_LOCAL_UI,
+        .observed_ms = bot_platform_now_ms(), .data.voice_settings = *settings };
+    return bot_bus_post(app->bus, &event, 0) == ESP_OK;
+}
+static bool sound_preview_request(void *context) {
+    app_t *app = context;
+    const bot_event_t event = { .kind = BOT_EVENT_SOUND_PREVIEW, .source = BOT_SOURCE_LOCAL_UI,
+        .observed_ms = bot_platform_now_ms() };
+    return bot_bus_post(app->bus, &event, 0) == ESP_OK;
+}
+static bool set_voice_theme(void *context, const char *theme) {
+    app_t *app = context;
+    if (!app->face || !bot_platform_display_lock(0)) return false;
+    bool applied = face_set_theme(app->face, theme);
+    bot_platform_display_unlock();
+    if (applied) theme_applied(theme, app);
+    return applied;
+}
 static void apply_audio_session(app_t *app, const bot_runtime_snapshot_t *state) {
     if (!app->audio) return;
     bot_audio_token_t token = audio_token(state->token);
-    if (state->audio_session_requested && state->conversation == BOT_CONVERSATION_WAITING) {
-        bot_audio_wait_for_followup(app->audio, &token);
-    } else {
-        bot_audio_set_session(app->audio, state->audio_session_requested ? &token : NULL,
-                              state->audio_uplink_permitted && brain_secure_uplink(&state->token));
-    }
+    const bool listening = state->conversation == BOT_CONVERSATION_LISTENING ||
+                           state->conversation == BOT_CONVERSATION_WAITING;
+    const bool mac_session_possible = state->link_connected && state->link_authenticated && state->link_encrypted;
+    const bot_audio_session_options_t options = {
+        .deliver_pcm = listening && state->audio_uplink_permitted && brain_secure_uplink(&state->token),
+        /* No pending network utterance exists when the Mac is offline. Keep
+         * local commands enabled without an irrelevant 800 ms overflow limit. */
+        .retain_start = listening && state->audio_session_requested && mac_session_possible,
+        .waiting_for_followup = state->followup_armed,
+        .local_commands = listening && state->audio_session_requested,
+    };
+    (void)bot_audio_set_session_ex(app->audio, state->audio_session_requested ? &token : NULL,
+                                   state->audio_session_requested ? &options : NULL);
 }
 static void apply_state(void *context, const bot_runtime_snapshot_t *state) {
     app_t *app = context;
     app->desired = *state;
+    if (app->audio) (void)bot_audio_set_controls(app->audio, &state->voice_settings);
     brain_secure_update(state);
     /* Also close the audio token gate at the intermediate revocation barrier. */
     apply_audio_session(app, state);
@@ -418,9 +482,14 @@ static void stop_output(void *context) {
     head_motion_emergency_stop();
 }
 static bool play_wake_response(void *context, const bot_session_token_t *token,
-                                const bot_response_entry_t *entry) {
+                                const bot_response_entry_t *entry, uint8_t gain_percent) {
     app_t *app = context;
-    return bot_response_player_queue(app->response_player, token, entry);
+    return bot_response_player_queue(app->response_player, token, entry, gain_percent);
+}
+static bool play_sound_preview(void *context, const bot_session_token_t *token,
+                                const bot_response_entry_t *entry, uint8_t gain_percent) {
+    app_t *app = context;
+    return bot_response_player_preview(app->response_player, token, entry, gain_percent);
 }
 static bool wake_response_tail_clear(void *context) {
     app_t *app = context;
@@ -498,8 +567,53 @@ static attention_output_t update_gaze(app_t *app, uint32_t now_ms) {
     return attention_controller_step(&app->attention, NULL, now_ms, false);
 }
 
+static uint32_t bounded_counter(uint64_t value) {
+    return value > UINT32_MAX ? UINT32_MAX : (uint32_t)value;
+}
+static void reconcile_voice(app_t *app, uint32_t now_ms) {
+    const bot_runtime_snapshot_t *s = &app->desired;
+    if (!bot_voice_settings_equal(&s->voice_settings, &app->voice_persist_attempt)) {
+        esp_err_t saved = bot_platform_save_voice_settings(app->platform, &s->voice_settings);
+        app->voice_persist_attempt = s->voice_settings; /* retry on next deliberate edit */
+        snprintf(app->voice_notice, sizeof(app->voice_notice), "%s", saved == ESP_OK ?
+                 "声音设置已保存" : "本次已应用，未保存；下次修改时重试");
+        if (saved != ESP_OK) ESP_LOGW(TAG, "Voice settings persistence: %s", esp_err_to_name(saved));
+    }
+    if (app->voice_preview_reported != s->sound_preview_active) {
+        app->voice_preview_reported = s->sound_preview_active;
+        snprintf(app->voice_notice, sizeof(app->voice_notice), "%s", s->sound_preview_active ?
+                 "正在试听内置应答" : "试听已结束");
+    }
+    if ((uint32_t)(now_ms - app->last_voice_diagnostic_ms) < 500) return;
+    app->last_voice_diagnostic_ms = now_ms;
+    bot_audio_status_t audio = {0};
+    if (app->audio) bot_audio_get_status(app->audio, &audio);
+    app->voice_diagnostics = (bot_voice_diagnostics_t){
+        .mic_available = s->audio_available && audio.capture_running,
+        .model_ready = audio.wake_status == BOT_AUDIO_WAKE_READY,
+        .capture_ready = s->capture_ready, .link_ready = s->transport_ready,
+        .playback_blocked = audio.self_playback_blocked,
+        .settings_applied = audio.controls_error == ESP_OK &&
+            audio.controls_revision == audio.controls_applied_revision &&
+            bot_voice_settings_equal(&audio.controls_applied, &s->voice_settings),
+        .wake_score_available = audio.last_wake_score_available,
+        .peak0 = audio.microphone_peak, .peak1 = audio.microphone_peak_2,
+        .last_wake_score = audio.last_wake_score,
+        .capture_frames = bounded_counter(audio.capture_frames),
+        .read_errors = bounded_counter(audio.capture_errors),
+        .playback_underruns = bounded_counter(audio.playback_underruns),
+        .buffered_samples = audio.buffered_samples, .buffer_high_water = audio.buffer_high_water,
+        .buffered_drops = bounded_counter(audio.buffered_drops),
+        .wake_count = bounded_counter(audio.wake_detections),
+        .local_command_count = bounded_counter(audio.local_commands),
+        .last_capture_ready_ms = (uint32_t)(audio.last_capture_ready_us / 1000),
+        .last_error = audio.controls_error != ESP_OK ? audio.controls_error : audio.last_error,
+    };
+}
+
 static void reconcile(app_t *app, uint32_t now_ms) {
     bot_runtime_snapshot_t *s = &app->desired;
+    reconcile_voice(app, now_ms);
     apply_audio_session(app, s);
     bool camera_requested = s->camera_requested;
 #if CONFIG_ESPBOT_USB_DEBUG_PREVIEW
@@ -632,6 +746,9 @@ static void reconcile(app_t *app, uint32_t now_ms) {
     bool expression_changed = false, rendered_gaze_valid = false;
     int rendered_gaze_x = 0, rendered_gaze_y = 0;
     if (app->face && bot_platform_display_lock(5)) {
+        face_set_sound_settings(app->face, &s->voice_settings);
+        face_set_sound_diagnostics(app->face, &app->voice_diagnostics);
+        face_set_sound_notice(app->face, app->voice_notice);
         face_set_animation_active(app->face, platform.display_awake);
         if (face_set_expression(app->face, expression) &&
             strcmp(app->rendered_expression, expression) != 0) {
@@ -645,6 +762,14 @@ static void reconcile(app_t *app, uint32_t now_ms) {
                                       s->behavior == BOT_BEHAVIOR_ENGAGED || s->reading_token.session_id || s->critical_fault);
         const char *caption = s->caption;
         if (s->critical_fault) caption = "小呆需要重新启动";
+        if ((!*caption || strcmp(caption, "请说") == 0) && s->audio_session_requested &&
+            (s->conversation == BOT_CONVERSATION_LISTENING || s->conversation == BOT_CONVERSATION_WAITING)) {
+            if (s->capture_ready && s->transport_ready)
+                caption = s->followup_armed ? "可以继续说" : "我在听";
+            else if (!s->capture_ready) caption = "正在准备收音";
+            else if (!s->link_authenticated) caption = "本地指令可用，Mac 尚未连接";
+            else caption = "正在连接 Mac，请稍等";
+        }
         if (!*caption && s->wake_status != BOT_WAKE_READY && !s->settings_open &&
             (s->behavior == BOT_BEHAVIOR_IDLE || s->behavior == BOT_BEHAVIOR_BORED))
             caption = "点一下，叫醒小呆";
@@ -678,11 +803,13 @@ static void reconcile(app_t *app, uint32_t now_ms) {
                 if (!*status && s->conversation==BOT_CONVERSATION_THINKING) status="正在处理";
             }
             face_set_result_status(app->face,status,s->image_notice);
-            if (!same_runtime_token(s->reading_token,s->token)) clear_display_receipts(app);
+            if (!same_runtime_token(s->reading_token,s->token) && !s->followup_armed)
+                clear_display_receipts(app);
         }
         bot_display_image_t image;
         if (brain_secure_take_image(&image)) {
-            bool current=showing_result && same_runtime_token(image.token,s->reading_token) && same_runtime_token(image.token,s->token);
+            bool current=showing_result && same_runtime_token(image.token,s->reading_token) &&
+                (s->followup_armed || same_runtime_token(image.token,s->token));
             if (current && face_set_result_image(app->face,image.pixels,image.width,image.height)) {
                 app->image_token=image.token;
                 snprintf(app->image_asset_id,sizeof(app->image_asset_id),"%s",image.asset_id);
@@ -697,11 +824,13 @@ static void reconcile(app_t *app, uint32_t now_ms) {
         unsigned text_ready=atomic_exchange(&app->text_ready,0);
         unsigned image_ready=atomic_exchange(&app->image_ready,0);
         if (text_ready && text_ready==app->text_generation && showing_result && platform.display_awake &&
-            same_runtime_token(app->result_token,s->token) && face_result_visible(app->face) &&
-            !brain_secure_display_report(s->token,"text",NULL,true,NULL)) atomic_store(&app->text_ready,text_ready);
+            same_runtime_token(app->result_token,s->reading_token) &&
+            (s->followup_armed || same_runtime_token(app->result_token,s->token)) && face_result_visible(app->face) &&
+            !brain_secure_display_report(app->result_token,"text",NULL,true,NULL)) atomic_store(&app->text_ready,text_ready);
         if (image_ready && image_ready==app->image_generation && showing_result && platform.display_awake &&
-            same_runtime_token(app->image_token,s->token) && face_result_visible(app->face) &&
-            !brain_secure_display_report(s->token,"image",app->image_asset_id,true,NULL)) atomic_store(&app->image_ready,image_ready);
+            same_runtime_token(app->image_token,s->reading_token) &&
+            (s->followup_armed || same_runtime_token(app->image_token,s->token)) && face_result_visible(app->face) &&
+            !brain_secure_display_report(app->image_token,"image",app->image_asset_id,true,NULL)) atomic_store(&app->image_ready,image_ready);
         bot_platform_display_unlock();
     }
     if (expression_changed)
@@ -756,6 +885,21 @@ static void reconcile(app_t *app, uint32_t now_ms) {
                      audio.direction_available, audio.direction_valid, audio.azimuth_deg,
                      audio.direction_quality, (unsigned long long)audio.ambient_events,
                      (unsigned long long)audio.direction_estimates, audio.pcm_delivery_enabled);
+            ESP_LOGI(TAG, "voice model=%s ready=(mic:%d link:%d) threshold=%u muted=%d volume=%u score=%s%.3f commands=%llu buffer=(%lu/%lu dropped:%llu) controls=(%lu/%lu err:%s)",
+                     audio.model_name, s->capture_ready, s->transport_ready,
+                     audio.controls_applied.wake_threshold_percent, audio.controls_applied.muted,
+                     audio.controls_applied.volume_percent, audio.last_wake_score_available ? "" : "unavailable:",
+                     (double)audio.last_wake_score, (unsigned long long)audio.local_commands,
+                     (unsigned long)audio.buffered_samples, (unsigned long)audio.buffer_high_water,
+                     (unsigned long long)audio.buffered_drops,
+                     (unsigned long)audio.controls_applied_revision, (unsigned long)audio.controls_revision,
+                     esp_err_to_name(audio.controls_error));
+            ESP_LOGI(TAG, "audio timing_us read=%lu/%lu afe=%lu/%lu keyword=%lu/%lu processing=%lu/%lu output_queue_high=%lu underruns=%llu",
+                     (unsigned long)audio.read_us, (unsigned long)audio.read_max_us,
+                     (unsigned long)audio.afe_us, (unsigned long)audio.afe_max_us,
+                     (unsigned long)audio.keyword_us, (unsigned long)audio.keyword_max_us,
+                     (unsigned long)audio.processing_us, (unsigned long)audio.processing_max_us,
+                     (unsigned long)audio.output_queue_high_water, (unsigned long long)audio.playback_underruns);
         }
     }
 }
@@ -820,6 +964,10 @@ void app_main(void) {
     app->theme_queue = xQueueCreate(1, 32);
     if (!app->theme_queue) { ESP_LOGE(TAG, "Cannot allocate preferences queue"); return; }
     bot_runtime_config_t config = bot_runtime_default_config();
+    esp_err_t voice_loaded = bot_platform_load_voice_settings(app->platform, &config.voice_settings);
+    if (voice_loaded != ESP_OK && voice_loaded != ESP_ERR_NOT_FOUND)
+        ESP_LOGW(TAG, "Voice settings invalid/unavailable; defaults used: %s", esp_err_to_name(voice_loaded));
+    app->voice_persist_attempt = config.voice_settings;
     attention_config_t attention_cfg = attention_default_config();
     attention_cfg.person_min_confidence = config.focus.min_face_confidence;
     attention_controller_init(&app->attention, &attention_cfg);
@@ -842,6 +990,9 @@ void app_main(void) {
                 face_set_theme(app->face, theme);
             face_on_theme_applied(app->face, theme_applied, app);
             face_on_event(app->face, face_event, app);
+            face_on_sound_settings_request(app->face, sound_settings_request, app);
+            face_on_sound_preview_request(app->face, sound_preview_request, app);
+            face_set_sound_settings(app->face, &config.voice_settings);
         }
         bot_platform_on_dark_touch(app->platform, touch_wake, app);
         bot_platform_display_unlock();
@@ -851,7 +1002,8 @@ void app_main(void) {
     bot_runtime_ops_t ops = { .apply_state = apply_state, .stop_output = stop_output,
         .cancel_remote = cancel_remote, .command_result = command_result,
         .now_ms = runtime_now_ms, .play_wake_response = play_wake_response,
-        .wake_response_tail_clear = wake_response_tail_clear };
+        .wake_response_tail_clear = wake_response_tail_clear,
+        .play_sound_preview = play_sound_preview, .set_theme = set_voice_theme };
     ESP_ERROR_CHECK(bot_runtime_create(app->bus, &config, &ops, app, bot_platform_now_ms(), &app->runtime));
     bot_runtime_get_snapshot(app->runtime, &app->desired);
 #if CONFIG_ESPBOT_NIGHT_SCHEDULE
@@ -859,8 +1011,10 @@ void app_main(void) {
     tzset();
 #endif
     bot_audio_config_t audio_cfg = bot_audio_default_config();
+    audio_cfg.output_volume = config.voice_settings.muted ? 0 : config.voice_settings.volume_percent;
     audio_cfg.on_event = audio_event; audio_cfg.on_pcm = audio_pcm; audio_cfg.context = app;
     esp_err_t err = bot_audio_create(&audio_cfg, &app->audio);
+    if (err == ESP_OK) err = bot_audio_set_controls(app->audio, &config.voice_settings);
     if (err == ESP_OK) err = bot_audio_start(app->audio);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Audio degraded: %s; touch remains available", esp_err_to_name(err));
