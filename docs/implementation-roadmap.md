@@ -1,5 +1,7 @@
 # Engineering roadmap and honest implementation inventory — esp-bot
 
+**Latest source/verification status:** [2026-11-15 local and S31 acceptance](review-acceptance-2026-11-15.md), following the [review corrections](review-fixes-2026-11-14.md). The November 6 inventory below records that delivery; current builds, device results and outstanding limits are recorded separately.
+
 **Scope:** implementation sequencing for passive desktop robot 小呆 on ESP32-S31-Korvo-1 V1.1. This is a plan, NOT a claim that unintegrated modules already work. The user specifically requires **NO CI**; when hardware/model/build environment is absent, deliver modular code and mark unverified behavior instead of adding testing pipelines.
 
 ## New reuse-first integration priority (2026-10-30)

@@ -57,6 +57,7 @@ typedef struct {
     uint32_t capture_ms;          /* low 32 bits of local monotonic ms */
     uint32_t published_ms;
     uint32_t inference_ms;
+    uint32_t stack_free;          /* cached worker stack watermark; ESP-IDF bytes */
     uint32_t capture_uncertainty_ms; /* configured age budget, not a measured bound */
     uint32_t frames_seen;
     uint32_t frames_published;

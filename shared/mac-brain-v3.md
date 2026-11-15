@@ -501,7 +501,9 @@ cancel/close 会清空播放状态并返回确认；不能要求此路径一定�
 
 前两个无关联请求 ID，新 Server 携带实际采集/回合的完整 runtime；设备仍兼容旧 Server
 省略 runtime 的整会话取消。音频取消必须校验原 token 和 stream。
-全局取消还可能先结束活动请求、发音频取消事件。客户端不能假定始终存在一个活动请求。
+2026-11-14 源码在全局/指定设备会话取消时先发 `session.cancelled`，再结束活动请求和音频，避免错误响应先准备下一轮令牌。事件增加可选 `code`：`parent_stop`、`memory_changed`、`identity_revoked`、`service_stopped`、`models_unloaded`、`cancel_events_lost`。同批的 `audio.cancelled` 携带 `session_cancelled:true`，单轮取消为 false；客户端仍须校验原 token/stream。旧版缺少这些字段时保留原有关闭逻辑，不能假定始终存在活动请求。
+
+控制台 IPC 的 `assistant.cancel` 与本连接 WSS 方法分开：IPC 接受显式 `scope:turn` + Mac `turn_id`、`scope:device_session` + 网关 `conversation_id`，或 `scope:all`；空 IPC 参数不再取消全部。上文 WSS `payload:{}` 仍只操作当前认证连接。
 
 | 边界 | 当前值与处理 |
 | --- | --- |

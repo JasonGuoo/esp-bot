@@ -20,6 +20,7 @@ struct bot_runtime {
     bool has_acoustic_wake, has_link_state;
     bool revoking, identity_exhausted, waiting_for_approval, manual_sleep;
     bool reply_presented, remote_audio_done;
+    bool overflow_fault, recovery_requested;
     bot_passive_cycle_t passive_cycle;
     bot_idle_expression_t idle_expression;
     bot_near_face_t near_face;
@@ -77,6 +78,7 @@ static void reset_expression(bot_runtime_t *runtime)
     case BOT_BEHAVIOR_ENGAGED:
         switch (runtime->state.conversation) {
         case BOT_CONVERSATION_LISTENING: expression = "listening"; break;
+        case BOT_CONVERSATION_SUBMITTED: expression = "listening"; break;
         case BOT_CONVERSATION_THINKING: expression = "thinking"; break;
         case BOT_CONVERSATION_SPEAKING: expression = "speaking"; break;
         case BOT_CONVERSATION_WAITING: expression = "curious"; break;
@@ -91,6 +93,7 @@ static void reset_expression(bot_runtime_t *runtime)
 static void derive_permissions(bot_runtime_t *runtime)
 {
     bot_runtime_snapshot_t *state = &runtime->state;
+    state->fault_recoverable = state->critical_fault && runtime->overflow_fault && !runtime->identity_exhausted;
     bool engaged = is_active(runtime) && !state->settings_open && !state->critical_fault &&
                    state->token.session_id != 0;
     state->display_awake_requested = state->settings_open ||
@@ -105,7 +108,9 @@ static void derive_permissions(bot_runtime_t *runtime)
         (state->behavior == BOT_BEHAVIOR_SLEEPING && state->ambient_probe &&
          !state->settings_open && !state->critical_fault);
     state->audio_session_requested = engaged && !runtime->revoking && !state->local_response_active;
-    state->audio_uplink_permitted = state->audio_session_requested && runtime->config.allow_audio_uplink &&
+    const bool listening = state->conversation == BOT_CONVERSATION_LISTENING ||
+                           state->conversation == BOT_CONVERSATION_WAITING;
+    state->audio_uplink_permitted = listening && state->audio_session_requested && runtime->config.allow_audio_uplink &&
                                    state->audio_available && secure_link(runtime) &&
                                    state->utterance_seen &&
                                    (!state->followup_armed || state->utterance_active);
@@ -345,6 +350,14 @@ static bool consume_signals(bot_runtime_t *runtime, uint32_t *now_ms)
      * time from event data: within_age still rejects truly future observations. */
     *now_ms = read_now_ms(runtime, *now_ms);
     if (!signals.local_stop && !signals.critical_overflow) return false;
+    if (signals.critical_overflow) {
+        /* An explicit hardware/system fault must never become recoverable just
+         * because another producer also overflows while it is latched. */
+        if (!runtime->state.critical_fault) runtime->overflow_fault = true;
+        runtime->recovery_requested = false;
+    } else if (signals.local_stop && runtime->overflow_fault) {
+        runtime->recovery_requested = true;
+    }
     end_session(runtime, *now_ms, signals.critical_overflow ? SESSION_FAULT : SESSION_DISMISSED);
     publish_state(runtime);
     return true;
@@ -372,6 +385,8 @@ static bool source_allowed(const bot_event_t *event)
         return event->source == BOT_SOURCE_AUDIO;
     case BOT_EVENT_CAPTURE_READY:
         return event->source == BOT_SOURCE_AUDIO || event->source == BOT_SOURCE_LINK;
+    case BOT_EVENT_TURN_SUBMITTED:
+        return event->source == BOT_SOURCE_LINK;
     case BOT_EVENT_AUDIO_HEALTH:
         return event->source == BOT_SOURCE_AUDIO || event->source == BOT_SOURCE_PLATFORM;
     case BOT_EVENT_TOUCH_WAKE:
@@ -572,9 +587,28 @@ static void mark_wake(bot_runtime_t *runtime, const bot_event_t *event, uint32_t
     start_local_response(runtime, entry, now_ms);
 }
 
+static bool state_event(bot_event_kind_t kind)
+{
+    switch (kind) {
+    case BOT_EVENT_LINK_STATE:
+    case BOT_EVENT_AUDIO_HEALTH:
+    case BOT_EVENT_CAMERA_HEALTH:
+    case BOT_EVENT_DISPLAY_HEALTH:
+    case BOT_EVENT_WAKE_STATUS:
+    case BOT_EVENT_NIGHT_POLICY:
+    case BOT_EVENT_TURN_SUBMITTED: /* terminal capture state; full token checked by handler */
+        return true;
+    default: return false;
+    }
+}
+
 static bool event_order_valid(bot_runtime_t *runtime, const bot_event_t *event, uint32_t now_ms)
 {
-    if (!within_age(now_ms, event->observed_ms, runtime->config.event_max_age_ms)) return false;
+    /* Change-only health/state facts survive startup and owner stalls. Keep
+     * their ordering too, so a delayed older fact cannot undo a newer one.
+     * Edges and token-bound readiness retain the short freshness lease. */
+    const uint32_t max_age = state_event(event->kind) ? INT32_MAX : runtime->config.event_max_age_ms;
+    if (!within_age(now_ms, event->observed_ms, max_age)) return false;
     if (event->kind == BOT_EVENT_CAPTURE_READY) {
         /* Audio and network are independent producers of separate readiness
          * facts. One producer's timestamp must not suppress the other one. */
@@ -587,7 +621,7 @@ static bool event_order_valid(bot_runtime_t *runtime, const bot_event_t *event, 
         return true;
     }
     if (runtime->event_seen[event->kind] &&
-        !within_age(now_ms, runtime->event_times[event->kind], runtime->config.event_max_age_ms))
+        !within_age(now_ms, runtime->event_times[event->kind], max_age))
         runtime->event_seen[event->kind] = false;
     if (runtime->event_seen[event->kind] &&
         (int32_t)(event->observed_ms - runtime->event_times[event->kind]) < 0) return false;
@@ -603,6 +637,7 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
     if (event->kind == BOT_EVENT_FAULT && source_allowed(event)) {
         /* A locally reported fatal condition does not become harmless merely
          * because its producer was delayed. Explicit local recovery is required. */
+        runtime->overflow_fault = runtime->recovery_requested = false;
         end_session(runtime, now_ms, SESSION_FAULT);
         return;
     }
@@ -643,6 +678,10 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         mark_wake(runtime, event, now_ms);
         break;
     case BOT_EVENT_TOUCH_WAKE:
+        if (state->critical_fault && runtime->overflow_fault && event->data.touch.intentional) {
+            runtime->recovery_requested = true;
+            break; /* Recovery consumes the touch; a second action may wake. */
+        }
         if (stopped_this_step || !event->data.touch.intentional || !may_wake(runtime, event, now_ms)) {
             state->rejected_events++;
             break;
@@ -707,7 +746,9 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         else state->transport_ready = event->data.capture.ready && secure_link(runtime);
         break;
     case BOT_EVENT_CAPTURE_OVERFLOW:
-        if (!state->audio_session_requested || !token_matches(runtime, &event->token, false)) {
+        if (!state->audio_session_requested || !token_matches(runtime, &event->token, false) ||
+            (state->conversation != BOT_CONVERSATION_LISTENING &&
+             state->conversation != BOT_CONVERSATION_WAITING)) {
             state->rejected_events++;
             break;
         }
@@ -780,6 +821,22 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         state->conversation = BOT_CONVERSATION_LISTENING;
         if (runtime->config.allow_audio_uplink && secure_link(runtime))
             state->last_interaction_ms = now_ms;
+        reset_expression(runtime);
+        break;
+    case BOT_EVENT_TURN_SUBMITTED:
+        if (!is_active(runtime) || state->settings_open || state->critical_fault ||
+            state->local_response_active || !secure_link(runtime) || !state->utterance_seen ||
+            !token_matches(runtime, &event->token, false) ||
+            state->conversation != BOT_CONVERSATION_LISTENING) {
+            state->rejected_events++;
+            break;
+        }
+        /* A START already queued during the final transport drain cannot
+         * reopen this token. Only a newly authorized turn may capture again. */
+        state->utterance_active = false;
+        state->capture_ready = state->transport_ready = false;
+        state->conversation = BOT_CONVERSATION_SUBMITTED;
+        state->last_interaction_ms = now_ms;
         reset_expression(runtime);
         break;
     case BOT_EVENT_PLAYBACK_PROGRESS:
@@ -921,6 +978,13 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
             break;
         }
         end_session(runtime, now_ms, SESSION_DISMISSED);
+        switch (event->data.session_end.code) {
+        case BOT_SESSION_END_PARENT_STOP: strcpy(state->caption, "Mac 已停止本次互动"); break;
+        case BOT_SESSION_END_MEMORY_CHANGED: strcpy(state->caption, "记忆已更新，请再问一次"); break;
+        case BOT_SESSION_END_SERVICE_STOPPED: strcpy(state->caption, "Mac 服务已停止"); break;
+        case BOT_SESSION_END_EXPIRED: strcpy(state->caption, "本次互动已结束"); break;
+        default: break;
+        }
         break;
     case BOT_EVENT_FAULT:
         end_session(runtime, now_ms, SESSION_FAULT);
@@ -1024,6 +1088,7 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
     case BOT_COMMAND_THINKING:
         if (state->utterance_active ||
             (state->conversation != BOT_CONVERSATION_LISTENING &&
+             state->conversation != BOT_CONVERSATION_SUBMITTED &&
              state->conversation != BOT_CONVERSATION_THINKING))
             return BOT_COMMAND_REJECTED_INVALID;
         state->conversation = BOT_CONVERSATION_THINKING;
@@ -1035,6 +1100,7 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
     case BOT_COMMAND_REPLY_DONE:
         if (state->utterance_active ||
             (state->conversation != BOT_CONVERSATION_LISTENING &&
+             state->conversation != BOT_CONVERSATION_SUBMITTED &&
              state->conversation != BOT_CONVERSATION_THINKING &&
              !(state->conversation == BOT_CONVERSATION_SPEAKING &&
                (command->kind == BOT_COMMAND_REPLY_PRESENT || runtime->remote_audio_done))))
@@ -1184,8 +1250,9 @@ void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
                                                   runtime->config.event_max_age_ms))
         runtime->wake_barrier_valid = false;
     for (unsigned kind = 0; kind < BOT_EVENT_COUNT; kind++) {
+        const uint32_t max_age = state_event((bot_event_kind_t)kind) ? INT32_MAX : runtime->config.event_max_age_ms;
         if (runtime->event_seen[kind] && !within_age(now_ms, runtime->event_times[kind],
-                                                    runtime->config.event_max_age_ms))
+                                                    max_age))
             runtime->event_seen[kind] = false;
     }
     bool stopped_this_step = consume_signals(runtime, &now_ms);
@@ -1285,6 +1352,8 @@ void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
                strcmp(runtime->state.expression, "curious") == 0) {
         reset_expression(runtime);
     }
+    if (runtime->recovery_requested && runtime->overflow_fault &&
+        !bot_bus_events_pending(runtime->bus)) bot_runtime_clear_fault(runtime, now_ms);
     publish_state(runtime);
 }
 
@@ -1300,6 +1369,7 @@ void bot_runtime_clear_fault(bot_runtime_t *runtime, uint32_t now_ms)
      * they can receive an explicit stale/passive receipt; they regain no lease. */
     if (consume_signals(runtime, &now_ms)) return;
     runtime->state.critical_fault = false;
+    runtime->overflow_fault = runtime->recovery_requested = false;
     end_session(runtime, now_ms, SESSION_DISMISSED);
     derive_permissions(runtime);
     publish_state(runtime);
@@ -1324,6 +1394,7 @@ const char *bot_conversation_name(bot_conversation_t conversation)
     switch (conversation) {
     case BOT_CONVERSATION_NONE: return "none";
     case BOT_CONVERSATION_LISTENING: return "listening";
+    case BOT_CONVERSATION_SUBMITTED: return "submitted";
     case BOT_CONVERSATION_THINKING: return "thinking";
     case BOT_CONVERSATION_SPEAKING: return "speaking";
     case BOT_CONVERSATION_WAITING: return "waiting";

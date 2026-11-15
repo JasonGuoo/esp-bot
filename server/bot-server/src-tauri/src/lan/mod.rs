@@ -15,7 +15,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Semaphore};
 
 pub use cmd::CommandHub;
 pub use frames::{METHOD_FACE_SET, SUBTITLE_MAX_CHARS};
@@ -122,10 +122,12 @@ impl LanState {
         inner.snapshot.error = None;
     }
 
-    fn connected(&self, bot: Bot, session_id: String) {
+    fn connected(&self, bot: Bot, session_id: String) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.connections.contains_key(&bot.device_id) { return false; }
         inner.connections.insert(bot.device_id.clone(), BotSession { bot, session_id });
         sync_bots(&mut inner);
+        true
     }
 
     fn disconnected(&self, device_id: &str, session_id: &str) -> bool {
@@ -152,6 +154,7 @@ struct RouteState {
     server_id: String,
     hub: Arc<CommandHub>,
     pairing: Arc<crate::pairing::PairingStore>,
+    capacity: Arc<Semaphore>,
 }
 
 /// Starts independently of the Tauri window and accepts all well-formed Bot
@@ -197,6 +200,7 @@ async fn run_server(
         server_id,
         hub,
         pairing,
+        capacity: Arc::new(Semaphore::new(4)),
     };
     let router = Router::new()
         .route(protocol::WS_PATH, any(socket::upgrade))
@@ -211,14 +215,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stale_disconnect_does_not_remove_new_session() {
+    fn duplicate_connection_cannot_replace_live_session() {
         let state = LanState::default();
         let bot = Bot { device_id: "b1".into(), name: "Bot".into(), peer: "192.168.1.2".into(), connected_at_ms: 1 };
-        state.connected(bot.clone(), "old".into());
-        state.connected(bot, "new".into());
-        assert!(!state.disconnected("b1", "old"));
+        assert!(state.connected(bot.clone(), "old".into()));
+        assert!(!state.connected(bot, "new".into()));
+        assert!(!state.disconnected("b1", "new"));
         assert_eq!(state.snapshot().bots.len(), 1);
-        assert!(state.disconnected("b1", "new"));
+        assert!(state.disconnected("b1", "old"));
         assert!(state.snapshot().bots.is_empty());
     }
 }

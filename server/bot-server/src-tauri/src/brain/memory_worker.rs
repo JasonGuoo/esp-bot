@@ -34,8 +34,9 @@ pub async fn run(brain: Weak<Brain>) {
         cmd.arg("-B").arg(script).arg(&model).env("TMPDIR",tmp)
             .env("HF_HOME",brain.config_dir.join("runtime/cache/huggingface"))
             .env("HF_HUB_OFFLINE","1").env("TRANSFORMERS_OFFLINE","1")
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
         let Ok(mut child)=cmd.spawn() else {let _=brain.memory.fail_memory_job(&job.id);continue};
+        crate::diagnostics::capture_stderr(child.stderr.take(), "memory_extractor");
         let Some(mut input)=child.stdin.take() else {let _=brain.memory.fail_memory_job(&job.id);continue};
         let mut bytes=match serde_json::to_vec(&json!({"transcript":job.transcript})) {Ok(v)=>v,Err(_)=>continue};
         bytes.push(b'\n');

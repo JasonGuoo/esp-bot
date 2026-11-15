@@ -5,7 +5,6 @@ firmware/.toolchains/
 firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/managed_components/
-firmware/dependencies.lock
 **/__pycache__/
 *.py[cod]
 .pytest_cache/

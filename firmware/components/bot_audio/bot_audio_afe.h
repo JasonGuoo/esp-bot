@@ -10,6 +10,7 @@ typedef struct {
     const esp_afe_sr_iface_t *iface;
     esp_afe_sr_data_t *data;
     size_t feed_samples;
+    size_t fetch_samples;
     bot_audio_wake_status_t wake_status;
     bot_audio_wake_backend_t wake_backend;
     bot_audio_keyword_t keyword;

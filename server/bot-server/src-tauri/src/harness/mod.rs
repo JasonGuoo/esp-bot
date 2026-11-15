@@ -398,7 +398,7 @@ impl Harness {
                 .env("OPENCODE_DISABLE_PROJECT_CONFIG", "true")
                 .env("OPENCODE_DISABLE_CLAUDE_CODE", "true")
                 .env_remove("OPENCODE_SIMULATE")
-                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped())
                 .kill_on_drop(true);
             if let Some(path) = &self.config.inherit_config { command.env("OPENCODE_CONFIG", path); }
             #[cfg(unix)]
@@ -406,9 +406,10 @@ impl Harness {
                 use std::os::unix::process::CommandExt;
                 command.as_std_mut().process_group(0);
             }
-            let child = command.spawn().map_err(|_| {
+            let mut child = command.spawn().map_err(|_| {
                 "opencode_process: cannot launch OpenCode; install v2.2.5+ or configure an absolute executable path"
             })?;
+            crate::diagnostics::capture_stderr(child.stderr.take(), "opencode");
             *self.credential_envs.write().map_err(|_| "opencode_state: credential lock")? = credentials.1;
             drop(command);
             drop(credentials.0);

@@ -88,3 +88,6 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 # AMPDU-disabled operation for incompatible or unstable links.
 CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
 CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+
+# Official AFE/model and Wi-Fi startup share the main task; released on return.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

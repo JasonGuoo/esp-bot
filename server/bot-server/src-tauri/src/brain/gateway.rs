@@ -376,32 +376,41 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                 }
             },
             cancellation=cancellations.recv()=>{
-                let target=match cancellation {
+                let cancellation=match cancellation {
                     Ok(target)=>target,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>None,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>super::Cancellation {
+                        scope:super::CancelScope::All,reason:"cancel_events_lost"},
                     Err(tokio::sync::broadcast::error::RecvError::Closed)=>break,
                 };
+                let conversation=engagement.as_ref().map(|session|session.conversation_id.as_str());
+                let close_session=cancellation.closes_session(conversation);
                 let cancelled_token=audio.as_ref().map(|(_,token)|*token)
                     .or_else(||active.as_ref().map(|turn|turn.token))
                     .or_else(||playback.as_ref().map(|clip|clip.token))
                     .or_else(||engagement.as_ref().map(|session|session.token));
-                if active.as_ref().is_some_and(|turn|target.as_ref().map_or(true,|target|target==&turn.turn_id)) {
+                // Send the terminal reason before a cancelled reply can arm a
+                // prepared follow-up token and make that reason appear stale.
+                if close_session {
+                    if let Some(token)=cancelled_token {
+                        if send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.cancelled",
+                            "runtime":token,"code":cancellation.reason}).to_string())).await.is_err(){break;}
+                    }
+                }
+                if active.as_ref().is_some_and(|turn|cancellation.matches_turn(&turn.turn_id,conversation)) {
                     if let Some(turn)=active.take(){
                         turn.task.abort();
                         if send(&mut socket,Message::Text(cancelled_response(&turn))).await.is_err(){break;}
                     }
                 }
-                if playback.as_ref().is_some_and(|clip|target.as_ref().map_or(true,|target|target==&clip.turn_id)) {
+                if playback.as_ref().is_some_and(|clip|cancellation.matches_turn(&clip.turn_id,conversation)) {
                     if let Some(clip)=playback.take(){
-                        let event=json!({"v":3,"type":"event","event":"audio.cancelled","stream_id":clip.stream_id,"runtime":clip.token});
+                        let event=json!({"v":3,"type":"event","event":"audio.cancelled","stream_id":clip.stream_id,
+                            "runtime":clip.token,"code":cancellation.reason,"session_cancelled":close_session});
                         if send(&mut socket,Message::Text(event.to_string())).await.is_err(){break;}
                     }
                 }
-                if target.is_none(){
+                if close_session {
                     audio=None;plain=None;engagement=None;display_result=None;
-                    if let Some(token)=cancelled_token {
-                        if send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.cancelled","runtime":token}).to_string())).await.is_err(){break;}
-                    }
                 }
             },
             _=audio_clock.tick(), if playback.is_some()=>{

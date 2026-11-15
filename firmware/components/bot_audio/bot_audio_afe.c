@@ -143,7 +143,13 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
     cfg->wakenet_init = selected != NULL;
     cfg->wakenet_model_name = selected;
     cfg->wakenet_model_name_2 = NULL;
-    cfg->agc_init = false;
+    /* Use the official bounded WebRTC AGC for the relatively quiet codec
+     * signal feeding MultiNet/ASR. VAD energy metadata remains pre-AGC.
+     * No WakeNet model/reference or separate microphone owner is introduced. */
+    cfg->agc_init = true;
+    cfg->agc_mode = AFE_AGC_MODE_WEBRTC;
+    cfg->agc_compression_gain_db = 12;
+    cfg->agc_target_level_dbfs = 9;
     /* Keep the official ring capacity. ESP-SR reserves both min_speech and
      * delay history in this same ring, in addition to incoming PCM. Shrinking
      * it to four or eight 32 ms frames leaves no room beyond our 256 ms
@@ -168,6 +174,9 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
     afe->iface = esp_afe_handle_from_config(checked);
     ESP_LOGI("bot_audio", "AFE ring=%d frames, VAD onset history=%d+%d ms",
              checked->afe_ringbuf_size, checked->vad_min_speech_ms, checked->vad_delay_ms);
+    ESP_LOGI("bot_audio", "Official AGC enabled=%d mode=%d compression=%d dB target=-%d dBFS",
+             checked->agc_init, checked->agc_mode, checked->agc_compression_gain_db,
+             checked->agc_target_level_dbfs);
     if (afe->iface) afe->data = afe->iface->create_from_config(checked);
     afe_config_free(cfg);
     if (!afe->iface || !afe->data) {
@@ -176,24 +185,26 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
         return ESP_ERR_NO_MEM;
     }
     int samples = afe->iface->get_feed_chunksize(afe->data);
-    if (samples <= 0 || samples > 4096 ||
-        afe->iface->get_fetch_chunksize(afe->data) != samples ||
-        afe->iface->get_feed_channel_num(afe->data) != 1 ||
-        afe->iface->get_fetch_channel_num(afe->data) != 1 ||
-        afe->iface->get_samp_rate(afe->data) != BOT_AUDIO_SAMPLE_RATE) {
+    int fetched = afe->iface->get_fetch_chunksize(afe->data);
+    int input_channels = afe->iface->get_feed_channel_num(afe->data);
+    int output_channels = afe->iface->get_fetch_channel_num(afe->data);
+    int sample_rate = afe->iface->get_samp_rate(afe->data);
+    ESP_LOGI("bot_audio", "AFE format: feed=%d/%d channels fetch=%d/%d channels rate=%d",
+             samples, input_channels, fetched, output_channels, sample_rate);
+    if (samples <= 0 || samples > 4096 || fetched <= 0 || fetched > 4096 ||
+        input_channels != 1 || output_channels != 1 || sample_rate != BOT_AUDIO_SAMPLE_RATE) {
         afe->wake_status = BOT_AUDIO_WAKE_UNAVAILABLE;
         reason(afe, "AFE format does not match the 16 kHz mono owner contract");
         return ESP_ERR_INVALID_SIZE;
     }
     afe->feed_samples = (size_t)samples;
-    ESP_LOGI("bot_audio", "AFE frame samples: feed=%d fetch=%d, 16 kHz mono",
-             samples, afe->iface->get_fetch_chunksize(afe->data));
+    afe->fetch_samples = (size_t)fetched;
     /* Keep one official MN instance for explicitly authorized local controls,
      * even when a dedicated WakeNet owns passive wake. It is not inferred in
      * passive WakeNet mode. No second command/model owner is created. */
     esp_err_t keyword_error = ESP_ERR_NOT_FOUND;
     if (fallback_enabled && multinet_name) {
-        keyword_error = bot_audio_keyword_open(&afe->keyword, multinet_name, afe->feed_samples);
+        keyword_error = bot_audio_keyword_open(&afe->keyword, multinet_name, afe->fetch_samples);
         if (keyword_error != ESP_OK) {
             bot_audio_keyword_close(&afe->keyword);
             ESP_LOGE("bot_audio", "MultiNet7 unavailable: %s", esp_err_to_name(keyword_error));

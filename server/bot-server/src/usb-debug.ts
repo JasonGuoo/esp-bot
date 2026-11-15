@@ -30,6 +30,7 @@ export function mountUsbDebug(parent: HTMLElement) {
     <p class="cc-caption">校正同时作用于相机预览和人脸检测，并保存在开发板；切换时相机会短暂重启。若预览没有恢复，请查看设备事件。</p>
     <details><summary>显示诊断</summary><div class="usb-toolbar"><button class="cc-button quiet" data-usb="screen-frame" disabled>使用刷新缓冲</button><button class="cc-button quiet" data-usb="screen-snap" disabled>对照：重新渲染截图</button><span class="cc-caption">仅用于本次 USB 调试；两种方式都不能直接看到实体 LCD 的光学错位。</span></div></details>
     <p data-usb="notice" class="cc-caption" role="status">连接后可查看屏幕和设备正在采集的相机画面。</p>
+    <p data-usb="action-result" class="cc-caption" role="status" hidden></p>
     <p data-usb="frame-skew" class="cc-caption">两路画面分别采集，等待时间信息。</p>
     <div class="usb-previews">
       <figure><figcaption><strong>Bot 屏幕</strong><span>界面渲染截图，不反映实体 LCD 故障</span></figcaption><div class="usb-image"><img data-usb="screen" alt="小呆屏幕的设备渲染帧" hidden><span data-usb="screen-empty">等待屏幕画面</span><span class="usb-stale" data-usb="screen-stale" hidden>画面未更新，请检查 USB 连接</span></div><div class="usb-frame-meta"><small data-usb="screen-time">尚无画面</small><button class="cc-button quiet" data-usb="export-screen" disabled>导出当前帧</button></div></figure>
@@ -41,11 +42,12 @@ export function mountUsbDebug(parent: HTMLElement) {
   const $ = <T extends HTMLElement = HTMLElement>(name: string) => root.querySelector<T>(`[data-usb="${name}"]`)!;
   const request = <T>(method: string, payload: unknown = {}) => invoke<T>("usb_debug_request", { method, payload });
   let disposed = false, busy = false, after = 0, wifiSentAt = 0;
+  let lastPoll = 0;
   let state: State | null = null, wantedPreview = true;
   let lastOrientation: number | null = null;
   let events: Event[] = [], lastPreviewRequest = "";
   const frames: Record<string, string> = {};
-  function notice(message: string) { $("notice").textContent = message; }
+  function notice(message: string) { $("action-result").textContent = message; $("action-result").hidden = !message; }
   async function action(work: () => Promise<unknown>) {
     try { await work(); } catch (error) { notice(String(error)); }
   }
@@ -99,7 +101,10 @@ export function mountUsbDebug(parent: HTMLElement) {
     if (disposed || busy) return;
     busy = true;
     try {
-      state = await request<State>("state", { after });
+      const update = await request<State>("state", { after, screen_after:state?.screen?.received_ms ?? 0,
+        camera_after:state?.camera?.received_ms ?? 0, frames:!parent.hidden });
+      if (disposed) return;
+      state = { ...state, ...update };
       $("state").textContent = state.connected ? "USB 已连接" : state.requested ? "等待开发板" : "未连接";
       for (const name of ["wake", "stop", "preview", "eye-left", "eye-center", "eye-right", "screen-frame", "screen-snap"]) $<HTMLButtonElement>(name).disabled = !state.connected;
       $<HTMLButtonElement>("face-show").disabled = !state.connected || !state.preview;
@@ -126,8 +131,8 @@ export function mountUsbDebug(parent: HTMLElement) {
       }
       $("preview").textContent = wantedPreview ? "暂停画面" : "恢复画面";
       $("metrics").textContent = `${state.received_frames} 帧 · ${state.invalid_packets} 个校验/同步异常 · 驱动欠载日志 ${state.lcd_underruns} 次`;
-      if (state.error) notice(state.error);
-      else if (state.connected) notice("USB 画面和事件仅在本机处理。切换窗口会保持预览；退出调试页会暂停画面。");
+      $("notice").textContent = state.error ?? (state.connected ?
+        "USB 画面和事件仅在本机处理。切换窗口会保持预览；退出调试页会暂停画面。" : "等待 USB 连接。");
       showFrame("screen", state.screen); showFrame("camera", state.camera);
       if (state.connected && state.preview && state.screen && state.camera) {
         // Signed modular difference also works across the device's 32-bit clock wrap.
@@ -194,8 +199,11 @@ export function mountUsbDebug(parent: HTMLElement) {
     const result = await request<{ path: string }>("export_events"); notice(`已导出事件及最近崩溃记录：${result.path}`);
   }); });
   $("filter").addEventListener("input", renderEvents);
-  const observer = new MutationObserver(() => { void syncPreview(); }); observer.observe(parent, { attributes: true, attributeFilter: ["hidden"] });
-  const timer = window.setInterval(() => { void poll(); }, 750);
+  const observer = new MutationObserver(() => { void syncPreview(); if (!parent.hidden) { lastPoll=Date.now(); void poll(); } }); observer.observe(parent, { attributes: true, attributeFilter: ["hidden"] });
+  const timer = window.setInterval(() => {
+    if (Date.now()-lastPoll < (parent.hidden ? 5000 : 750)) return;
+    lastPoll=Date.now(); void poll();
+  }, 750);
   void action(refreshPorts); void poll();
   return {
     dispose() { disposed = true; window.clearInterval(timer); observer.disconnect(); void request("disconnect").catch(() => {}); },

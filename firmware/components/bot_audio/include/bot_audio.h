@@ -127,10 +127,12 @@ typedef struct {
 
 typedef struct {
     bool started, capture_running, afe_running, playback_running;
+    bool capture_healthy;            /* last codec read succeeded; copied by get_status */
     bool session_open, pcm_delivery_enabled;
     bool self_playback_blocked;       /* reservation, playback, tail or RX/AFE cleanup still active */
     bool capture_ready;              /* current token's DMA/AFE fence is complete */
     bool retain_start_enabled, local_commands_available, command_consumed;
+    bool start_buffer_available;      /* allocation failure degrades onset retention, never local wake */
     bool codec_available, vad_available, wake_available;
     bool hardware_capture_timestamps; /* false */
     bool aec_available;               /* false; no fabricated reference */
@@ -163,10 +165,12 @@ typedef struct {
     uint64_t afe_feed_rejections, capture_overruns;
     uint32_t read_us, read_max_us, afe_us, afe_max_us, keyword_us, keyword_max_us;
     uint32_t processing_us, processing_max_us, output_queue_high_water;
+    uint32_t capture_stack_free, playback_stack_free; /* cached task watermarks; ESP-IDF bytes, 0 = not sampled */
     uint32_t afe_recovery_attempts, afe_recoveries;
     int64_t last_wake_us, last_command_us, last_capture_ready_us;
     int64_t last_playback_begin_us, last_playback_started_us, last_playback_done_us;
-    float last_wake_score, last_candidate_score;
+    float last_wake_score, last_candidate_score, keyword_dbfs;
+    uint16_t keyword_input_peak;
     bool last_wake_score_available;
     int last_candidate_command;
     char model_name[BOT_AUDIO_MODEL_NAME_BYTES + 1];

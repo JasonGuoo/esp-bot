@@ -10,6 +10,8 @@ mod brain;
 mod face_catalog_generated;
 mod usb_debug;
 mod data_root;
+mod diagnostics;
+mod capture_permission;
 
 use std::sync::Arc;
 use tauri::{Emitter, Manager};
@@ -17,9 +19,28 @@ use tauri::{Emitter, Manager};
 /// Current companion console and the diagnostic link used by the current firmware.
 pub fn run() {
     tauri::Builder::default()
+        .on_permission_request(|webview, kind| {
+            use tauri::webview::{PermissionKind, PermissionResponse};
+            // Tauri 2's default maps to WKPermissionDecision::Prompt. On the
+            // packaged custom origin that prompt can remain pending forever.
+            // Only our primary local UI may request media; macOS still owns
+            // the separate app-level TCC consent. Permissions-Policy also
+            // excludes the remote media-card frames from capture access.
+            let local = webview.label() == "main" && webview.url().is_ok_and(|url|
+                url.username().is_empty() && url.password().is_none() &&
+                ((url.scheme() == "tauri" && url.host_str() == Some("localhost") && url.port().is_none()) ||
+                 (cfg!(debug_assertions) && url.scheme() == "http" &&
+                  url.host_str() == Some("127.0.0.1") && url.port() == Some(1421))));
+            if local && matches!(kind, PermissionKind::Microphone | PermissionKind::Camera) {
+                PermissionResponse::Allow
+            } else {
+                PermissionResponse::Deny
+            }
+        })
         .setup(move |app| {
             let legacy_dir = app.path().app_config_dir()?;
             let config_dir = data_root::prepare(&app.path().home_dir()?, &legacy_dir)?;
+            if diagnostics::init(&config_dir).is_err() { eprintln!("[diagnostics] init_failed"); }
             app.manage(Arc::new(usb_debug::UsbDebug::new(config_dir.clone())));
             #[cfg(feature = "lan-diagnostics")]
             let diagnostics: Option<brain::DiagnosticSnapshot> = {
@@ -33,6 +54,7 @@ pub fn run() {
             let brain_sink: brain::EventSink = Arc::new(move |event| {
                 // Do not persist prompts, transcripts, embeddings, tokens or media in logs.
                 eprintln!("[brain] {}", event.get("kind").and_then(serde_json::Value::as_str).unwrap_or("event"));
+                diagnostics::event(&event);
                 let _ = event_app.emit("brain:event", event);
             });
             let resource_worker = app.path().resource_dir().ok().map(|dir|dir.join("local-models/worker.py"))
@@ -56,7 +78,8 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![brain::companion_request, usb_debug::usb_debug_request])
+        .invoke_handler(tauri::generate_handler![brain::companion_request, usb_debug::usb_debug_request,
+            capture_permission::request_microphone_access])
         .on_page_load(|_webview, payload| {
             eprintln!("[page] {:?} {}", payload.event(), payload.url());
         })

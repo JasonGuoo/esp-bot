@@ -41,7 +41,8 @@ config BOT_AUDIO_MULTINET_WINDOW_MS
     default 3000
     help
         Native recognizer timeout. Detection, timeout, playback suppression,
-        permission fences and 600 ms of low-energy silence clear partial state.
+        permission fences and the official VAD's speech-to-silence boundary
+        clear partial state. Quiet speech has no additional absolute energy gate.
 
 config BOT_AUDIO_LOCAL_COMMAND_THRESHOLD_PERCENT
     int "Active-session local command score threshold (percent)"

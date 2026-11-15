@@ -67,7 +67,8 @@ esp_err_t bot_platform_save_camera_orientation(bot_platform_t *platform, uint8_t
  * missing, invalid or unavailable storage; missing maps to ESP_ERR_NOT_FOUND.
  * Save validates before writing and
  * commits only if the packed value changed. Never erases other preferences,
- * network credentials, pairing or partitions. Call from the application owner. */
+ * network credentials, pairing or partitions. After startup, saves run only on
+ * the application's preferences worker; it never accesses LVGL or runtime. */
 esp_err_t bot_platform_load_voice_settings(bot_platform_t *platform,
                                           bot_voice_settings_t *out);
 esp_err_t bot_platform_save_voice_settings(bot_platform_t *platform,

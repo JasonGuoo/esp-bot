@@ -56,7 +56,54 @@ pub struct TurnOutput {
     #[serde(skip)] pub(crate) device_outcome: String,
 }
 
-struct ActiveTurn { id: String, cancelled: watch::Sender<bool> }
+struct ActiveTurn { id: String, conversation_id: String, cancelled: watch::Sender<bool> }
+
+#[derive(Clone, Debug)]
+pub(crate) enum CancelScope {
+    Turn(String),
+    DeviceSession(String), // authenticated gateway conversation ID
+    All,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Cancellation { pub scope: CancelScope, pub reason: &'static str }
+
+impl Cancellation {
+    pub fn matches_turn(&self, turn_id: &str, conversation_id: Option<&str>) -> bool {
+        match &self.scope {
+            CancelScope::Turn(id) => id == turn_id,
+            CancelScope::DeviceSession(id) => conversation_id == Some(id.as_str()),
+            CancelScope::All => true,
+        }
+    }
+
+    pub fn closes_session(&self, conversation_id: Option<&str>) -> bool {
+        match &self.scope {
+            CancelScope::Turn(_) => false,
+            CancelScope::DeviceSession(id) => conversation_id == Some(id.as_str()),
+            CancelScope::All => true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::{CancelScope,Cancellation};
+    #[test]
+    fn console_cancel_cannot_close_device_session() {
+        let turn=Cancellation{scope:CancelScope::Turn("console-turn".into()),reason:"parent_stop"};
+        assert!(turn.matches_turn("console-turn",Some("console-conversation")));
+        assert!(!turn.matches_turn("device-turn",Some("device-conversation")));
+        assert!(!turn.closes_session(Some("device-conversation")));
+        let device=Cancellation{scope:CancelScope::DeviceSession("device-one".into()),reason:"parent_stop"};
+        assert!(device.matches_turn("any",Some("device-one")));
+        assert!(device.closes_session(Some("device-one")));
+        assert!(!device.matches_turn("console-turn",Some("console-conversation")));
+        assert!(!device.closes_session(Some("device-two")));
+        let all=Cancellation{scope:CancelScope::All,reason:"memory_changed"};
+        assert!(all.matches_turn("any",None) && all.closes_session(None));
+    }
+}
 
 struct TurnLease<'a> { brain: &'a Brain, id: String, completed: bool }
 impl Drop for TurnLease<'_> {
@@ -83,7 +130,7 @@ pub struct Brain {
     turn_gate: Mutex<()>,
     active: StdMutex<Option<ActiveTurn>>,
     accepting: AtomicBool,
-    cancellation_events: broadcast::Sender<Option<String>>,
+    cancellation_events: broadcast::Sender<Cancellation>,
     progress_events: broadcast::Sender<Value>,
     foreground_generation: watch::Sender<u64>,
     background: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -177,26 +224,32 @@ impl Brain {
     }
 
     pub async fn cancel(&self, turn_id: Option<&str>) -> Result<(), String> {
+        self.cancel_scoped(turn_id.map(|id|CancelScope::Turn(id.to_owned())).unwrap_or(CancelScope::All),
+            if turn_id.is_some() {"turn_cancelled"} else {"service_stopped"}).await
+    }
+
+    pub(crate) async fn cancel_scoped(&self, scope: CancelScope, reason: &'static str) -> Result<(), String> {
+        let cancellation = Cancellation {scope, reason};
         // Audio delivery can outlive inference; its owner must see Stop too.
-        let _ = self.cancellation_events.send(turn_id.map(str::to_owned));
+        let _ = self.cancellation_events.send(cancellation.clone());
         let id = {
             let active = self.active.lock().map_err(|_|"brain_state_poisoned")?;
-            if let Some(active) = active.as_ref().filter(|a|turn_id.is_none() || turn_id == Some(a.id.as_str())) {
+            if let Some(active) = active.as_ref().filter(|a|cancellation.matches_turn(&a.id, Some(&a.conversation_id))) {
                 active.cancelled.send_replace(true);
                 Some(active.id.clone())
             } else { None }
         };
-        if turn_id.is_none() { self.models.cancel_current(); }
+        if matches!(cancellation.scope, CancelScope::All) { self.models.cancel_current(); }
         if let Some(id) = id {
             self.models.cancel_current();
             let result = self.harness.cancel(&id).await;
-            self.emit("turn.cancelled", Some(&id), json!({}));
+            self.emit("turn.cancelled", Some(&id), json!({"code":reason}));
             result?;
         }
         Ok(())
     }
 
-    pub fn cancellations(&self) -> broadcast::Receiver<Option<String>> { self.cancellation_events.subscribe() }
+    pub(crate) fn cancellations(&self) -> broadcast::Receiver<Cancellation> { self.cancellation_events.subscribe() }
 
     fn progress(&self) -> broadcast::Receiver<Value> { self.progress_events.subscribe() }
 
@@ -211,7 +264,8 @@ impl Brain {
         if !self.accepting.load(Ordering::Acquire) { return Err("brain_stopping".into()); }
         self.foreground_generation.send_modify(|value|*value=value.wrapping_add(1));
         let (cancelled, mut cancellation) = watch::channel(false);
-        *self.active.lock().map_err(|_|"brain_state_poisoned")? = Some(ActiveTurn { id:input.turn_id.clone(), cancelled });
+        *self.active.lock().map_err(|_|"brain_state_poisoned")? = Some(ActiveTurn {
+            id:input.turn_id.clone(), conversation_id:input.conversation_id.clone(), cancelled });
         let mut lease = TurnLease {brain:self,id:input.turn_id.clone(),completed:false};
         let started = Instant::now();
         self.emit("turn.started", Some(&input.turn_id), json!({"input":if input.text.is_some(){"text"}else{"audio"}}));

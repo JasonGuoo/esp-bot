@@ -61,6 +61,8 @@ impl Failure {
         self.kind == FailureKind::QuotaExhausted
             || (self.kind == FailureKind::RateLimited && config.fallback_on_rate_limit)
             || matches!(self.kind, FailureKind::HeadersTimeout | FailureKind::Authentication | FailureKind::Configuration)
+            || self.kind == FailureKind::Transport
+            || (self.kind == FailureKind::Upstream && self.status.is_some_and(|status|(500..=599).contains(&status)))
     }
 }
 
@@ -74,6 +76,7 @@ pub(super) fn classify(error: &Value, route: &ModelRoute, http_status: Option<u1
     let body: Value = serde_json::from_str(response_body).unwrap_or(Value::Null);
     let code = body.pointer("/error/code").or_else(|| body.get("code"))
         .or_else(|| error.pointer("/error/code")).or_else(|| error.get("code"))
+        .or_else(|| error.pointer("/cause/code"))
         .and_then(|v| v.as_str().map(str::to_owned).or_else(|| v.as_i64().map(|n| n.to_string())))
         .unwrap_or_default().to_ascii_lowercase();
     // Bound classification work. This text is never returned, logged or persisted.
@@ -101,12 +104,20 @@ pub(super) fn classify(error: &Value, route: &ModelRoute, http_status: Option<u1
         FailureKind::RateLimited
     } else if matches!(status, Some(401 | 403)) {
         FailureKind::Authentication
-    } else if matches!(status, Some(400 | 404 | 422))
-        || text.contains("modelnotfound") || text.contains("providernotfound")
-    {
+    } else if matches!(status, Some(400 | 404 | 422)) {
+        FailureKind::Configuration
+    } else if status.is_some_and(|status|(500..=599).contains(&status)) {
+        FailureKind::Upstream
+    } else if status.is_none() && (matches!(code.as_str(), "econnrefused" | "enotfound" | "ehostunreach" | "enetunreach" | "econnreset")
+        || matches!(error.get("type").and_then(Value::as_str), Some("ConnectionError" | "ConnectError" | "APIConnectionError"))) {
+        FailureKind::Transport
+    } else if text.contains("modelnotfound") || text.contains("providernotfound") {
         FailureKind::Configuration
     } else if text.contains("timed out waiting for response headers") {
         FailureKind::HeadersTimeout
+    } else if status.is_none() && ["connection refused", "failed to connect", "connection error", "fetch failed"]
+        .iter().any(|phrase|text.contains(phrase)) {
+        FailureKind::Transport
     } else {
         FailureKind::Upstream
     };
@@ -120,6 +131,7 @@ pub(super) fn classify(error: &Value, route: &ModelRoute, http_status: Option<u1
             FailureKind::Authentication => "check the selected provider's credential and subscription endpoint",
             FailureKind::Configuration => "check provider, model, endpoint and request configuration",
             FailureKind::HeadersTimeout => "provider did not return response headers in time",
+            FailureKind::Transport => "provider connection failed before a complete reply",
             _ => "OpenCode reported an upstream failure; inspect its local diagnostics",
         },
     }
@@ -146,6 +158,8 @@ impl RoutingState {
             FailureKind::QuotaExhausted => config.quota_cooldown_secs.saturating_mul(1_000),
             FailureKind::RateLimited => config.rate_limit_cooldown_secs.saturating_mul(1_000),
             FailureKind::HeadersTimeout | FailureKind::Authentication | FailureKind::Configuration => 300_000,
+            FailureKind::Transport => 45_000,
+            FailureKind::Upstream if error.status.is_some_and(|status|(500..=599).contains(&status)) => 45_000,
             _ => 0,
         };
         let at = super::now_ms();
@@ -169,6 +183,23 @@ mod tests {
         assert!(timeout.permits_route_change(&config));
         let unknown=classify(&json!({"message":"upstream execution failed"}),&route,None);
         assert_eq!(unknown.kind,FailureKind::Upstream);
+        assert!(!unknown.permits_route_change(&config));
+    }
+    #[test]
+    fn outage_routes_cool_down_but_unknown_failures_are_not_replayed() {
+        let route=ModelRoute::default();let config=HarnessConfig::default();
+        for status in [500,502,503,504] {
+            let failure=classify(&json!({"status":status}),&route,None);
+            assert_eq!(failure.kind,FailureKind::Upstream);
+            assert!(failure.permits_route_change(&config));
+            let mut state=RoutingState::default();state.record("first",&failure,&config);
+            let health=&state.routes["first"];
+            assert_eq!(health.retry_at_ms-health.failed_at_ms,45_000);
+        }
+        let connect=classify(&json!({"cause":{"code":"ECONNREFUSED"}}),&route,None);
+        assert_eq!(connect.kind,FailureKind::Transport);
+        assert!(connect.permits_route_change(&config));
+        let unknown=classify(&json!({"status":409,"message":"connection error"}),&route,None);
         assert!(!unknown.permits_route_change(&config));
     }
 }

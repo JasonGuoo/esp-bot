@@ -113,6 +113,7 @@ static void start_night_clock(void) {
 }
 #endif
 
+#if CONFIG_ESPBOT_LAN_DIAGNOSTICS
 static void reject_untrusted(const char *json) {
     cJSON *root = cJSON_ParseWithLengthOpts(json, strlen(json) + 1, NULL, true);
     const cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
@@ -157,6 +158,7 @@ static void lan_event(const bot_lan_event_t *event, void *context) {
                  esp_err_to_name(event->error));
     }
 }
+#endif
 
 static void schedule_retry(void) {
     esp_err_t err = esp_timer_start_once(s_retry_timer, 3000000);
@@ -203,6 +205,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 }
 
 void brain_link_start_diagnostics(void) {
+#if CONFIG_ESPBOT_LAN_DIAGNOSTICS
     if (!s_retry_timer) return; /* offline/unconfigured */
     bot_lan_config_t cfg = { .auto_connect = true, .scan_interval_ms = 5000, .mdns_preinitialized = s_mdns_ready };
     snprintf(cfg.device_id, sizeof(cfg.device_id), "%s", CONFIG_ESPBOT_DEVICE_ID);
@@ -212,6 +215,7 @@ void brain_link_start_diagnostics(void) {
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "LAN unavailable: %s; local runtime remains active", esp_err_to_name(err));
     }
+#endif
 }
 
 esp_err_t brain_link_start(bot_bus_t *bus) {

@@ -56,6 +56,7 @@ typedef enum {
     BOT_EVENT_LOCAL_COMMAND,
     BOT_EVENT_CAPTURE_OVERFLOW,
     BOT_EVENT_PLAYBACK_PROGRESS, /* successful hardware writes, bounded low frequency */
+    BOT_EVENT_TURN_SUBMITTED, /* LINK has sealed this token's microphone stream */
     BOT_EVENT_COUNT
 } bot_event_kind_t;
 
@@ -67,6 +68,12 @@ typedef enum {
     BOT_WAKE_PHRASE_NONE = 0,
     BOT_WAKE_PHRASE_XIAODAI_XIAODAI /* one whole acoustic model keyword; never two name hits */
 } bot_wake_phrase_t;
+
+typedef enum {
+    BOT_SESSION_END_NONE = 0, BOT_SESSION_END_PARENT_STOP,
+    BOT_SESSION_END_MEMORY_CHANGED, BOT_SESSION_END_SERVICE_STOPPED,
+    BOT_SESSION_END_EXPIRED
+} bot_session_end_code_t;
 
 typedef struct {
     bot_event_kind_t kind;
@@ -84,6 +91,7 @@ typedef struct {
         struct { bot_wake_status_t status; } wake_status;
         struct { bool clock_valid; bool night; uint8_t local_hour; } night;
         struct { uint32_t code; } fault;
+        struct { bot_session_end_code_t code; } session_end;
         struct { bool direction_valid; float azimuth_deg, quality; } sound;
         bot_voice_settings_t voice_settings;
         struct { bool ready; } capture;
@@ -143,6 +151,8 @@ void bot_bus_destroy(bot_bus_t *bus);
  * Critical loss latches critical_overflow even when caller ignores the return. */
 esp_err_t bot_bus_post(bot_bus_t *bus, const bot_event_t *event, TickType_t wait_ticks);
 bool bot_bus_receive(bot_bus_t *bus, bot_event_t *out);
+/** Owner recovery checkpoint only; producers may post immediately afterward. */
+bool bot_bus_events_pending(bot_bus_t *bus);
 /** Stop uses a separate sticky latch and cannot wait behind queued work. */
 void bot_bus_request_stop(bot_bus_t *bus, uint32_t observed_ms);
 bot_bus_signals_t bot_bus_take_signals(bot_bus_t *bus);

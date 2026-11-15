@@ -187,7 +187,8 @@ static void capture_event(bot_session_token_t token, bool ready) {
         .data.capture={.ready=ready}};
     (void)bot_bus_post(s_bus,&event,0);
 }
-static void fail_session_token(const char *reason, const bot_session_token_t *expected) {
+static void fail_session_token(const char *reason, const bot_session_token_t *expected,
+                                bot_session_end_code_t code) {
     portENTER_CRITICAL(&s_lock);
     if (expected && !same(*expected,s.desired)) {portEXIT_CRITICAL(&s_lock);return;}
     s.audio_allowed = false;
@@ -205,14 +206,15 @@ static void fail_session_token(const char *reason, const bot_session_token_t *ex
     capture_event(remote,false);
     if (active && s_bus) {
         const bot_event_t event = {.kind = BOT_EVENT_SESSION_END, .source = BOT_SOURCE_SYSTEM,
-            .observed_ms = (uint32_t)(esp_timer_get_time()/1000), .token = token};
+            .observed_ms = (uint32_t)(esp_timer_get_time()/1000), .token = token,
+            .data.session_end = {.code=code}};
         /* Token matching in runtime makes a concurrent new wake immune to this
          * old failure. A critical enqueue failure still latches the bus fault. */
         (void)bot_bus_post(s_bus, &event, 0);
     }
 }
-static void fail_session(const char *reason) { fail_session_token(reason,NULL); }
-static void fail_operation(bot_session_token_t token,const char *reason) { fail_session_token(reason,&token); }
+static void fail_session(const char *reason) { fail_session_token(reason,NULL,BOT_SESSION_END_NONE); }
+static void fail_operation(bot_session_token_t token,const char *reason) { fail_session_token(reason,&token,BOT_SESSION_END_NONE); }
 void brain_secure_network_down(void) {
     portENTER_CRITICAL(&s_lock);
     bool was = s.authenticated;
@@ -694,15 +696,29 @@ static void text_message(const char *data,size_t n) {
             bool current=json_token(cJSON_GetObjectItemCaseSensitive(root,"runtime"),&returned) &&
                 json_uint(cJSON_GetObjectItemCaseSensitive(root,"stream_id"),UINT32_MAX,&stream) &&
                 s.playback_stream==stream && same(returned,s.playback_token) && same(returned,s.desired);
+            const uint32_t playback=s.playback_id;
             portEXIT_CRITICAL(&s_lock);
-            if (current) fail_operation(returned,"Server cancelled the current playback");
+            // Whole-session cancellation owns its reason independently. A
+            // companion stream event must not replace that terminal notice.
+            if (current) {
+                cJSON *session=cJSON_GetObjectItemCaseSensitive(root,"session_cancelled");
+                if (!cJSON_IsTrue(session)) fail_operation(returned,"Server cancelled the current playback");
+                else if (s_audio && playback) bot_audio_playback_cancel(s_audio,playback);
+            }
         } else if (!strcmp(event->valuestring,"session.cancelled") || !strcmp(event->valuestring,"session.expired")) {
             bot_session_token_t returned;
             cJSON *runtime=cJSON_GetObjectItemCaseSensitive(root,"runtime");
             /* Older servers omit the token; their whole authenticated session
              * cancellation remains supported, never an old audio stream event. */
-            if (fresh && (!runtime || (json_token(runtime,&returned) && same(returned,token))))
-                fail_operation(token,"Server cancelled or expired the session");
+            if (fresh && (!runtime || (json_token(runtime,&returned) && same(returned,token)))) {
+                cJSON *code=cJSON_GetObjectItemCaseSensitive(root,"code");
+                bot_session_end_code_t why=BOT_SESSION_END_SERVICE_STOPPED;
+                if (!strcmp(event->valuestring,"session.expired")) why=BOT_SESSION_END_EXPIRED;
+                else if (cJSON_IsString(code) && !strcmp(code->valuestring,"parent_stop")) why=BOT_SESSION_END_PARENT_STOP;
+                else if (cJSON_IsString(code) && (!strcmp(code->valuestring,"memory_changed") ||
+                         !strcmp(code->valuestring,"identity_revoked"))) why=BOT_SESSION_END_MEMORY_CHANGED;
+                fail_session_token("Server cancelled or expired the session",&token,why);
+            }
         }
     } else if (!strcmp(kind,"error")) {
         cJSON *runtime=cJSON_GetObjectItemCaseSensitive(root,"runtime");
@@ -771,7 +787,12 @@ static void ws_event(void *arg,esp_event_base_t base,int32_t id,void *event_data
     } else if (id==WEBSOCKET_EVENT_CONNECTED) {
         s_connect_pending=false;
         s_rx_used=0; portENTER_CRITICAL(&s_lock);s.phase=WELCOME;s.authenticated=false;s.audio_allowed=false;portEXIT_CRITICAL(&s_lock);
-    } else if (id==WEBSOCKET_EVENT_DISCONNECTED || id==WEBSOCKET_EVENT_ERROR) {
+    } else if (id==WEBSOCKET_EVENT_DISCONNECTED || id==WEBSOCKET_EVENT_ERROR ||
+               id==WEBSOCKET_EVENT_CLOSED) {
+        /* The official client reports a clean server CLOSE separately from
+         * transport loss. Revoke the authenticated/audio leases in both cases
+         * before auto-reconnect; otherwise a new local wake tries a dead Mac
+         * session and gets cancelled after its acknowledgement. */
         if (id==WEBSOCKET_EVENT_DISCONNECTED && e && s_connect_pending &&
             e->error_handle.error_type==WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT &&
             e->error_handle.esp_ws_handshake_status_code==0 && e->error_handle.esp_tls_cert_verify_flags==0 &&
@@ -1339,6 +1360,13 @@ static void secure_task(void *unused) {
                 }
                 portEXIT_CRITICAL(&s_lock);
                 if (!current) continue;
+                const bot_event_t submitted = {.kind=BOT_EVENT_TURN_SUBMITTED,
+                    .source=BOT_SOURCE_LINK,.observed_ms=(uint32_t)(esp_timer_get_time()/1000),
+                    .token=state.remote};
+                if (bot_bus_post(s_bus,&submitted,0)!=ESP_OK) {
+                    fail_operation(state.remote,"Could not seal microphone capture");
+                    continue;
+                }
                 capture_event(state.remote,false);
                 if (!send_text(msg)) fail_operation(state.remote,"Could not submit secure audio");
                 else ESP_LOGI(TAG,"Plain LAN audio submitted (%lu frames)",(unsigned long)frames);

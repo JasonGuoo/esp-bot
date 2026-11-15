@@ -24,8 +24,6 @@
 #endif
 
 #define WAKE_COMMAND_ID 1
-#define SILENCE_RESET_SAMPLES (BOT_AUDIO_SAMPLE_RATE * 600U / 1000U)
-#define SILENCE_DBFS (-48.0f)
 
 #if CONFIG_BOT_AUDIO_MULTINET_WAKE_FALLBACK
 typedef struct { bot_voice_command_t id; const char *phrase; } local_phrase_t;
@@ -39,6 +37,16 @@ static const local_phrase_t s_commands[] = {
     {BOT_VOICE_COMMAND_HAPPY, "kai xin yi dian"},
     {BOT_VOICE_COMMAND_REPEAT, "zai shuo yi bian"},
     {BOT_VOICE_COMMAND_UNMUTE, "hui fu sheng yin"},
+    /* Explicit shorter alternatives for the same active-session intents.
+     * Keep the command-specific threshold and the passive one-phrase graph. */
+    {BOT_VOICE_COMMAND_VOLUME_UP, "da sheng yi dian"},
+    {BOT_VOICE_COMMAND_VOLUME_UP, "tiao da yin liang"},
+    {BOT_VOICE_COMMAND_VOLUME_DOWN, "xiao sheng yi dian"},
+    {BOT_VOICE_COMMAND_VOLUME_DOWN, "tiao xiao yin liang"},
+    {BOT_VOICE_COMMAND_QUIET, "jing yin"},
+    {BOT_VOICE_COMMAND_UNMUTE, "qu xiao jing yin"},
+    {BOT_VOICE_COMMAND_THEME_BLUE, "huan lan se"},
+    {BOT_VOICE_COMMAND_REPEAT, "chong bo"},
 };
 #endif
 
@@ -163,12 +171,12 @@ void bot_audio_keyword_reset(bot_audio_keyword_t *keyword)
     if (keyword->data && keyword->iface && keyword->dirty) keyword->iface->clean(keyword->data);
 #endif
     keyword->dirty = false;
-    keyword->silence_samples = 0;
+    keyword->previous_speech = false;
     clear_frame(keyword);
 }
 
 int bot_audio_keyword_detect(bot_audio_keyword_t *keyword, int16_t *samples, size_t count,
-                              float volume_dbfs, bool allowed)
+                              float volume_dbfs, bool speech, bool allowed)
 {
 #if CONFIG_BOT_AUDIO_MULTINET_WAKE_FALLBACK
     if (!keyword->data || !keyword->available) return 0;
@@ -176,22 +184,19 @@ int bot_audio_keyword_detect(bot_audio_keyword_t *keyword, int16_t *samples, siz
         bot_audio_keyword_reset(keyword);
         return false;
     }
-    /* AFE VAD has a 600 ms release hold. Use its pre-AGC energy to expire a
-     * partial command during real silence without adding another recognizer.
-     * Silent frames still reach MultiNet until this bound so it can finish a
-     * complete phrase. A later separate call cannot reuse this partial state. */
-    if (volume_dbfs < SILENCE_DBFS) {
-        if (keyword->silence_samples < SILENCE_RESET_SAMPLES)
-            keyword->silence_samples += (uint32_t)count;
-        if (keyword->silence_samples >= SILENCE_RESET_SAMPLES) {
-            if (keyword->dirty) keyword->iface->clean(keyword->data);
-            keyword->dirty = false;
-            clear_frame(keyword);
-            return false;
-        }
-    } else {
-        keyword->silence_samples = 0;
+    keyword->input_peak = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const int32_t sample = samples[i];
+        const uint16_t magnitude = sample < 0 ? (uint16_t)-sample : (uint16_t)sample;
+        if (magnitude > keyword->input_peak) keyword->input_peak = magnitude;
     }
+    /* The official AFE already declares silence after its 600 ms release
+     * hold. A second absolute -48 dBFS gate kept erasing quiet but valid speech
+     * on this board before a four-syllable command could finish. Reset once at
+     * the actual VAD boundary. Continue feeding all frames so the next word's
+     * onset is retained before VAD's minimum-speech window is satisfied. */
+    if (!speech && keyword->previous_speech) bot_audio_keyword_reset(keyword);
+    keyword->previous_speech = speech;
     size_t offset = 0;
     while (offset < count) {
         size_t copy = keyword->samples - keyword->buffered;
@@ -217,14 +222,17 @@ int bot_audio_keyword_detect(bot_audio_keyword_t *keyword, int16_t *samples, siz
                 isfinite(result->prob[0]) && result->prob[0] >= 0.0f && result->prob[0] <= 1.0f;
             int accepted = 0;
             if (valid) {
-                const int id = result->command_id[0], index = result->phrase_id[0];
+                const int id = result->command_id[0];
                 keyword->last_candidate_score = result->prob[0];
                 keyword->last_candidate_command = id;
-                if (id == WAKE_COMMAND_ID && index == 0 &&
+                /* command_id is our registered stable ID. phrase_id is the
+                 * native decoder's phrase identifier, not a zero-based index
+                 * into esp_mn_commands_get_from_index(). On the S31 model a
+                 * correct full keyword scored 0.996 but failed that old check.
+                 * The exact graph/strings are already verified when installed. */
+                if (id == WAKE_COMMAND_ID &&
                     result->prob[0] >= keyword->threshold_percent / 100.0f) accepted = id;
-                if (keyword->commands_enabled && index > 0 &&
-                    (size_t)index <= sizeof(s_commands) / sizeof(s_commands[0]) &&
-                    id == (int)s_commands[index - 1].id &&
+                if (keyword->commands_enabled && bot_voice_command_valid((bot_voice_command_t)id) &&
                     result->prob[0] >= CONFIG_BOT_AUDIO_LOCAL_COMMAND_THRESHOLD_PERCENT / 100.0f) accepted = id;
             }
             if (accepted) keyword->last_score = result->prob[0];
@@ -245,6 +253,7 @@ int bot_audio_keyword_detect(bot_audio_keyword_t *keyword, int16_t *samples, siz
     (void)samples;
     (void)count;
     (void)volume_dbfs;
+    (void)speech;
     (void)allowed;
     return false;
 #endif

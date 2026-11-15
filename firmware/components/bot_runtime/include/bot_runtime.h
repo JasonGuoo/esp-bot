@@ -19,7 +19,8 @@ typedef enum {
 typedef enum {
     BOT_CONVERSATION_NONE = 0, BOT_CONVERSATION_LISTENING,
     BOT_CONVERSATION_THINKING, BOT_CONVERSATION_SPEAKING,
-    BOT_CONVERSATION_WAITING, BOT_CONVERSATION_ENDING
+    BOT_CONVERSATION_WAITING, BOT_CONVERSATION_ENDING,
+    BOT_CONVERSATION_SUBMITTED /* capture sealed; awaiting authenticated processing */
 } bot_conversation_t;
 typedef enum {
     BOT_ACTIVATION_NONE = 0, BOT_ACTIVATION_TOUCH, BOT_ACTIVATION_WAKE_WORD
@@ -60,6 +61,7 @@ typedef struct {
     bool ambient_dark, ambient_sample_valid, ambient_probe;
     uint8_t ambient_luma;        /* camera image mean, not calibrated lux */
     bool critical_fault;
+    bool fault_recoverable;     /* queue overflow only; Stop/touch recovers to passive after drain */
     bool utterance_active;
     bool utterance_seen;        /* sticky for this token after an accepted VAD START */
     bool local_response_active; /* queued/playing wake acknowledgement; microphone gate closed */

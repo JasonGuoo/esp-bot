@@ -18,6 +18,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::lan::{EventSink, LanEvent};
+const MAX_DEVICES: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -65,6 +66,9 @@ impl PairingStore {
         if let Some(record) = inner.get(device_id) {
             return record.state;
         }
+        // IDs in v1 are self-claimed. Unauthenticated discovery may not grow
+        // persistent state without a bound or evict an existing household bot.
+        if inner.len() >= MAX_DEVICES { return PairState::Denied; }
         let record = DeviceRecord {
             state: PairState::Pending,
             name: name.to_owned(),

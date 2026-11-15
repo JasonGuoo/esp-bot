@@ -54,8 +54,6 @@ function newId(prefix: string): string {
 }
 function errorText(error: unknown): string {
   const text = String(error);
-  if (text.includes("NotAllowedError") || text.includes("Permission denied")) return "没有获得麦克风或摄像头权限。可在 macOS 设置里开启，或选择本地文件。";
-  if (text.includes("NotFoundError")) return "没有找到可用的麦克风或摄像头。可选择本地文件继续。";
   if (text.includes("capture_cancelled")) return "已取消采集。";
   for (const [code, message] of [
     ["brain_not_started", "服务尚未启动，请点击左下角“启动服务”。"],
@@ -68,6 +66,12 @@ function errorText(error: unknown): string {
     ["api_key_keychain_read", "macOS 未允许读取已保存密钥。请解锁登录钥匙串并完成系统授权，再启动服务。无需重新填写密钥。"],
   ]) if (text.includes(code)) return message;
   return text.slice(0, 2000);
+}
+
+function captureErrorText(error: unknown): string {
+  if (error instanceof DOMException && error.name === "NotAllowedError") return "没有获得麦克风或摄像头权限。可在 macOS 设置里开启，或选择本地文件。";
+  if (error instanceof DOMException && error.name === "NotFoundError") return "没有找到可用的麦克风或摄像头。可选择本地文件继续。";
+  return errorText(error);
 }
 
 export function mountCompanion(container: HTMLElement): CompanionController {
@@ -113,7 +117,12 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   let turnBusy = false;
   let operationBusy = false;
   let statusBusy = false;
+  let statusAgain = false;
   let permissionBusy = false;
+  const permissionCards = new Map<string, { card: HTMLElement; signature: string }>();
+  const livePermissions = new Map<string, string>();
+  const permissionReplies = new Set<string>();
+  let identityOperation = 0;
   let questionBusy = false;
   let questionSignature = "";
   let pendingQuestionCount = 0;
@@ -156,6 +165,8 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     $("#cc-notice-wrap").classList.toggle("error", error);
     node.hidden = !text;
     node.classList.toggle("error", error);
+    node.setAttribute("role", error ? "alert" : "status");
+    node.setAttribute("aria-live", error ? "assertive" : "polite");
     node.textContent = text;
   }
   function phase(value: Phase, description?: string, expression?: string): void {
@@ -285,14 +296,18 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     if (hadCapture && !turnBusy) phase("idle", "本地采集已停止。");
     updateControls();
   }
-  async function stopEverything(show = true): Promise<void> {
+  async function stopConsole(show = true, all = false): Promise<void> {
     turnGeneration += 1;
     const turn = activeTurn;
     activeTurn = null; turnBusy = false;
     cancelCapture(); closeCamera(); stopPlayback(); clearToken();
     wavDraft = null; renderDraft(); phase("idle", "已停止本地采集和播放。");
     updateControls();
-    try { await request("assistant.cancel", turn ? { turn_id: turn } : {}); if (show) notice("已停止本轮互动。"); }
+    try {
+      if (all) await request("assistant.cancel", { scope: "all" });
+      else if (turn) await request("assistant.cancel", { scope: "turn", turn_id: turn });
+      if (show) notice(all ? "已停止控制台和设备互动。" : "已停止本轮互动。");
+    }
     catch (error) { if (show) notice(`本地采集和播放已停止；后端取消结果：${errorText(error)}`, true); }
   }
   function resetConversationView(): void {
@@ -455,7 +470,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       await started;
       if (generation === mediaGeneration) updateControls();
     } catch (error) {
-      if (generation === mediaGeneration) { cancelCapture(); notice(errorText(error), true); phase("idle"); }
+      if (generation === mediaGeneration) { cancelCapture(); notice(captureErrorText(error), true); phase("idle"); }
     }
   }
   async function finishRecording(): Promise<void> {
@@ -528,13 +543,13 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       await camera.open($<HTMLVideoElement>("#cc-camera-video"));
       if (generation === cameraRequestGeneration && cameraDialog.open) $<HTMLButtonElement>("#cc-camera-snapshot").disabled = false;
     } catch (error) {
-      if (generation === cameraRequestGeneration) { closeCamera(); notice(errorText(error), true); }
+      if (generation === cameraRequestGeneration) { closeCamera(); notice(captureErrorText(error), true); }
     }
   }
   async function recognize(kind: IdentityKind, media: string): Promise<void> {
-    const generation = mediaGeneration;
+    const operation = ++identityOperation;
     const result = await request("identity.recognize", { kind, ...(kind === "face" ? { image_base64: media } : { wav_base64: media }) });
-    if (generation !== mediaGeneration || disposed) return;
+    if (operation !== identityOperation || disposed) return;
     renderIdentity(result); notice("识别完成；本轮成员没有被自动改变。");
   }
   function renderIdentity(value: unknown, fromConversation = false): void {
@@ -574,7 +589,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
         }),
         button("删除", () => perform("正在删除档案与关联数据…", async () => {
           if (!window.confirm(`删除“${profile.display_name}”的档案、关联记忆、声纹和人脸登记？对应对话也会清理。`)) { notice(""); return; }
-          await stopEverything(false); await request("profile.delete", { profile_id: profile.id });
+          await stopConsole(false); await request("profile.delete", { profile_id: profile.id });
           if (selectedProfile === profile.id) selectedProfile = null;
           clearSamples(); resetMemoryForm(); resetConversationView(); await refreshFamily();
           notice("档案与关联数据已删除。");
@@ -597,7 +612,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     if (people.status === "fulfilled") {
       profiles = people.value;
       if (selectedProfile && !profiles.some((profile) => profile.id === selectedProfile)) {
-        await stopEverything(false); selectedProfile = null; clearSamples(); resetMemoryForm(); resetConversationView();
+        await stopConsole(false); selectedProfile = null; clearSamples(); resetMemoryForm(); resetConversationView();
       }
       renderProfiles();
     }
@@ -610,7 +625,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   async function changeProfile(id: string | null): Promise<void> {
     if (id === selectedProfile) return;
     if (id && !profiles.some((profile) => profile.id === id)) return;
-    await stopEverything(false);
+    await stopConsole(false);
     selectedProfile = id; clearSamples(); resetMemoryForm(); resetConversationView(); renderProfiles(); renderEnrollments();
     $("#cc-identity-result").textContent = "本轮成员已改变，尚未重新请求识别。";
     notice(id ? `已明确选择 ${profileName(id)}，开始一段新对话。` : "已切换为未指定成员，开始一段新对话。");
@@ -651,7 +666,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       const actions = element("div", "cc-inline");
       actions.append(button("编辑", () => editMemory(memory)), button("删除", () => perform("正在删除记忆…", async () => {
         if (!window.confirm(`删除这条记忆，并清理对话中的旧副本？\n\n${memory.content.slice(0, 200)}`)) { notice(""); return; }
-        await stopEverything(false); await request("memory.delete", { id: memory.id });
+        await stopConsole(false); await request("memory.delete", { id: memory.id });
         resetConversationView(); if (editingMemory?.id === memory.id) resetMemoryForm(); await refreshFamily(); notice("记忆已删除，对话已重新开始。");
       }), "cc-button danger"));
       meta.append(actions); card.append(meta); host.append(card);
@@ -716,11 +731,12 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     };
     if (scope === "profile" && !payload.profile_id) throw new Error("请为这条个人记忆选择成员。");
     if (payload.expires_at_ms !== null && (!Number.isFinite(payload.expires_at_ms) || payload.expires_at_ms <= Date.now())) throw new Error("到期时间应在将来。");
-    await stopEverything(false); await request("memory.save", payload);
+    await stopConsole(false); await request("memory.save", payload);
     memoryDialog.close(); resetMemoryForm(); resetConversationView(); await refreshFamily(); notice("记忆已保存，对话已重新开始以应用新内容。");
   }
   async function refreshStatus(): Promise<void> {
-    if (statusBusy || disposed) return;
+    if (disposed) return;
+    if (statusBusy) { statusAgain = true; return; }
     statusBusy = true;
     try {
       const value = object(await request("service.status"));
@@ -759,7 +775,10 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       updateControls();
     } catch (error) {
       if (!disposed) { serviceReady = false; $("#cc-service-pill").textContent = "状态不可用"; $("#cc-service-dot").classList.remove("ready"); $("#cc-service-dot").classList.add("error"); $("#cc-status-summary").textContent = errorText(error); updateControls(); }
-    } finally { statusBusy = false; }
+    } finally {
+      statusBusy = false;
+      if (statusAgain && !disposed) { statusAgain = false; void refreshStatus(); }
+    }
   }
   function renderRoutes(routes: unknown[]): void {
     const host = $("#cc-routes"); host.replaceChildren();
@@ -820,7 +839,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       key = ""; updateControls(); notice("API Key 应为不含空格和换行的英文、数字或符号。", true); return;
     }
     await perform(remove ? "正在移除密钥…" : "正在保存到 macOS 钥匙串…", async () => {
-      await stopEverything(false);
+      await stopConsole(false);
       try {
         const pending = request(remove ? "api_key.delete" : "api_key.save", { route_id: routeId, ...(remove ? {} : { api_key: key }) });
         key = "";
@@ -871,45 +890,52 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   }
   function populateConfigurationForms(config: JsonObject): void {
     const harness = object(config.harness), models = object(config.models), gateway = object(config.gateway), conversation = object(config.conversation);
-    const inputValue = (selector: string, value: unknown): void => { $<HTMLInputElement>(selector).value = typeof value === "number" ? String(value) : string(value); };
+    const canPopulate = (selector: string): boolean => {
+      const form = $(selector).closest("form");
+      return !form || !dirtyConfigurationForms.has(form.id);
+    };
+    const inputValue = (selector: string, value: unknown): void => {
+      if (canPopulate(selector)) $<HTMLInputElement>(selector).value = typeof value === "number" ? String(value) : string(value);
+    };
+    const checkValue = (selector: string, checked: boolean): void => {
+      if (canPopulate(selector)) $<HTMLInputElement>(selector).checked = checked;
+    };
     inputValue("#cc-local-python", models.python); inputValue("#cc-local-script", models.script);
     inputValue("#cc-local-model-dir", models.model_dir); inputValue("#cc-local-voice", models.voice); inputValue("#cc-local-timeout", models.request_timeout_seconds);
-    $<HTMLSelectElement>("#cc-asr-backend").value = string(models.asr_backend, "whisper");
+    inputValue("#cc-asr-backend", string(models.asr_backend, "whisper"));
     inputValue("#cc-rma-qwen-python", models.rma_qwen_python); inputValue("#cc-rma-qwen-worker", models.rma_qwen_worker); inputValue("#cc-rma-qwen-model", models.rma_qwen_model);
     inputValue("#cc-tools-inherit", harness.inherit_config);
-    $<HTMLTextAreaElement>("#cc-mcp-names").value = list(harness.required_mcp).map((value) => string(value)).filter(Boolean).join("\n");
+    inputValue("#cc-mcp-names", list(harness.required_mcp).map((value) => string(value)).filter(Boolean).join("\n"));
     const native = new Set(list(harness.native_actions).map((value) => string(value)));
     for (const action of ["read", "glob", "grep", "edit", "shell", "webfetch", "skill"]) {
-      $<HTMLInputElement>(`#cc-native-${action}`).checked = native.has(action);
+      checkValue(`#cc-native-${action}`, native.has(action));
     }
-    $<HTMLInputElement>("#cc-native-external").checked = harness.allow_external_directories === true;
-    $<HTMLSelectElement>("#cc-native-mode").value = string(harness.native_execution_mode, "ask");
+    checkValue("#cc-native-external", harness.allow_external_directories === true);
+    inputValue("#cc-native-mode", string(harness.native_execution_mode, "ask"));
     inputValue("#cc-gateway-bind", gateway.bind); inputValue("#cc-gateway-max", gateway.max_connections);
     inputValue("#cc-gateway-cert", gateway.certificate_pem); inputValue("#cc-gateway-key", gateway.private_key_pem);
-    $<HTMLInputElement>("#cc-gateway-enabled").checked = gateway.enabled === true;
-    inputValue("#cc-opencode-path", harness.executable); $<HTMLSelectElement>("#cc-opencode-mode").value = string(harness.mode, "managed");
-    $<HTMLInputElement>("#cc-auto-start").checked = config.auto_start === true;
-    $<HTMLInputElement>("#cc-default-speak").checked = conversation.default_speak !== false;
+    checkValue("#cc-gateway-enabled", gateway.enabled === true);
+    inputValue("#cc-opencode-path", harness.executable); inputValue("#cc-opencode-mode", string(harness.mode, "managed"));
+    checkValue("#cc-auto-start", config.auto_start === true);
+    checkValue("#cc-default-speak", conversation.default_speak !== false);
     inputValue("#cc-reply-limit", conversation.max_reply_characters); inputValue("#cc-session-idle", conversation.idle_session_seconds);
-    $<HTMLTextAreaElement>("#cc-media-hosts").value = list(conversation.media_hosts).map((host) => string(host)).join("\n");
-    populateRouteForm(true);
+    inputValue("#cc-media-hosts", list(conversation.media_hosts).map((host) => string(host)).join("\n"));
+    if (!dirtyConfigurationForms.has("cc-route-form")) populateRouteForm(true);
   }
   async function patchConfiguration(update: (config: JsonObject) => void, sourceForm: string): Promise<void> {
     if (rawConfigDirty) {
       activatePanel("settings");
       throw new Error("高级配置有尚未保存的内容。请先保存，或点“重新读取”放弃修改，再使用其他设置表单。");
     }
-    if ([...dirtyConfigurationForms].some((id) => id !== sourceForm)) throw new Error("其他页面还有未保存的设置。请先保存或重新读取那些修改，再提交当前表单。");
     // Read fresh data and change only this form's fields. Other routes and private paths survive.
     const config = object(await request("config.read"));
     update(config);
     await request("config.save", config);
-    await stopEverything(false); await request("service.reload");
-    serviceReady = false; serviceRunning = false; routeFormDirty = false;
+    if (sourceForm === "cc-route-form") routeFormDirty = false;
     dirtyConfigurationForms.delete(sourceForm);
-    resetConversationView(); await loadConfiguration(); await refreshStatus();
+    await loadConfiguration();
     addActivity("服务设置已更新");
-    notice("设置已保存。服务已停止，点击左下角“启动服务”生效。");
+    notice("设置已保存。点击“重载配置”后生效，重载会结束当前设备互动。");
   }
   function formInput(selector: string): string { return $<HTMLInputElement>(selector).value.trim(); }
   function formNumber(selector: string, minimum: number, maximum: number): number {
@@ -937,36 +963,69 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     if (permissionBusy || disposed) return;
     permissionBusy = true;
     try {
-      const permissions = list(await request("harness.permissions"));
+      const permissions = list(await request("harness.permissions")).map(object);
       if (disposed) return;
       pendingPermissionCount = permissions.length;
-      const host = $("#cc-permissions"); host.replaceChildren(); host.hidden = permissions.length === 0;
+      const host = $("#cc-permissions"); host.hidden = permissions.length === 0;
       $("#cc-permissions-empty").hidden = permissions.length > 0;
       $("#cc-permission-count").textContent = `${permissions.length} 项`;
       $("#cc-nav-pending").hidden = permissions.length === 0;
       $("#cc-nav-pending").textContent = String(permissions.length);
       $("#cc-approval-banner").hidden = permissions.length === 0 || panel === "tools";
       $("#cc-approval-summary").textContent = `${permissions.length} 项工具操作等待确认，任务正在等待你的决定。`;
-      for (const value of permissions.slice(0, 16)) {
-        const permission = object(value);
+      livePermissions.clear();
+      for (const permission of permissions) {
+        livePermissions.set(JSON.stringify([permission.session_id, permission.request_id]), JSON.stringify(permission));
+      }
+      if (!permissions.length) { host.replaceChildren(); permissionCards.clear(); }
+      for (const [key, entry] of permissionCards) {
+        if (livePermissions.has(key)) continue;
+        // Retain expired rows until the whole batch is done. A remaining
+        // approval must never move under a pointer held over another request.
+        for (const control of Array.from(entry.card.querySelectorAll<HTMLButtonElement>("button"))) control.disabled = true;
+        entry.card.dataset.expired = "true";
+        const heading = entry.card.querySelector("strong");
+        if (heading) heading.textContent = "这项请求已结束";
+      }
+      for (const permission of permissions.slice(0, 16)) {
+        const key = JSON.stringify([permission.session_id, permission.request_id]);
+        const signature = JSON.stringify(permission);
+        const previous = permissionCards.get(key);
+        if (previous?.signature === signature) continue;
         const name = string(permission.action, string(permission.permission, "工具操作"));
         const details = { action: name, description: permission.description, targets: permission.patterns, actual_details: permission.metadata, model_input: permission.input };
         const encoded = JSON.stringify(details, null, 2) ?? "{}";
-        const card = element("section", "cc-permission");
+        const card = previous?.card ?? element("section", "cc-permission");
+        card.replaceChildren(); card.dataset.requestId = string(permission.request_id);
+        delete card.dataset.expired;
+        permissionCards.set(key, { card, signature });
         card.append(element("strong", "", `请家长确认：${name}`), element("pre", "cc-json", encoded.length <= 24_000 ? encoded : `${encoded.slice(0, 24_000)}\n参数过长，不能在此批准。`));
         const actions = element("div", "cc-inline");
         const reply = async (allow: boolean) => {
-          if (allow && !window.confirm(`仅允许这一次具体操作？\n\n${name}\n请确认已读完卡片中的目标与参数。`)) return;
+          if (permissionReplies.has(key)) return;
+          if (livePermissions.get(key) !== signature) { notice("这项请求已结束或改变，请查看当前卡片。", true); return; }
+          if (allow && !window.confirm(`仅允许这一次具体操作？\n\n${pretty(details, 4000)}\n\n请求：${string(permission.request_id)}`)) return;
+          if (livePermissions.get(key) !== signature) return;
+          permissionReplies.add(key);
           for (const control of Array.from(actions.querySelectorAll<HTMLButtonElement>("button"))) control.disabled = true;
           try {
             await request("harness.permission.reply", { session_id: string(permission.session_id), request_id: string(permission.request_id), allow });
+            livePermissions.delete(key);
             notice(allow ? "已仅允许这次操作。" : "已拒绝这次操作。");
           } catch (error) { notice(errorText(error), true); }
-          finally { void refreshPermissions(); }
+          finally {
+            permissionReplies.delete(key);
+            if (livePermissions.get(key) === signature) {
+              for (const control of Array.from(actions.querySelectorAll<HTMLButtonElement>("button"))) control.disabled = false;
+              allowButton.disabled = encoded.length > 24_000;
+            }
+            void refreshPermissions();
+          }
         };
-        const allow = button("仅允许这一次", () => reply(true), "cc-button primary");
-        allow.disabled = encoded.length > 24_000;
-        actions.append(allow, button("拒绝", () => reply(false), "cc-button danger")); card.append(actions); host.append(card);
+        const allowButton = button("仅允许这一次", () => reply(true), "cc-button primary");
+        allowButton.disabled = encoded.length > 24_000;
+        actions.append(allowButton, button("拒绝", () => reply(false), "cc-button danger")); card.append(actions);
+        if (!previous) host.append(card);
       }
     } catch (error) { if (turnBusy) notice(errorText(error), true); }
     finally { permissionBusy = false; }
@@ -1065,7 +1124,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   form("#cc-profile-edit-form", "正在更新成员档案…", async () => {
     if (!editingProfileId) return;
     const profile = { display_name: formInput("#cc-profile-edit-name"), is_child: $<HTMLInputElement>("#cc-profile-edit-child").checked };
-    await stopEverything(false); await request("profile.update", { profile_id: editingProfileId, profile });
+    await stopConsole(false); await request("profile.update", { profile_id: editingProfileId, profile });
     profileDialog.close(); editingProfileId = null; resetConversationView(); await refreshFamily(); notice("成员档案已更新。");
   });
   form("#cc-route-form", "正在保存模型设置…", async () => {
@@ -1121,15 +1180,15 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   }
   $("#cc-route-form").addEventListener("input", () => { routeFormDirty = true; $("#cc-route-dirty").textContent = "有未保存的修改"; });
   $("#cc-config-editor").addEventListener("input", () => { rawConfigDirty = true; $("#cc-config-dirty").textContent = "有未保存的修改"; });
-  on("#cc-stop", () => stopEverything());
+  on("#cc-stop", () => stopConsole(true, true));
   $<HTMLFormElement>("#cc-api-key-form").addEventListener("submit", (event) => { event.preventDefault(); void changeApiKey(); });
   on("#cc-api-key-delete", () => changeApiKey(true));
   keyRoute.addEventListener("change", () => selectRoute(keyRoute.value));
   keyInput.addEventListener("input", updateControls);
   on("#cc-start", () => perform("正在读取钥匙串并启动 OpenCode…如出现 macOS 授权窗口，请完成授权。", async () => { await request("service.start"); await refreshStatus(); notice("服务启动请求已完成。"); }));
-  on("#cc-service-stop", () => perform("正在停止服务…", async () => { await stopEverything(false); await request("service.stop"); serviceReady = false; updateControls(); notice("服务已停止。"); }));
+  on("#cc-service-stop", () => perform("正在停止服务…", async () => { await stopConsole(false); await request("service.stop"); serviceReady = false; updateControls(); notice("服务已停止。"); }));
   on("#cc-refresh-status", () => refreshStatus());
-  on("#cc-reload", () => perform("正在重载配置…", async () => { if (!discardConfigurationDrafts()) return; await stopEverything(false); await request("service.reload"); resetConversationView(); await loadConfiguration(); await refreshFamily(); notice("配置已重载，点击“启动服务”继续。"); }));
+  on("#cc-reload", () => perform("正在重载配置…", async () => { if (!discardConfigurationDrafts()) return; await stopConsole(false); await request("service.reload"); resetConversationView(); await loadConfiguration(); await refreshFamily(); notice("配置已重载，点击“启动服务”继续。"); }));
   on("#cc-config-read", () => perform("正在读取配置…", async () => {
     if (!discardConfigurationDrafts()) return;
     await loadConfiguration(); notice("已读取 brain.json。");
@@ -1140,8 +1199,8 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     if (raw.length > 200_000) throw new Error("配置内容过大。");
     const parsed: unknown = JSON.parse(raw);
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("配置应为 JSON 对象。");
-    await stopEverything(false); await request("config.save", parsed); rawConfigDirty = false; dirtyConfigurationForms.clear(); $("#cc-config-dirty").textContent = ""; await request("service.reload");
-    resetConversationView(); await loadConfiguration(); await refreshFamily(); notice("配置已保存并重载。点击“启动服务”继续。");
+    await request("config.save", parsed); rawConfigDirty = false; dirtyConfigurationForms.clear(); $("#cc-config-dirty").textContent = "";
+    await loadConfiguration(); notice("配置已保存。点击“重载配置”后生效，重载会结束当前设备互动。");
   }));
   on("#cc-models-status", () => perform("正在检查本机能力…", async () => {
     const result = object(await request("models.status")); latestModelHealth = result; renderCapabilities(container, result);
@@ -1150,7 +1209,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     addActivity("已检查本地能力状态");
   }));
   on("#cc-models-unload", () => perform("正在释放本地模型…", async () => {
-    await stopEverything(false); await request("models.unload");
+    await stopConsole(false); await request("models.unload");
     if (latestModelHealth) for (const model of Object.values(object(object(latestModelHealth.models).models))) object(model).loaded = false;
     renderCapabilities(container, latestModelHealth ?? undefined);
     $("#cc-models-json").textContent = "本地模型进程已退出；卡片保留上次检查的安装信息，下次明确请求时按需加载。";
@@ -1161,14 +1220,14 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   input.addEventListener("input", updateControls);
   input.addEventListener("keydown", (event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void sendTurn(); } });
   profileSelect.addEventListener("change", () => { void changeProfile(profileSelect.value || null); });
-  on("#cc-new-conversation", async () => { await stopEverything(false); resetConversationView(); notice("已开始新对话。需要清理全部对话时，可前往“运行设置”。"); });
+  on("#cc-new-conversation", async () => { await stopConsole(false); resetConversationView(); notice("已开始新对话。需要清理全部对话时，可前往“运行设置”。"); });
   on("#cc-forget-conversation", () => perform("正在忘记这段对话…", async () => {
     if (!window.confirm("忘记当前这段对话及其 OpenCode 会话？单独保存的记忆会保留。")) { notice(""); return; }
-    const id = conversationId; await stopEverything(false); await request("conversation.forget", { conversation_id: id }); resetConversationView(); notice("这段对话已忘记。");
+    const id = conversationId; await stopConsole(false); await request("conversation.forget", { conversation_id: id }); resetConversationView(); notice("这段对话已忘记。");
   }));
   on("#cc-forget-all", () => perform("正在忘记所有对话…", async () => {
     if (!window.confirm("清理全部本地 conversation 及对应 OpenCode 会话？单独保存的记忆与档案会保留。")) { notice(""); return; }
-    await stopEverything(false); await request("conversation.forget_all"); resetConversationView(); notice("所有对话已忘记。");
+    await stopConsole(false); await request("conversation.forget_all"); resetConversationView(); notice("所有对话已忘记。");
   }));
   on("#cc-record", () => toggleRecording("chat"));
   on("#cc-choose-wav", () => $<HTMLInputElement>("#cc-wav").click());
@@ -1222,11 +1281,14 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   $<HTMLInputElement>("#cc-enroll-consent").addEventListener("change", updateControls);
   on("#cc-enroll", () => perform("正在本地提取并登记特征…", async () => {
     if (!selectedProfile || !$<HTMLInputElement>("#cc-enroll-consent").checked) throw new Error("请选择成员并明确同意本次登记。");
-    const generation = mediaGeneration;
+    const operation = ++identityOperation;
+    const profileId = selectedProfile;
+    const kind = identityKind.value;
     const result = await request("identity.enroll", { profile_id: selectedProfile, kind: identityKind.value,
       samples: samples.map((sample) => sample.base64), guardian_confirmed: true, replace_existing: $<HTMLInputElement>("#cc-enroll-replace").checked });
-    if (generation !== mediaGeneration) return;
-    clearSamples(); await refreshFamily(); notice(`登记已保存，共 ${number(object(result).sample_count)} 份样本。识别仍只提供候选。`);
+    if (operation !== identityOperation || disposed) return;
+    if (selectedProfile === profileId && identityKind.value === kind) clearSamples();
+    await refreshFamily(); notice(`${profileName(profileId)}的登记已保存，共 ${number(object(result).sample_count)} 份样本。识别仍只提供候选。`);
   }));
   on("#cc-recognize-file", () => $<HTMLInputElement>("#cc-recognize-input").click());
   $<HTMLInputElement>("#cc-recognize-input").addEventListener("change", () => {
@@ -1271,7 +1333,12 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     turnGeneration += 1; mediaGeneration += 1; recorder.cancel(); camera.close();
     stopPlayback(); clearReplayClips(); clearToken(); samples = []; wavDraft = null;
   }
-  const onPageHide = () => { localCleanup(); void request("assistant.cancel").catch(() => {}); };
+  const onPageHide = () => {
+    const turn = activeTurn;
+    activeTurn = null; turnBusy = false;
+    localCleanup();
+    if (turn) void request("assistant.cancel", { scope: "turn", turn_id: turn }).catch(() => {});
+  };
   window.addEventListener("pagehide", onPageHide);
   // Status is metadata-only. Never poll model inference or microphone/camera.
   const statusTimer = window.setInterval(() => { if (visible && !turnBusy && !operationBusy) void refreshStatus(); }, 15_000);
@@ -1406,7 +1473,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   return {
     setVisible(next: boolean): void {
       visible = next;
-      if (!visible) { keyInput.value = ""; cancelCapture(); closeCamera(); stopPlayback(); clearReplayClips(); clearToken(); clearSamples(); wavDraft = null; renderDraft(); }
+      if (!visible) { keyInput.value = ""; cancelCapture(); closeCamera(); stopPlayback(); clearToken(); }
       else { void refreshStatus(); void refreshPermissions(); }
     },
     dispose(): void {

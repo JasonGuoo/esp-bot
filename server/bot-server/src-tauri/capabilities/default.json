@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "The console uses only registered application commands and events.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
 }

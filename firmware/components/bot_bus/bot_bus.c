@@ -19,6 +19,9 @@ static bool critical_event(const bot_event_t *event)
     /* Replaceable observations must not turn queue pressure into a fault. */
     if (event->kind == BOT_EVENT_DISPLAY_HEALTH && event->data.display.error == ESP_OK) return false;
     if (event->kind == BOT_EVENT_SOUND_ACTIVITY) return false;
+    if (event->kind == BOT_EVENT_PLAYBACK_PROGRESS ||
+        event->kind == BOT_EVENT_SOUND_PREVIEW || event->kind == BOT_EVENT_VOICE_SETTINGS)
+        return false;
     return true;
 }
 
@@ -119,6 +122,11 @@ bool bot_bus_receive(bot_bus_t *bus, bot_event_t *out)
     bus->stats.events_received++;
     portEXIT_CRITICAL(&bus->signal_lock);
     return true;
+}
+
+bool bot_bus_events_pending(bot_bus_t *bus)
+{
+    return bus && (uxQueueMessagesWaiting(bus->critical_events) || uxQueueMessagesWaiting(bus->events));
 }
 
 esp_err_t bot_bus_submit_command(bot_bus_t *bus, const bot_command_t *command,

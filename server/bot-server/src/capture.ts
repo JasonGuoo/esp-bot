@@ -4,6 +4,7 @@
  * https://developer.mozilla.org/en-US/docs/Web/API/OfflineAudioContext
  * https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia
  */
+import { invoke, isTauri } from "@tauri-apps/api/core";
 
 export type CapturedWav = { base64: string; seconds: number; bytes: number };
 type CaptureCallbacks = { progress: (seconds: number) => void; limit: () => void };
@@ -12,6 +13,17 @@ const OUTPUT_RATE = 16_000;
 const MAX_SECONDS = 30;
 const MAX_WAV_BYTES = 1_000_000;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+
+async function captureDeadline<T>(operation: Promise<T>, milliseconds: number, message: string): Promise<T> {
+  let timer: number | undefined;
+  try {
+    return await Promise.race([operation, new Promise<never>((_, reject) => {
+      timer = window.setTimeout(() => reject(new Error(message)), milliseconds);
+    })]);
+  } finally {
+    if (timer !== undefined) window.clearTimeout(timer);
+  }
+}
 
 export class PcmRecorder {
   private stream: MediaStream | null = null;
@@ -48,9 +60,20 @@ export class PcmRecorder {
     this.frames = 0;
     this.chunks = [];
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true }, video: false,
+      if (isTauri()) {
+        await invoke("request_microphone_access");
+        if (generation !== this.generation) throw new Error("capture_cancelled");
+      }
+      const opening = navigator.mediaDevices.getUserMedia({
+        // The console stops playback before recording a bounded utterance.
+        // Avoid WebKit's duplex VoiceProcessingIO path for this local input.
+        audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false }, video: false,
+      }).then((stream) => {
+        // A cancelled/timed-out system prompt can still resolve much later.
+        if (generation !== this.generation) stream.getTracks().forEach((track) => track.stop());
+        return stream;
       });
+      const stream = await captureDeadline(opening, 20_000, "麦克风未能及时打开，请检查系统录音权限后重试，或选择 WAV 文件。");
       if (generation !== this.generation) {
         stream.getTracks().forEach((track) => track.stop());
         throw new Error("capture_cancelled");
@@ -63,7 +86,8 @@ export class PcmRecorder {
       }
       // Force a separate asset: the app's script-src 'self' intentionally does
       // not allow Vite's default small-asset data: URL inlining.
-      await context.audioWorklet.addModule(new URL("./capture-worklet.js?no-inline", import.meta.url).href);
+      await captureDeadline(context.audioWorklet.addModule(new URL("./capture-worklet.js?no-inline", import.meta.url).href),
+        5_000, "录音模块未能启动，请重试或选择 WAV 文件。");
       if (generation !== this.generation) throw new Error("capture_cancelled");
       const node = new AudioWorkletNode(context, "xiaodai-pcm-capture", {
         numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
@@ -99,7 +123,7 @@ export class PcmRecorder {
       this.source.connect(node);
       node.connect(this.gain);
       this.gain.connect(context.destination);
-      await context.resume();
+      await captureDeadline(context.resume(), 5_000, "音频设备未能启动，请检查麦克风后重试。");
       if (generation !== this.generation) throw new Error("capture_cancelled");
       this.initializing = false;
       callbacks.progress(0);

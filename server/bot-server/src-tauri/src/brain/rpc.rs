@@ -49,12 +49,28 @@ impl BrainHost {
         let brain = self.get()?;
         match method {
             "models.status" => Ok(brain.models.health().await),
-            "models.unload" => { brain.models.stop().await; Ok(json!({"unloaded":true})) },
+            "models.unload" => {
+                brain.cancel_scoped(CancelScope::All,"models_unloaded").await?;
+                brain.models.stop().await; Ok(json!({"unloaded":true}))
+            },
             "assistant.turn" => value(brain.turn(parse(payload)?,true).await?),
-            "assistant.cancel" => { brain.cancel(payload.get("turn_id").and_then(Value::as_str)).await?; Ok(json!({"cancelled":true})) },
+            "assistant.cancel" => {
+                let scope = match payload.get("scope").and_then(Value::as_str) {
+                    Some("all") => CancelScope::All,
+                    Some("device_session") => {
+                        let id = required(&payload,"conversation_id")?;
+                        if !id.starts_with("device-") || !valid_turn_id(id) { return Err("device_session_id_invalid".into()); }
+                        CancelScope::DeviceSession(id.to_owned())
+                    },
+                    Some("turn") | None => CancelScope::Turn(required(&payload,"turn_id")?.to_owned()),
+                    _ => return Err("cancel_scope_invalid".into()),
+                };
+                brain.cancel_scoped(scope,"parent_stop").await?;
+                Ok(json!({"cancelled":true}))
+            },
             "identity.enroll" => brain.enroll_media(parse(payload)?).await,
             "identity.revoke" => {
-                brain.cancel(None).await?;
+                brain.cancel_scoped(CancelScope::All,"identity_revoked").await?;
                 let _gate = brain.turn_gate.lock().await;
                 brain.memory.revoke_enrollment(required(&payload,"profile_id")?,parse(payload.get("kind").cloned().ok_or("identity_kind_required")?)?)?;
                 Ok(json!({"revoked":true}))
@@ -82,7 +98,7 @@ impl BrainHost {
             "device.credentials.issue" => brain.credentials.issue(required(&payload,"device_id")?),
             "device.credentials.revoke" => {brain.credentials.revoke(required(&payload,"device_id")?)?;Ok(json!({"revoked":true}))},
             "conversation.forget" => {
-                brain.cancel(None).await?;
+                brain.cancel_scoped(CancelScope::All,"memory_changed").await?;
                 let _gate = brain.turn_gate.lock().await;
                 let id = required(&payload,"conversation_id")?;
                 brain.harness.forget_conversation(id).await?;
@@ -93,7 +109,7 @@ impl BrainHost {
             // Editing/revoking a note removes its old injected copies without
             // deleting local history, conversation ownership or extraction jobs.
             "memory.save" | "memory.delete" | "profile.delete" | "profile.update" | "memory.purge" => {
-                brain.cancel(None).await?;
+                brain.cancel_scoped(CancelScope::All,"memory_changed").await?;
                 let _gate = brain.turn_gate.lock().await;
                 brain.invalidate_contexts_locked().await?;
                 // Finish the short mutation while the turn gate is held.
@@ -116,7 +132,7 @@ impl BrainHost {
 
 impl Brain {
     async fn forget_all(&self) -> Result<(), String> {
-        self.cancel(None).await?;
+        self.cancel_scoped(CancelScope::All,"memory_changed").await?;
         let _gate = self.turn_gate.lock().await;
         self.invalidate_contexts_locked().await?;
         self.memory.forget_all_conversations(true)?;

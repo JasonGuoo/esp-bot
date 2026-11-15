@@ -239,10 +239,32 @@ impl UsbDebug {
             .map_err(|_|"USB 命令队列繁忙")?;
         Ok(json!({"queued":true}))
     }
-    fn snapshot(&self, after:u64) -> Result<Value,String> {
-        let state=self.state.lock().map_err(|_|"USB 状态不可用")?;
-        let mut value=serde_json::to_value(&*state).map_err(|e|e.to_string())?;
-        value["events"]=serde_json::to_value(state.events.iter().filter(|e|e.id>after).collect::<Vec<_>>()).unwrap_or_default();
+    fn snapshot(&self, after:u64, screen_after:u64, camera_after:u64, frames:bool) -> Result<Value,String> {
+        let (mut value, screen, camera, events, crash) = {
+            let state=self.state.lock().map_err(|_|"USB 状态不可用")?;
+            let value=json!({"requested":state.requested,"connected":state.connected,
+                "preview":state.preview,"camera_requested":state.camera_requested,
+                "port":state.port,"error":state.error,"camera_orientation":state.camera_orientation,
+                "invalid_packets":state.invalid_packets,"received_frames":state.received_frames,
+                "lcd_underruns":state.lcd_underruns});
+            let delta = |frame:Option<&Frame>,seen:u64| -> Option<Option<Frame>> {
+                if !frames { return None; }
+                match frame {
+                    None => Some(None),
+                    Some(frame) if frame.received_ms == seen => None,
+                    Some(frame) => Some(Some(Frame {source:frame.source,width:frame.width,height:frame.height,
+                        sequence:frame.sequence,device_ms:frame.device_ms,received_ms:frame.received_ms,
+                        data_url:frame.data_url.clone(),bytes:Vec::new()})),
+                }
+            };
+            (value, delta(state.screen.as_ref(),screen_after), delta(state.camera.as_ref(),camera_after),
+                state.events.iter().filter(|event|event.id>after).cloned().collect::<Vec<_>>(),
+                state.last_crash.back().filter(|event|event.id>after).map(|_|state.last_crash.clone()))
+        }; // Serial reader lock released before any image/event serialization.
+        if let Some(screen)=screen { value["screen"]=serde_json::to_value(screen).map_err(|_|"USB 画面编码失败")?; }
+        if let Some(camera)=camera { value["camera"]=serde_json::to_value(camera).map_err(|_|"USB 画面编码失败")?; }
+        value["events"]=serde_json::to_value(events).map_err(|_|"USB 事件编码失败")?;
+        if let Some(crash)=crash { value["last_crash"]=serde_json::to_value(crash).map_err(|_|"USB 事件编码失败")?; }
         Ok(value)
     }
     fn export(&self, source:&str) -> Result<Value,String> {
@@ -378,7 +400,9 @@ impl Parser {
 }
 
 #[tauri::command]
-pub fn usb_debug_request(hub:tauri::State<'_,Arc<UsbDebug>>,method:String,payload:Option<Value>)->Result<Value,String>{
+pub async fn usb_debug_request(hub:tauri::State<'_,Arc<UsbDebug>>,method:String,payload:Option<Value>)->Result<Value,String>{
+    let hub=Arc::clone(hub.inner());
+    tokio::task::spawn_blocking(move || {
     let mut payload=payload.unwrap_or_default();
     match method.as_str(){
         "ports"=>Ok(json!(ports())),
@@ -392,11 +416,14 @@ pub fn usb_debug_request(hub:tauri::State<'_,Arc<UsbDebug>>,method:String,payloa
             });
             hub.provision_wifi(payload["ssid"].as_str().ok_or("缺少网络名称")?,password.as_str())
         },
-        "state"=>hub.snapshot(payload["after"].as_u64().unwrap_or(0)),
+        "state"=>hub.snapshot(payload["after"].as_u64().unwrap_or(0),
+            payload["screen_after"].as_u64().unwrap_or(0),payload["camera_after"].as_u64().unwrap_or(0),
+            payload["frames"].as_bool().unwrap_or(true)),
         "export"=>hub.export(payload["source"].as_str().ok_or("缺少画面类型")?),
         "export_events"=>hub.export_events(),
         _=>Err("不支持的 USB 调试操作".into()),
     }
+    }).await.map_err(|_|"USB 调试任务未完成".to_owned())?
 }
 
 #[cfg(test)]

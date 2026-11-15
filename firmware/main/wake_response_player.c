@@ -21,6 +21,7 @@ struct bot_response_player {
     bot_audio_t *audio;
     QueueHandle_t jobs;
     atomic_uint generation;
+    atomic_uint stack_free;
 };
 
 static const char *TAG = "wake_response";
@@ -112,7 +113,10 @@ static void worker(void *context)
 {
     bot_response_player_t *player = context;
     response_job_t job;
-    for (;;) if (xQueueReceive(player->jobs, &job, portMAX_DELAY) == pdTRUE) play(player, &job);
+    for (;;) if (xQueueReceive(player->jobs, &job, portMAX_DELAY) == pdTRUE) {
+        play(player, &job);
+        atomic_store(&player->stack_free, uxTaskGetStackHighWaterMark(NULL));
+    }
 }
 
 esp_err_t bot_response_player_create(bot_bus_t *bus, bot_audio_t *audio,
@@ -125,6 +129,7 @@ esp_err_t bot_response_player_create(bot_bus_t *bus, bot_audio_t *audio,
     player->bus = bus;
     player->audio = audio;
     atomic_init(&player->generation, 1);
+    atomic_init(&player->stack_free, 0);
     player->jobs = xQueueCreate(1, sizeof(response_job_t));
     if (!player->jobs) { free(player); return ESP_ERR_NO_MEM; }
     if (xTaskCreate(worker, "wake_reply", 4096, player, 4, NULL) != pdPASS) {
@@ -163,4 +168,9 @@ void bot_response_player_cancel(bot_response_player_t *player)
     if (!player) return;
     atomic_fetch_add(&player->generation, 1);
     (void)bot_audio_playback_cancel(player->audio, 0);
+}
+
+uint32_t bot_response_player_stack_free(const bot_response_player_t *player)
+{
+    return player ? atomic_load(&player->stack_free) : 0;
 }

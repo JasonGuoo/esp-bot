@@ -14,7 +14,7 @@ firmware/idf.sh                 为本项目配置环境并调用 idf.py
 本机 Python 安装。系统更新或迁移后应重新检查工具链，而不是假设还能运行。
 新机器可在上述目录取得同版本官方 SDK（包含子模块），设置 `IDF_TOOLS_PATH`
 后运行其 `install.sh esp32s31`。实际依赖版本由组件管理器决定；
-`firmware/dependencies.lock` 是本地生成文件，不应误认为已在 Git 中固定。
+`firmware/dependencies.lock` 已取消忽略并纳入本次源码交付，用于固定实际解析的 S31 组件版本；升级依赖时应一并审阅它的差异。
 
 **2026-11-13 唤醒更新：** 拉取后先按 [wake-test.md](wake-test.md) 准备已有
 `sdkconfig`，再执行构建；这一次还需要备份并更新 `model` 分区。104 条本地应答

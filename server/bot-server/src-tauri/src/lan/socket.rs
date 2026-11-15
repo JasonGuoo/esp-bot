@@ -1,5 +1,6 @@
 use std::{
     net::{IpAddr, SocketAddr},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -38,8 +39,11 @@ pub async fn upgrade(
     if !is_local_peer(addr.ip()) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let Ok(permit) = Arc::clone(&state.capacity).try_acquire_owned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     ws.max_message_size(MAX_TEXT_BYTES)
-        .on_upgrade(move |socket| session(socket, state, addr))
+        .on_upgrade(move |socket| async move { let _permit = permit; session(socket, state, addr).await; })
         .into_response()
 }
 
@@ -86,11 +90,8 @@ async fn session(mut socket: WebSocket, ctx: RouteState, peer: SocketAddr) {
     if socket.send(Message::Text(welcome(&ctx.server_id).into())).await.is_err() {
         return;
     }
-    // Register the outbound sender before announcing the bot so a command
-    // triggered by the bot_connected event can never race a missing channel.
-    let (out_tx, mut out_rx) = ctx.hub.create_outbound();
-    ctx.hub.register_session(&device_id, &session_id, out_tx);
-    ctx.state.connected(
+    // A self-claimed ID cannot replace an already connected diagnostic peer.
+    if !ctx.state.connected(
         Bot {
             device_id: device_id.clone(),
             name: hello.name,
@@ -98,7 +99,13 @@ async fn session(mut socket: WebSocket, ctx: RouteState, peer: SocketAddr) {
             connected_at_ms: now_ms(),
         },
         session_id.clone(),
-    );
+    ) {
+        let _ = socket.send(Message::Close(Some(CloseFrame {code:4009,reason:"device_already_connected".into()}))).await;
+        return;
+    }
+    // Register before announcing the bot to the console/command hub.
+    let (out_tx, mut out_rx) = ctx.hub.create_outbound();
+    ctx.hub.register_session(&device_id, &session_id, out_tx);
     (ctx.sink)(LanEvent::new("bot_connected", Some(&device_id), &peer.to_string(), None));
 
     let mut ticker = interval(Duration::from_secs(25));

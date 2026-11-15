@@ -9,6 +9,7 @@ struct bot_bus {
     bot_event_t event;
     bot_command_t command;
     vatt_snapshot_t vision;
+    bot_bus_signals_t signals;
 };
 
 bool bot_bus_receive(bot_bus_t *bus, bot_event_t *event)
@@ -25,10 +26,12 @@ bool bot_bus_receive_command(bot_bus_t *bus, bot_command_t *command)
     bus->has_command = false;
     return true;
 }
+bool bot_bus_events_pending(bot_bus_t *bus) { return bus->has_event; }
 bot_bus_signals_t bot_bus_take_signals(bot_bus_t *bus)
 {
-    (void)bus;
-    return (bot_bus_signals_t){0};
+    bot_bus_signals_t signals = bus->signals;
+    bus->signals = (bot_bus_signals_t){0};
+    return signals;
 }
 bool bot_bus_read_vision(bot_bus_t *bus, vatt_snapshot_t *vision)
 {
@@ -616,6 +619,87 @@ static void test_spoken_result_hardware_order(bool hardware_first)
     bot_runtime_destroy(runtime);
 }
 
+static void test_delayed_state_and_sealed_capture(void)
+{
+    bot_bus_t bus = {0};
+    bot_runtime_t *runtime = NULL;
+    bot_runtime_config_t config = bot_runtime_default_config();
+    config.allow_audio_uplink = true;
+    config.waking_ms = 10;
+    assert(bot_runtime_create(&bus, &config, NULL, NULL, 1000, &runtime) == ESP_OK);
+    /* Producers ran before the owner started. A health fact is still valid. */
+    bus.event = (bot_event_t){.kind=BOT_EVENT_AUDIO_HEALTH,.source=BOT_SOURCE_AUDIO,
+        .observed_ms=1001,.data.health={.available=true}};
+    bus.has_event = true;
+    bot_runtime_step(runtime, 5000);
+    bot_runtime_snapshot_t state;
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(state.audio_available);
+    bus.event = (bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,.source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1002,.data.touch={.intentional=true}};
+    bus.has_event = true;
+    bot_runtime_step(runtime,5001);
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(state.token.session_id == 0); /* an old wake edge is not replayed */
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_LINK_STATE,.source=BOT_SOURCE_LINK,
+        .observed_ms=5010,.data.link={true,true,true}});
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,.source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=5020,.data.touch={.intentional=true}});
+    bot_runtime_step(runtime,5040);
+    bot_runtime_get_snapshot(runtime,&state);
+    const bot_session_token_t token=state.token;
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_UTTERANCE_STARTED,.source=BOT_SOURCE_AUDIO,
+        .observed_ms=5050,.token=token});
+    /* Sealing can be queued while a resumed START was already accepted. */
+    bus.event=(bot_event_t){.kind=BOT_EVENT_TURN_SUBMITTED,.source=BOT_SOURCE_LINK,
+        .observed_ms=5060,.token=token};bus.has_event=true;
+    bot_runtime_step(runtime,8000);
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(state.conversation==BOT_CONVERSATION_SUBMITTED && !state.utterance_active);
+    assert(!state.audio_uplink_permitted && state.token.epoch==token.epoch);
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_UTTERANCE_STARTED,.source=BOT_SOURCE_AUDIO,
+        .observed_ms=8010,.token=token});
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_CAPTURE_OVERFLOW,.source=BOT_SOURCE_AUDIO,
+        .observed_ms=8020,.token=token});
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(state.conversation==BOT_CONVERSATION_SUBMITTED && state.token.epoch==token.epoch);
+    assert(!state.utterance_active && !state.audio_uplink_permitted);
+    bus.command=(bot_command_t){.kind=BOT_COMMAND_THINKING,.token=token,.received_ms=8030};
+    bus.has_command=true;bot_runtime_step(runtime,8030);
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(state.conversation==BOT_CONVERSATION_THINKING && !state.audio_uplink_permitted);
+    /* State remains ordered even when its predecessor is older than 2 s. */
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_CAMERA_HEALTH,.source=BOT_SOURCE_VISION,
+        .observed_ms=8040,.data.health={.available=false}});
+    bus.event=(bot_event_t){.kind=BOT_EVENT_CAMERA_HEALTH,.source=BOT_SOURCE_VISION,
+        .observed_ms=7000,.data.health={.available=true}};bus.has_event=true;
+    bot_runtime_step(runtime,11000);
+    bot_runtime_get_snapshot(runtime,&state);assert(!state.camera_available);
+    bot_runtime_destroy(runtime);
+}
+
+static void test_overflow_recovery_does_not_restore_authority(void)
+{
+    bot_bus_t bus={0};bot_runtime_t *runtime=NULL;bot_runtime_snapshot_t state;
+    assert(bot_runtime_create(&bus,NULL,NULL,NULL,1000,&runtime)==ESP_OK);
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,.source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1010,.data.touch={.intentional=true}});
+    bot_runtime_get_snapshot(runtime,&state);bot_session_token_t old=state.token;
+    bus.signals=(bot_bus_signals_t){.critical_overflow=true,.observed_ms=1020};
+    bot_runtime_step(runtime,1020);bot_runtime_get_snapshot(runtime,&state);
+    assert(state.critical_fault && state.fault_recoverable && !state.audio_session_requested);
+    bus.signals=(bot_bus_signals_t){.local_stop=true,.observed_ms=1030};
+    bot_runtime_step(runtime,1030);bot_runtime_get_snapshot(runtime,&state);
+    assert(!state.critical_fault && !state.token.session_id && state.token.epoch>old.epoch);
+    assert(!state.audio_session_requested && state.behavior==BOT_BEHAVIOR_IDLE);
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_FAULT,.source=BOT_SOURCE_SYSTEM,
+        .observed_ms=1040,.data.fault={.code=1}});
+    bus.signals=(bot_bus_signals_t){.local_stop=true,.observed_ms=1050};
+    bot_runtime_step(runtime,1050);bot_runtime_get_snapshot(runtime,&state);
+    assert(state.critical_fault && !state.fault_recoverable);
+    bot_runtime_destroy(runtime);
+}
+
 int main(void)
 {
     bot_bus_t bus = {0};
@@ -696,5 +780,7 @@ int main(void)
     test_sound_preview_and_offline_commands();
     test_spoken_result_hardware_order(false);
     test_spoken_result_hardware_order(true);
+    test_delayed_state_and_sealed_capture();
+    test_overflow_recovery_does_not_restore_authority();
     return 0;
 }

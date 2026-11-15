@@ -32,7 +32,7 @@ const char *event_name(unsigned kind) {
         "playback.done", "playback.failed", "link.state", "audio.health", "camera.health",
         "display.health", "wake.status", "night.policy", "session.end", "fault", "sound.activity",
         "result.dismissed", "local.response.failed", "voice.settings", "sound.preview",
-        "capture.ready", "local.command", "capture.overflow", "playback.progress"};
+        "capture.ready", "local.command", "capture.overflow", "playback.progress", "turn.submitted"};
     static_assert(sizeof(names) / sizeof(names[0]) == BOT_EVENT_COUNT);
     return kind < BOT_EVENT_COUNT ? names[kind] : "unknown";
 }
@@ -185,6 +185,9 @@ void worker(void *) {
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr),
                 heap_caps_check_integrity(MALLOC_CAP_INTERNAL, true));
+            ESP_LOGI("bot_debug", "psram_free=%u psram_largest=%u",
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
             next_health = esp_timer_get_time() + 15000000;
         }
         Event event;

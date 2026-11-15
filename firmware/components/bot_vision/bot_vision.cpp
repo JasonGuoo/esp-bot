@@ -46,7 +46,10 @@
 #endif
 
 static const char *TAG = "bot_vision";
-static constexpr unsigned BUFFER_COUNT = 3;
+// Official V4L2 capture needs two queued DMA frames. Inference uses our owned
+// packed copy after requeueing, so a third 640x480 frame only consumes PSRAM
+// needed by the concurrently resident MultiNet model and DVP backup frame.
+static constexpr unsigned BUFFER_COUNT = 2;
 static constexpr size_t DEVICE_PATH_CAP = 48;
 static std::atomic_flag s_claimed = ATOMIC_FLAG_INIT;
 
@@ -590,7 +593,12 @@ static void vision_task(void *arg)
     bool paused_reported = false;
     bool recovering = false;
     unsigned consecutive_timeouts = 0;
+    int64_t last_stack_sample_us = 0;
     for (;;) {
+        if (esp_timer_get_time() - last_stack_sample_us >= 5000000) {
+            last_stack_sample_us = esp_timer_get_time();
+            v->working.stack_free = uxTaskGetStackHighWaterMark(nullptr);
+        }
         if (!wants_capture(v)) {
             const esp_err_t closed = close_stream(v);
             if (closed != ESP_OK) {

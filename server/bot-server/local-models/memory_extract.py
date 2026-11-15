@@ -3,13 +3,14 @@
 import json
 import os
 import sys
+import time
 
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
-def main():
+def main(protocol):
     if len(sys.argv) != 2 or not os.path.isdir(sys.argv[1]):
         raise ValueError("local_memory_model_missing")
     job = json.loads(sys.stdin.readline(20000))
@@ -42,8 +43,22 @@ def main():
         parsed = {"facts": parsed}
     if not isinstance(parsed, dict) or not isinstance(parsed.get("facts"), list):
         raise ValueError("invalid_extraction")
-    print(json.dumps({"facts": parsed["facts"][:5]}, ensure_ascii=False), flush=True)
+    print(json.dumps({"facts": parsed["facts"][:5]}, ensure_ascii=False), file=protocol, flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    # Model libraries and tracebacks can contain the user's statement. Keep
+    # the JSON protocol separate and emit only code-owned diagnostics.
+    protocol = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8", buffering=1)
+    diagnostics = os.fdopen(os.dup(sys.stderr.fileno()), "w", encoding="utf-8", buffering=1)
+    null_fd = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(null_fd, sys.stdout.fileno())
+    os.dup2(null_fd, sys.stderr.fileno())
+    os.close(null_fd)
+    started = time.monotonic()
+    try:
+        main(protocol)
+    except Exception as exc:
+        diagnostics.write(f"memory-extract result=extraction_failed type={type(exc).__name__}\n")
+        sys.exit(1)
+    diagnostics.write(f"memory-extract result=ok elapsed_ms={round((time.monotonic() - started) * 1000)}\n")

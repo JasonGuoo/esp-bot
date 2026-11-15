@@ -25,7 +25,12 @@ impl AttemptFailure {
     }
 
     fn api(error: ApiError, route: &ModelRoute, observed_output: bool) -> Self {
-        if error.status.is_none() { return Self::transport(error.detail); }
+        if error.status.is_none() {
+            // A failed connect never admitted this request. Other transport
+            // failures keep the conservative uncertain-execution barrier.
+            return Self { error:Failure::transport(error.detail), observed_output: observed_output ||
+                error.detail != "connection failed before request admission" };
+        }
         Self { error: classify(&error.body, route, error.status), observed_output }
     }
 }

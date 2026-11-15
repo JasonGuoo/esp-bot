@@ -111,6 +111,30 @@ static bool valid_device_id(const char *id, size_t capacity) {
     return true;
 }
 
+/* cJSON's recursive parser otherwise accepts up to 1000 levels. This runs on
+ * the small WebSocket callback stack, before parsing even a welcome message.
+ * Brackets inside strings (including escaped quotes) do not affect depth. */
+static bool bounded_json_depth(const char *input, size_t length) {
+    unsigned depth = 0;
+    bool quoted = false, escaped = false;
+    for (size_t i = 0; i < length; ++i) {
+        const char c = input[i];
+        if (!c) return false;
+        if (quoted) {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') quoted = false;
+        } else if (c == '"') quoted = true;
+        else if (c == '{' || c == '[') {
+            if (++depth > 8) return false;
+        } else if (c == '}' || c == ']') {
+            if (!depth) return false;
+            --depth;
+        }
+    }
+    return !quoted && depth == 0;
+}
+
 static void websocket_event(void *handler_args, esp_event_base_t base,
                             int32_t event_id, void *event_data) {
     (void)handler_args;
@@ -153,6 +177,7 @@ static void websocket_event(void *handler_args, esp_event_base_t base,
     char input[BOT_LAN_MAX_EVENT_JSON + 1];
     memcpy(input, data->data_ptr, (size_t)data->data_len);
     input[data->data_len] = '\0';
+    if (!bounded_json_depth(input, (size_t)data->data_len)) return;
     cJSON *root = cJSON_ParseWithLengthOpts(input, (size_t)data->data_len + 1, NULL, true);
     if (!root || !cJSON_IsObject(root)) {
         cJSON_Delete(root);

@@ -1,5 +1,7 @@
 # Lively companion behavior, daytime naps and night mode — 小呆
 
+**2026-11-15 real-room check: NOT PASSED.** After the user announced lights-off, the 21:18–21:28 observation still reported IDLE and non-black frames. Valid camera luma was 38–107 (median 78), above the provisional entry threshold. The 22:30 scheduled transition was outside this observation. See [the measured result and serial-reset limitation](night-light-check-2026-11-15.md); source policy and simulated tests are not real-room acceptance.
+
 **Updated user direction, 2026-11-08:** lively when it is light, occasionally drowsy and then awake again; rest at night or after the room stays dark. It never starts a conversation merely because a face, gaze, sound or brighter room is detected. Full **小呆小呆** and deliberate touch/manual input remain the interaction triggers.
 
 **Authority:** bot_runtime/behavior_policy owns transitions. audio owns continuous keyword recognition; face owns animation; bot_platform owns display sleep and camera power; attention_manager may choose a target only under runtime policy. Full wake phrase requirements: [wake-word.md](wake-word.md).

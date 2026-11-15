@@ -81,7 +81,7 @@ impl ModelWorker {
             .env("TOKENIZERS_PARALLELISM", "false")
             .env("TMPDIR", temp_dir).env("XDG_CACHE_HOME", &cache_dir)
             .env("HF_HOME", cache_dir.join("huggingface"))
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
             .kill_on_drop(true);
         for (flag, path) in [("--rma-qwen-python", &self.config.rma_qwen_python),
             ("--rma-qwen-worker", &self.config.rma_qwen_worker), ("--rma-qwen-model", &self.config.rma_qwen_model)] {
@@ -91,6 +91,7 @@ impl ModelWorker {
         #[cfg(unix)]
         command.process_group(0);
         let mut child = command.spawn().map_err(|e| format!("local_worker_start_failed: {e}"))?;
+        crate::diagnostics::capture_stderr(child.stderr.take(), "local_models");
         let input = child.stdin.take().ok_or("local_worker_stdin_missing")?;
         let output = BufReader::new(child.stdout.take().ok_or("local_worker_stdout_missing")?);
         Ok(Process { child, input, output })

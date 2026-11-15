@@ -1,5 +1,7 @@
 # 小呆 Bot Server — Mac 控制台
 
+当前验证状态见 [2026-11-15 本机与 S31 验收](../../docs/review-acceptance-2026-11-15.md)，接续 [Review 源码修正](../../docs/review-fixes-2026-11-14.md)。已执行本机测试、签名 release 打包及真实语音链路检查；未运行 CI。Mac 直接录音的系统授权限制另列。普通设置保存不再自动停止服务；显式重载后手动启动生效。
+
 Rust + Tauri 2 桌面应用，当前唯一对话入口为“小呆”。
 界面提供固定的八个功能入口：对话、家庭成员、记忆库、模型与密钥、本地能力、工具与授权、设备连接、运行设置。
 功能清单、交互结构和验收范围见 [控制台设计说明](../../docs/mac-console-design.md)。
@@ -58,8 +60,7 @@ OpenCode 使用官方 v2.2.5 或兼容的后续 v2。此次本机安装位于被
 - `local-models`：本地 ASR、身份与系统 TTS worker。
 
 已删除旧 Chat、Provider、Events、Mock 预览和相关原型适配代码；不再读取旧 `config.json`。
-当前固件仍使用 LAN v1 发现和诊断连接，所以默认构建启用 `lan-diagnostics`。**设备连接** 显示真实在线设备及稳定服务器 ID；它不传输私密媒体，也不恢复原型 Chat 或手动 face 命令。
-当前设备接入使用 WSS v3 设计，固件客户端和 BLE 仍待集成，未声称硬件端到端通过。
+Mac 暂保留默认构建特性 `lan-diagnostics`，旧诊断服务只显示状态，不传私密媒体。新固件默认不启动 LAN v1，开发时可用 `CONFIG_ESPBOT_LAN_DIAGNOSTICS` 显式开启；配对 Mac 发现及设备会话走已有认证 WSS v3。BLE 仍待集成，实板结果与本轮尚未验证的源码分开记录，见上方状态入口。
 
 详细设置与实际验收范围见 [Mac 控制台](../../docs/mac-console.md)、
 [Mac 大脑](../../docs/mac-bot-server.md)、[OpenCode](../../docs/mac-opencode.md)、

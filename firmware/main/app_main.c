@@ -31,9 +31,13 @@
 #endif
 #include "head_motion.h"
 #include "night_schedule.h"
+#include "preferences_worker.h"
 #include "wake_response_player.h"
 
 static const char *TAG = "xiaodai";
+#if CONFIG_ESPBOT_USB_DEBUG_PREVIEW
+typedef struct { uint16_t x, y; } debug_touch_point_t;
+#endif
 typedef struct {
     bot_platform_t *platform;
     bot_bus_t *bus;
@@ -52,6 +56,8 @@ typedef struct {
     idle_attention_t idle_attention;
     bot_runtime_snapshot_t desired;
     bot_voice_settings_t voice_persist_attempt;
+    bot_preferences_request_t preferences;
+    bot_preferences_result_t persisted;
     bot_voice_diagnostics_t voice_diagnostics;
     uint32_t last_voice_diagnostic_ms;
     bool voice_preview_reported;
@@ -64,6 +70,10 @@ typedef struct {
     QueueHandle_t debug_face_queue;
     QueueHandle_t debug_orientation_queue;
     QueueHandle_t debug_light_queue;
+    QueueHandle_t debug_touch_queue;
+    debug_touch_point_t debug_touch_point;
+    uint32_t debug_touch_release_ms;
+    bool debug_touch_pressed;
     bool debug_camera_wanted;
     uint32_t debug_eye_until_ms;
     int debug_eye_x;
@@ -82,7 +92,7 @@ typedef struct {
     bool near_face_reported, last_near_face;
     bool night_sent, last_night, last_clock_valid;
     uint8_t last_local_hour;
-    uint32_t last_clock_poll_ms, last_diagnostic_ms, last_light_poll_ms;
+    uint32_t last_clock_poll_ms, last_diagnostic_ms, last_light_poll_ms, last_audio_retry_ms;
     char rendered_caption[BOT_CAPTION_MAX_BYTES + 1];
     char rendered_expression[BOT_EXPRESSION_MAX_BYTES + 1];
 } app_t;
@@ -295,6 +305,28 @@ static void touch_wake(void *context) {
         .observed_ms = bot_platform_now_ms(), .data.touch.intentional = true };
     post(app, &event);
 }
+#if CONFIG_ESPBOT_USB_DEBUG_PREVIEW
+/* Official LVGL pointer input path, restricted to an explicit physical USB
+ * preview lease. It exercises the actual widgets and their normal runtime
+ * callbacks; no settings/session authority is granted to the adapter. */
+static void debug_touch_read(lv_indev_t *indev, lv_indev_data_t *data) {
+    app_t *app = lv_indev_get_user_data(indev);
+    const uint32_t now = bot_platform_now_ms();
+    if (!bot_debug_preview_enabled()) {
+        app->debug_touch_pressed = false;
+        xQueueReset(app->debug_touch_queue);
+    } else if (app->debug_touch_pressed) {
+        if ((int32_t)(now - app->debug_touch_release_ms) >= 0)
+            app->debug_touch_pressed = false;
+    } else if (xQueueReceive(app->debug_touch_queue, &app->debug_touch_point, 0) == pdTRUE) {
+        app->debug_touch_pressed = true;
+        app->debug_touch_release_ms = now + 120;
+    }
+    data->point.x = app->debug_touch_point.x;
+    data->point.y = app->debug_touch_point.y;
+    data->state = app->debug_touch_pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+}
+#endif
 #if CONFIG_ESPBOT_USB_MANUAL_CONTROL
 /* Physical USB input is an explicit manual action. Keep it on the same bus
  * and policy path as touch; it cannot bypass runtime permissions or stop. */
@@ -356,6 +388,19 @@ static void usb_manual_task(void *context) {
                     bot_debug_set_preview(false);
                 } else if (strcmp(command, "preview ping") == 0) {
                     bot_debug_keepalive();
+                } else if (strncmp(command, "touch ", 6) == 0) {
+                    char *end = NULL;
+                    const char *arg = command + 6;
+                    const long x = strtol(arg, &end, 10);
+                    const bool have_x = end != arg && *end == ' ';
+                    const char *second = end;
+                    const long y = strtol(second, &end, 10);
+                    if (have_x && end != second && *end == '\0' &&
+                        x >= 0 && x < 800 && y >= 0 && y < 480 &&
+                        bot_debug_preview_enabled() && app->debug_touch_queue) {
+                        const debug_touch_point_t point = { (uint16_t)x, (uint16_t)y };
+                        xQueueOverwrite(app->debug_touch_queue, &point);
+                    } else ESP_LOGW(TAG, "Touch test rejected: invalid point or preview inactive");
                 } else if (strcmp(command, "screen frame") == 0 || strcmp(command, "screen snap") == 0) {
                     if (bot_debug_preview_enabled()) bot_debug_set_screen_snapshot(strcmp(command, "screen snap") == 0);
                     else ESP_LOGW(TAG, "Screen test rejected: USB preview is inactive");
@@ -444,7 +489,7 @@ static bool sound_preview_request(void *context) {
 }
 static bool set_voice_theme(void *context, const char *theme) {
     app_t *app = context;
-    if (!app->face || !bot_platform_display_lock(0)) return false;
+    if (!app->face || !bot_platform_display_lock(5)) return false;
     bool applied = face_set_theme(app->face, theme);
     bot_platform_display_unlock();
     if (applied) theme_applied(theme, app);
@@ -570,14 +615,47 @@ static attention_output_t update_gaze(app_t *app, uint32_t now_ms) {
 static uint32_t bounded_counter(uint64_t value) {
     return value > UINT32_MAX ? UINT32_MAX : (uint32_t)value;
 }
+static void queue_preferences(app_t *app) {
+    if (!bot_preferences_submit(&app->preferences))
+        ESP_LOGW(TAG, "Preferences worker unavailable; change remains unsaved");
+}
+
+static uint32_t next_preference_revision(uint32_t revision) {
+    return revision == UINT32_MAX ? 1 : revision + 1;
+}
+
+static void poll_preferences(app_t *app) {
+    bot_preferences_result_t result;
+    if (!bot_preferences_take_result(&result)) return;
+    if (result.voice_revision != app->persisted.voice_revision &&
+        result.voice_revision == app->preferences.voice_revision) {
+        snprintf(app->voice_notice, sizeof(app->voice_notice), "%s", result.voice_error == ESP_OK ?
+                 "声音设置已保存" : "本次已应用，未保存；下次修改时重试");
+        if (result.voice_error != ESP_OK)
+            ESP_LOGW(TAG, "Voice settings persistence: %s", esp_err_to_name(result.voice_error));
+    }
+    if (result.theme_revision != app->persisted.theme_revision && result.theme_error != ESP_OK)
+        ESP_LOGW(TAG, "Appearance persistence: %s", esp_err_to_name(result.theme_error));
+    if (result.orientation_revision != app->persisted.orientation_revision &&
+        result.orientation_revision == app->preferences.orientation_revision) {
+        if (result.orientation_error == ESP_OK) {
+            app->camera_orientation = app->preferences.orientation;
+            esp_err_t changed = app->vision ? bot_vision_set_sensor_orientation(app->vision, app->camera_orientation) : ESP_ERR_INVALID_STATE;
+            ESP_LOGI(TAG, "Camera orientation current=%u saved=1", (unsigned)app->camera_orientation);
+            if (changed != ESP_OK) ESP_LOGW(TAG, "Camera orientation saved; application pending: %s", esp_err_to_name(changed));
+        } else ESP_LOGW(TAG, "Camera orientation not saved or changed: %s", esp_err_to_name(result.orientation_error));
+    }
+    app->persisted = result;
+}
+
 static void reconcile_voice(app_t *app, uint32_t now_ms) {
     const bot_runtime_snapshot_t *s = &app->desired;
     if (!bot_voice_settings_equal(&s->voice_settings, &app->voice_persist_attempt)) {
-        esp_err_t saved = bot_platform_save_voice_settings(app->platform, &s->voice_settings);
+        app->preferences.voice = s->voice_settings;
+        app->preferences.voice_revision = next_preference_revision(app->preferences.voice_revision);
         app->voice_persist_attempt = s->voice_settings; /* retry on next deliberate edit */
-        snprintf(app->voice_notice, sizeof(app->voice_notice), "%s", saved == ESP_OK ?
-                 "声音设置已保存" : "本次已应用，未保存；下次修改时重试");
-        if (saved != ESP_OK) ESP_LOGW(TAG, "Voice settings persistence: %s", esp_err_to_name(saved));
+        snprintf(app->voice_notice, sizeof(app->voice_notice), "%s", bot_preferences_submit(&app->preferences) ?
+                 "正在保存声音设置" : "本次已应用，未保存；下次修改时重试");
     }
     if (app->voice_preview_reported != s->sound_preview_active) {
         app->voice_preview_reported = s->sound_preview_active;
@@ -588,6 +666,37 @@ static void reconcile_voice(app_t *app, uint32_t now_ms) {
     app->last_voice_diagnostic_ms = now_ms;
     bot_audio_status_t audio = {0};
     if (app->audio) bot_audio_get_status(app->audio, &audio);
+    const bool mic_available = audio.capture_running && audio.capture_healthy;
+    if (mic_available != s->audio_available) {
+        const bot_event_t health = {.kind=BOT_EVENT_AUDIO_HEALTH,.source=BOT_SOURCE_AUDIO,
+            .observed_ms=now_ms,.data.health={.available=mic_available,.error=audio.last_error}};
+        post(app,&health);
+    }
+    const bot_wake_status_t wake = !mic_available ? BOT_WAKE_UNAVAILABLE :
+        audio.wake_status == BOT_AUDIO_WAKE_READY ? BOT_WAKE_READY :
+        audio.wake_status == BOT_AUDIO_WAKE_MODEL_MISSING ? BOT_WAKE_MODEL_MISSING : BOT_WAKE_UNAVAILABLE;
+    if (wake != s->wake_status) {
+        const bot_event_t status = {.kind=BOT_EVENT_WAKE_STATUS,.source=BOT_SOURCE_AUDIO,
+            .observed_ms=now_ms,.data.wake_status={.status=wake}};
+        post(app,&status);
+    }
+    /* A queue overflow can lose a change-only health event. Re-read the owner
+     * after recovery rather than restoring a session or guessing audio health. */
+    if (app->vision) {
+        bot_vision_status_t vision;
+        bot_vision_get_status(app->vision,&vision);
+        const bool available = vision.stream_active && vision.observation_valid;
+        if (available != s->camera_available) {
+            const bot_event_t health = {.kind=BOT_EVENT_CAMERA_HEALTH,.source=BOT_SOURCE_VISION,
+                .observed_ms=now_ms,.data.health={.available=available,.error=vision.error}};
+            post(app,&health);
+        }
+    }
+    if (app->audio && audio.capture_running && !audio.afe_running && !s->audio_session_requested &&
+        !s->sound_preview_active && (uint32_t)(now_ms - app->last_audio_retry_ms) >= 30000) {
+        app->last_audio_retry_ms = now_ms;
+        if (bot_audio_retry_afe(app->audio) == ESP_OK) ESP_LOGI(TAG, "Requested slow AFE recovery");
+    }
     app->voice_diagnostics = (bot_voice_diagnostics_t){
         .mic_available = s->audio_available && audio.capture_running,
         .model_ready = audio.wake_status == BOT_AUDIO_WAKE_READY,
@@ -613,6 +722,7 @@ static void reconcile_voice(app_t *app, uint32_t now_ms) {
 
 static void reconcile(app_t *app, uint32_t now_ms) {
     bot_runtime_snapshot_t *s = &app->desired;
+    poll_preferences(app);
     reconcile_voice(app, now_ms);
     apply_audio_session(app, s);
     bool camera_requested = s->camera_requested;
@@ -622,13 +732,9 @@ static void reconcile(app_t *app, uint32_t now_ms) {
         if (orientation_command == 4) {
             ESP_LOGI(TAG, "Camera orientation current=%u", (unsigned)app->camera_orientation);
         } else {
-            esp_err_t saved = bot_platform_save_camera_orientation(app->platform, (uint8_t)orientation_command);
-            if (saved == ESP_OK) {
-                app->camera_orientation = (uint8_t)orientation_command;
-                esp_err_t changed = app->vision ? bot_vision_set_sensor_orientation(app->vision, app->camera_orientation) : ESP_ERR_INVALID_STATE;
-                ESP_LOGI(TAG, "Camera orientation current=%u saved=1", (unsigned)app->camera_orientation);
-                if (changed != ESP_OK) ESP_LOGW(TAG, "Camera orientation saved; application pending: %s", esp_err_to_name(changed));
-            } else ESP_LOGW(TAG, "Camera orientation not saved or changed: %s", esp_err_to_name(saved));
+            app->preferences.orientation = (uint8_t)orientation_command;
+            app->preferences.orientation_revision = next_preference_revision(app->preferences.orientation_revision);
+            queue_preferences(app);
         }
     }
     int debug_camera_command;
@@ -761,7 +867,7 @@ static void reconcile(app_t *app, uint32_t now_ms) {
         face_set_stop_visible(app->face, s->behavior == BOT_BEHAVIOR_WAKING ||
                                       s->behavior == BOT_BEHAVIOR_ENGAGED || s->reading_token.session_id || s->critical_fault);
         const char *caption = s->caption;
-        if (s->critical_fault) caption = "小呆需要重新启动";
+        if (s->critical_fault) caption = s->fault_recoverable ? "请点击停止，再唤醒小呆" : "小呆需要重新启动";
         if ((!*caption || strcmp(caption, "请说") == 0) && s->audio_session_requested &&
             (s->conversation == BOT_CONVERSATION_LISTENING || s->conversation == BOT_CONVERSATION_WAITING)) {
             if (s->capture_ready && s->transport_ready)
@@ -838,14 +944,16 @@ static void reconcile(app_t *app, uint32_t now_ms) {
                  gaze.eye_x, gaze.eye_y);
     char theme[32];
     if (xQueueReceive(app->theme_queue, theme, 0) == pdTRUE) {
-        esp_err_t err = bot_platform_save_theme(app->platform, theme);
-        if (err != ESP_OK) ESP_LOGW(TAG, "Appearance persistence: %s", esp_err_to_name(err));
+        memcpy(app->preferences.theme, theme, sizeof(theme));
+        app->preferences.theme_revision = next_preference_revision(app->preferences.theme_revision);
+        queue_preferences(app);
     }
     const uint32_t diagnostic_interval_ms = camera_requested ? 2000 : 15000;
     if ((uint32_t)(now_ms - app->last_diagnostic_ms) >= diagnostic_interval_ms) {
         app->last_diagnostic_ms = now_ms;
         bot_bus_stats_t stats;
         bot_bus_get_stats(app->bus, &stats);
+        ESP_LOGI(TAG, "runtime stack_free=%u", (unsigned)uxTaskGetStackHighWaterMark(NULL));
         /* No images, PCM, transcript, person name, or biometric template in logs. */
         ESP_LOGI(TAG, "mode=%s conversation=%s wake=%d audio=%d camera=%d secure_link=%d fault=%d dropped=%lu",
                  bot_behavior_name(s->behavior), bot_conversation_name(s->conversation), s->wake_status,
@@ -854,6 +962,7 @@ static void reconcile(app_t *app, uint32_t now_ms) {
         if (app->vision) {
             bot_vision_status_t vision;
             bot_vision_get_status(app->vision, &vision);
+            ESP_LOGI(TAG, "vision stack_free=%lu", (unsigned long)vision.stack_free);
             ESP_LOGI(TAG, "vision=%s quality=%s enabled=%d error=%s frames=%lu published=%lu inference_ms=%lu luma=%u model_faces=%u rejected=%u faces=%u",
                      bot_vision_state_name(vision.state), bot_vision_quality_name(vision.quality),
                      vision.enabled_requested, esp_err_to_name(vision.error),
@@ -877,6 +986,9 @@ static void reconcile(app_t *app, uint32_t now_ms) {
         if (app->audio) {
             bot_audio_status_t audio;
             bot_audio_get_status(app->audio, &audio);
+            ESP_LOGI(TAG, "audio stack_free capture=%lu output=%lu wake_reply=%lu onset_buffer=%d",
+                     (unsigned long)audio.capture_stack_free, (unsigned long)audio.playback_stack_free,
+                     (unsigned long)bot_response_player_stack_free(app->response_player), audio.start_buffer_available);
             ESP_LOGI(TAG, "audio_capture=%llu afe_frames=%llu afe_errors=%llu vad=%d mic_peaks=(%u,%u) means=(%u,%u) noise=%u active=%d speech=%d doa=%d valid=%d az=%.1f quality=%.1f sound_events=%llu estimates=%llu uplink=%d",
                      (unsigned long long)audio.capture_frames, (unsigned long long)audio.afe_frames,
                      (unsigned long long)audio.afe_errors, audio.vad_available,
@@ -894,6 +1006,11 @@ static void reconcile(app_t *app, uint32_t now_ms) {
                      (unsigned long long)audio.buffered_drops,
                      (unsigned long)audio.controls_applied_revision, (unsigned long)audio.controls_revision,
                      esp_err_to_name(audio.controls_error));
+            ESP_LOGI(TAG, "keyword runs=%llu timeouts=%llu rejected=%llu candidate=(%d %.3f) dbfs=%.1f input_peak=%u spoken=%d",
+                     (unsigned long long)audio.keyword_runs, (unsigned long long)audio.keyword_timeouts,
+                     (unsigned long long)audio.keyword_rejections, audio.last_candidate_command,
+                     (double)audio.last_candidate_score, (double)audio.keyword_dbfs, audio.keyword_input_peak,
+                     audio.controls_applied.spoken_answers);
             ESP_LOGI(TAG, "audio timing_us read=%lu/%lu afe=%lu/%lu keyword=%lu/%lu processing=%lu/%lu output_queue_high=%lu underruns=%llu",
                      (unsigned long)audio.read_us, (unsigned long)audio.read_max_us,
                      (unsigned long)audio.afe_us, (unsigned long)audio.afe_max_us,
@@ -961,6 +1078,9 @@ void app_main(void) {
     bot_bus_config_t bus_cfg = bot_bus_default_config();
     ESP_ERROR_CHECK(bot_bus_create(&bus_cfg, &app->bus));
     ESP_ERROR_CHECK(bot_platform_create(&app->platform));
+    esp_err_t preferences_error = bot_preferences_start(app->platform);
+    if (preferences_error != ESP_OK)
+        ESP_LOGW(TAG, "Preferences worker unavailable: %s", esp_err_to_name(preferences_error));
     app->theme_queue = xQueueCreate(1, 32);
     if (!app->theme_queue) { ESP_LOGE(TAG, "Cannot allocate preferences queue"); return; }
     bot_runtime_config_t config = bot_runtime_default_config();
@@ -975,7 +1095,7 @@ void app_main(void) {
     app->attention.camera_relative = true;
     bot_platform_status_t platform;
     bot_platform_get_status(app->platform, &platform);
-    if (platform.display_available && bot_platform_display_lock(0)) {
+    if (platform.display_available && bot_platform_display_lock(100)) {
         app->face = face_create(bot_platform_screen(app->platform));
         if (app->face) {
             face_on_result_draw(app->face,result_drawn,app);
@@ -993,6 +1113,16 @@ void app_main(void) {
             face_on_sound_settings_request(app->face, sound_settings_request, app);
             face_on_sound_preview_request(app->face, sound_preview_request, app);
             face_set_sound_settings(app->face, &config.voice_settings);
+#if CONFIG_ESPBOT_USB_DEBUG_PREVIEW
+            app->debug_touch_queue = xQueueCreate(1, sizeof(debug_touch_point_t));
+            lv_indev_t *debug_touch = app->debug_touch_queue ? lv_indev_create() : NULL;
+            if (debug_touch) {
+                lv_indev_set_type(debug_touch, LV_INDEV_TYPE_POINTER);
+                lv_indev_set_display(debug_touch, display);
+                lv_indev_set_user_data(debug_touch, app);
+                lv_indev_set_read_cb(debug_touch, debug_touch_read);
+            } else ESP_LOGW(TAG, "USB touch test unavailable: input allocation failed");
+#endif
         }
         bot_platform_on_dark_touch(app->platform, touch_wake, app);
         bot_platform_display_unlock();
@@ -1006,10 +1136,8 @@ void app_main(void) {
         .play_sound_preview = play_sound_preview, .set_theme = set_voice_theme };
     ESP_ERROR_CHECK(bot_runtime_create(app->bus, &config, &ops, app, bot_platform_now_ms(), &app->runtime));
     bot_runtime_get_snapshot(app->runtime, &app->desired);
-#if CONFIG_ESPBOT_NIGHT_SCHEDULE
     setenv("TZ", CONFIG_ESPBOT_TIMEZONE, 1);
     tzset();
-#endif
     bot_audio_config_t audio_cfg = bot_audio_default_config();
     audio_cfg.output_volume = config.voice_settings.muted ? 0 : config.voice_settings.volume_percent;
     audio_cfg.on_event = audio_event; audio_cfg.on_pcm = audio_pcm; audio_cfg.context = app;
@@ -1087,4 +1215,6 @@ void app_main(void) {
     head_motion_status_t head = head_motion_get_status();
     ESP_LOGI(TAG, "Local runtime started; stationary=%d motors=%d pose_feedback=%d",
              head.stationary, head.motors_installed, head.measured_pose_valid);
+    ESP_LOGI(TAG, "startup stack_free=%lu (main task released on return)",
+             (unsigned long)uxTaskGetStackHighWaterMark(NULL));
 }

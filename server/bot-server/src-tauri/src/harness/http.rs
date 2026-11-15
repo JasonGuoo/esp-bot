@@ -46,8 +46,10 @@ impl Api {
     pub async fn json(&self, method: Method, path: &str, body: Option<&Value>) -> Result<Value, ApiError> {
         let mut request = self.request(method, path).timeout(self.timeout);
         if let Some(body) = body { request = request.json(body); }
-        let mut response = request.send().await.map_err(|_| ApiError {
-            status: None, body: Value::Null, detail: "request failed or timed out",
+        let mut response = request.send().await.map_err(|error| ApiError {
+            status: None, body: Value::Null, detail: if error.is_connect() {
+                "connection failed before request admission"
+            } else { "request failed or timed out" },
         })?;
         let status = response.status();
         let bytes = read_bounded(&mut response, MAX_JSON_BYTES).await?;

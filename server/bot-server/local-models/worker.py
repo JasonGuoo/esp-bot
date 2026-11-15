@@ -458,10 +458,14 @@ class Worker:
             if process.returncode != 0 or len(output) > 262144:
                 fail("tts_voice_unavailable", "Cannot enumerate installed macOS voices.")
             voices = []
+            seen = set()
             for line in output.decode("utf-8", errors="replace").splitlines():
                 match = re.match(r"^(.*?)\s+([A-Za-z]{2,3}[_-][A-Za-z]{2,4})\s+#", line)
                 if match:
-                    voices.append({"name": match[1].strip(), "language": match[2]})
+                    entry = (match[1].strip(), match[2])
+                    if entry not in seen:
+                        seen.add(entry)
+                        voices.append({"name": entry[0], "language": entry[1]})
             self.voice_inventory = voices[:500]
         return {"voices": self.voice_inventory, "installed_only": True}
 
@@ -488,7 +492,16 @@ class Worker:
             voice = self.default_voice
         if not isinstance(voice, str) or len(voice) > 128:
             fail("tts_voice_unavailable", "Select an installed macOS voice.")
-        if voice not in {item["name"] for item in available}:
+        names = {item["name"] for item in available}
+        if voice not in names:
+            # Recent macOS versions list e.g. "Tingting (Chinese (China
+            # mainland))" although `say -v Tingting` still accepts the stable
+            # short name. Resolve only one installed match; never choose a
+            # different voice/language or download a missing voice.
+            aliases = {name for name in names if name.startswith(voice + " (")}
+            if len(aliases) == 1:
+                voice = aliases.pop()
+        if voice not in names:
             # A missing configured Mandarin voice is surfaced, not replaced with
             # a different language or a silently downloaded voice.
             fail("tts_voice_unavailable", "The selected voice is not installed; choose one from voices.")

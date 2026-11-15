@@ -1,5 +1,7 @@
 # Module contracts and local event bus — esp-bot V1
 
+**Current source status:** [2026-11-14 review corrections](review-fixes-2026-11-14.md) records the source changes; [2026-11-15 acceptance](review-acceptance-2026-11-15.md) records subsequent local builds and device checks. Older dated transport inventories below are historical; firmware WSS v3 now exists. This revision adds a token-bound `TURN_SUBMITTED` edge and a non-capturing `SUBMITTED` conversation stage; runtime remains the behavior authority.
+
 **Status (2026-11-06):** the typed bus/runtime/focus contracts are now source-implemented and wired in app_main, without compilation or device execution. The conceptual event examples below describe the wider architecture; actual implemented fields are in component headers and [local-runtime.md](local-runtime.md). **Authority:** [architecture.md](architecture.md) for ownership, [behavior-lifecycle.md](behavior-lifecycle.md) for policy, [eye-contact.md](eye-contact.md) for gaze geometry. The names below denote logical modules, not a promise of one RTOS task per component.
 
 ## 1. Single owners

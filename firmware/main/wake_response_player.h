@@ -20,3 +20,5 @@ bool bot_response_player_preview(bot_response_player_t *player,
                                   const bot_response_entry_t *entry, uint8_t gain_percent);
 /** Invalidates queued and in-flight work before cancelling the audio owner. */
 void bot_response_player_cancel(bot_response_player_t *player);
+/** Cached worker watermark in ESP-IDF bytes; zero until a job has completed. */
+uint32_t bot_response_player_stack_free(const bot_response_player_t *player);

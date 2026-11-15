@@ -95,7 +95,7 @@ esp_err_t bot_platform_create(bot_platform_t **out) {
     }
     p->status.display_available = true;
     p->status.display_awake = true;
-    if (!bsp_display_lock(0)) {
+    if (!bsp_display_lock(100)) {
         p->status.display_error = ESP_ERR_TIMEOUT;
         p->status.display_available = false;
         *out = p;

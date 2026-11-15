@@ -13,9 +13,10 @@ typedef struct {
     size_t samples;
     int16_t *frame;
     size_t buffered;
-    uint32_t silence_samples;
+    bool previous_speech;
     bool commands_owned, dirty, commands_enabled, available;
     uint8_t threshold_percent;
+    uint16_t input_peak;
     float last_score; /* native MultiNet score; not a calibrated probability */
     float last_candidate_score;
     int last_candidate_command;
@@ -31,4 +32,4 @@ esp_err_t bot_audio_keyword_set_policy(bot_audio_keyword_t *keyword, bool comman
                                        uint8_t wake_threshold_percent);
 /* 0: none, 1: complete wake phrase, otherwise a bot_voice_command_t ID. */
 int bot_audio_keyword_detect(bot_audio_keyword_t *keyword, int16_t *samples, size_t count,
-                              float volume_dbfs, bool allowed);
+                              float volume_dbfs, bool speech, bool allowed);

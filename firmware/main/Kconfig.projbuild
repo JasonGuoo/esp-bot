@@ -31,6 +31,14 @@ menu "ESP Bot"
         string "Device ID (ASCII URL-safe)"
         default "korvo-01"
 
+    config ESPBOT_LAN_DIAGNOSTICS
+        bool "Enable legacy unauthenticated LAN v1 diagnostics"
+        default n
+        help
+            Optional development-only connection. Commands remain AUTH_REQUIRED.
+            Authenticated WSS v3 discovery, sessions and USB diagnostics do not
+            require this legacy link. Leave disabled for normal operation.
+
     config ESPBOT_SERVER_ID
         string "Preferred diagnostic bot-server ID (blank selects a sole server)"
         default ""
@@ -54,9 +62,8 @@ menu "ESP Bot"
         depends on ESPBOT_NIGHT_SCHEDULE
 
     config ESPBOT_TIMEZONE
-        string "POSIX timezone for night schedule"
+        string "Local POSIX timezone for schedules and response scenes"
         default "CST-8"
-        depends on ESPBOT_NIGHT_SCHEDULE
 
     config ESPBOT_NIGHT_START_MINUTE
         int "Night begins, minutes after local midnight"
