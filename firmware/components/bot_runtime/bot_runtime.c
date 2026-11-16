@@ -372,6 +372,7 @@ static bool source_allowed(const bot_event_t *event)
 {
     switch (event->kind) {
     case BOT_EVENT_WAKE_DETECTED:
+    case BOT_EVENT_BARGE_IN:
     case BOT_EVENT_UTTERANCE_STARTED:
     case BOT_EVENT_UTTERANCE_ENDED:
     case BOT_EVENT_PLAYBACK_STARTED:
@@ -695,10 +696,30 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         dismiss_result(state);
         break;
     case BOT_EVENT_SETTINGS_OPEN:
+        if (!event->settings_lease ||
+            (state->settings_lease && (int32_t)(event->settings_lease - state->settings_lease) <= 0)) {
+            state->rejected_events++;
+            break;
+        }
+        state->settings_lease = event->settings_lease;
+        state->settings_revision = 0;
         state->settings_open = true;
         end_session(runtime, now_ms, SESSION_DISMISSED);
         break;
     case BOT_EVENT_SETTINGS_CLOSE:
+        if (!state->settings_open || event->settings_lease != state->settings_lease) {
+            state->rejected_events++;
+            break;
+        }
+        /* CLOSE is safety-critical and can overtake the normal edit queue.
+         * Commit its causally captured final snapshot before retiring the page.
+         * A delayed event from this or an older page can never reopen it. */
+        if (event->settings_has_value && !state->critical_fault &&
+            event->settings_revision >= state->settings_revision &&
+            bot_voice_settings_valid(&event->data.voice_settings)) {
+            state->voice_settings = event->data.voice_settings;
+            state->settings_revision = event->settings_revision;
+        }
         if (state->sound_preview_active) stop_preview(runtime);
         state->settings_open = false;
         state->last_interaction_ms = now_ms;
@@ -709,15 +730,19 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         break;
     case BOT_EVENT_VOICE_SETTINGS:
         if (!state->settings_open || state->critical_fault ||
+            event->settings_lease != state->settings_lease ||
+            event->settings_revision <= state->settings_revision ||
             !bot_voice_settings_valid(&event->data.voice_settings)) {
             state->rejected_events++;
             break;
         }
         if (state->sound_preview_active) stop_preview(runtime);
         state->voice_settings = event->data.voice_settings;
+        state->settings_revision = event->settings_revision;
         break;
     case BOT_EVENT_SOUND_PREVIEW: {
         if (stopped_this_step || !state->settings_open || state->critical_fault ||
+            event->settings_lease != state->settings_lease ||
             !state->audio_available || state->voice_settings.muted ||
             !state->voice_settings.volume_percent || !runtime->ops.play_sound_preview) {
             state->rejected_events++;
@@ -768,6 +793,19 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
             break;
         }
         apply_local_command(runtime, event->data.local_command.command, now_ms);
+        break;
+    case BOT_EVENT_BARGE_IN:
+        if (!runtime->config.allow_barge_in || !is_active(runtime) || state->settings_open ||
+            state->critical_fault || state->local_response_active ||
+            state->conversation != BOT_CONVERSATION_SPEAKING || !state->playback_id ||
+            state->playback_id != event->data.playback.id || !token_matches(runtime,&event->token,false)) {
+            state->rejected_events++;
+            break;
+        }
+        /* Retire output/capture leases before returning to listening. The old
+         * AFE onset is never relabelled; only subsequent fence-cleared audio
+         * belongs to the new turn. Server task ownership stays server-side. */
+        begin_turn(runtime,now_ms);
         break;
     case BOT_EVENT_UTTERANCE_STARTED:
         if (!is_active(runtime) || state->critical_fault || state->settings_open ||
@@ -907,6 +945,13 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         }
         state->playback_id = 0;
         state->last_interaction_ms = now_ms;
+        if (event->data.playback.presentation_managed || event->data.playback.purpose != BOT_PLAYBACK_FINAL) {
+            /* ACK/progress/content is not a terminal answer. The single-token
+             * presentation owner waits for actual audio AND display receipts. */
+            state->conversation = BOT_CONVERSATION_THINKING;
+            reset_expression(runtime);
+            break;
+        }
         runtime->remote_audio_done = true;
         /* A very short clip may finish before the queued text receipt is
          * drained. Do not retire that token until its PRESENT has been applied. */
@@ -1042,7 +1087,7 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
                                            uint32_t now_ms)
 {
     bot_runtime_snapshot_t *state = &runtime->state;
-    if (command->kind < BOT_COMMAND_SET_EXPRESSION || command->kind > BOT_COMMAND_REPLY_PRESENT)
+    if (command->kind < BOT_COMMAND_SET_EXPRESSION || command->kind > BOT_COMMAND_PRESENTATION_DONE)
         return BOT_COMMAND_REJECTED_INVALID;
     if (state->critical_fault) return BOT_COMMAND_REJECTED_FAULT;
     if (state->settings_open) return BOT_COMMAND_REJECTED_SETTINGS;
@@ -1096,6 +1141,27 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
         runtime->waiting_for_approval = false;
         reset_expression(runtime);
         break;
+    case BOT_COMMAND_PRESENTATION_SEGMENT:
+        if (state->utterance_active || state->followup_armed ||
+            (state->conversation != BOT_CONVERSATION_SUBMITTED &&
+             state->conversation != BOT_CONVERSATION_THINKING &&
+             state->conversation != BOT_CONVERSATION_SPEAKING)) return BOT_COMMAND_REJECTED_INVALID;
+        if (!valid_text(command->data.caption, sizeof(command->data.caption)))
+            return BOT_COMMAND_REJECTED_INVALID;
+        memcpy(state->reading_text, command->data.caption, sizeof(state->reading_text));
+        state->reading_token = state->token;
+        state->reading_sequence = command->presentation_sequence;
+        state->reading_notice[0] = state->image_notice[0] = '\0';
+        if (state->conversation != BOT_CONVERSATION_SPEAKING)
+            state->conversation = BOT_CONVERSATION_THINKING;
+        state->last_interaction_ms = now_ms;
+        runtime->reply_presented = runtime->remote_audio_done = false;
+        break;
+    case BOT_COMMAND_PRESENTATION_DONE:
+        if (state->utterance_active || state->playback_id || state->followup_armed)
+            return BOT_COMMAND_REJECTED_INVALID;
+        arm_followup(runtime, now_ms);
+        break;
     case BOT_COMMAND_REPLY_PRESENT:
     case BOT_COMMAND_REPLY_DONE:
         if (state->utterance_active ||
@@ -1110,6 +1176,7 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
                 return BOT_COMMAND_REJECTED_INVALID;
             memcpy(state->reading_text, command->data.caption, sizeof(state->reading_text));
             state->reading_token = state->token;
+            state->reading_sequence = 0;
             state->reading_notice[0] = '\0';
             state->image_notice[0] = '\0';
         } else if (state->reading_token.session_id &&

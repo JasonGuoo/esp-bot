@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "vision_attention.h"
 #include "bot_voice.h"
+#include "bot_playback.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -57,6 +58,7 @@ typedef enum {
     BOT_EVENT_CAPTURE_OVERFLOW,
     BOT_EVENT_PLAYBACK_PROGRESS, /* successful hardware writes, bounded low frequency */
     BOT_EVENT_TURN_SUBMITTED, /* LINK has sealed this token's microphone stream */
+    BOT_EVENT_BARGE_IN, /* AUDIO: hardware-reference AEC residual speech */
     BOT_EVENT_COUNT
 } bot_event_kind_t;
 
@@ -80,11 +82,16 @@ typedef struct {
     bot_event_source_t source;
     uint32_t observed_ms;
     bot_session_token_t token; /* required for utterance/playback/session completion */
+    /* UI page lease is independent of the conversation token. CLOSE carries
+     * the last accepted edit, so its priority cannot discard that edit. */
+    uint32_t settings_lease, settings_revision;
+    bool settings_has_value;
     union {
         struct { bot_wake_phrase_t phrase; float confidence; bool echo_safe; bool confidence_available; } wake;
         struct { bool intentional; } touch;
         struct { bool echo_safe; } utterance;
-        struct { uint32_t id; bool local_response; bool preview; } playback; /* real bot_audio operation */
+        struct { uint32_t id; bool local_response; bool preview;
+            bot_playback_purpose_t purpose; bool presentation_managed; } playback; /* real bot_audio operation */
         struct { bool connected, authenticated, encrypted; } link;
         struct { bool available; esp_err_t error; } health;
         struct { bool awake; bool sleep_supported; bool full_blackout_verified; esp_err_t error; } display;
@@ -108,7 +115,9 @@ typedef enum {
     BOT_COMMAND_FAILURE_CAPTION,
     BOT_COMMAND_IMAGE_FAILED,
     BOT_COMMAND_END_SESSION,
-    BOT_COMMAND_REPLY_PRESENT /* retain text while real hardware audio is still pending */
+    BOT_COMMAND_REPLY_PRESENT, /* retain text while real hardware audio is still pending */
+    BOT_COMMAND_PRESENTATION_SEGMENT, /* visual text; no completion or capture authority */
+    BOT_COMMAND_PRESENTATION_DONE /* local receipt collector: every final output completed */
 } bot_command_kind_t;
 
 typedef struct {
@@ -117,6 +126,7 @@ typedef struct {
     bot_session_token_t token;
     uint32_t received_ms;        /* stamped by local ingress, never remote uptime */
     uint32_t ttl_ms;             /* bounded by runtime; zero uses runtime default */
+    uint32_t presentation_sequence;
     union {
         char expression[BOT_EXPRESSION_MAX_BYTES + 1];
         char caption[BOT_CAPTION_MAX_BYTES + 1];

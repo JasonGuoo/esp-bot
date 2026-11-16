@@ -33,6 +33,7 @@ void brain_secure_network_down(void);
 #define BOT_DISPLAY_ASSET_ID_BYTES 48
 typedef struct {
     bot_session_token_t token;
+    uint32_t presentation_sequence;
     uint8_t *pixels;
     uint16_t width, height;
     char asset_id[BOT_DISPLAY_ASSET_ID_BYTES];
@@ -42,6 +43,9 @@ bool brain_secure_take_image(bot_display_image_t *image);
 /** Queue a display receipt for the independently retained result token. False
  * means the bounded queue could not accept it; callers may retry while that
  * result remains readable/authorized, including next-turn preconnection. */
+bool brain_secure_display_report_sequence(bot_session_token_t token, uint32_t sequence,
+                                          const char *part, const char *asset_id,
+                                          bool rendered, const char *code);
 bool brain_secure_display_report(bot_session_token_t token, const char *part,
                                  const char *asset_id, bool rendered, const char *code);
 /** Record a terminal image-only failure without allocating. The transport task

@@ -1,4 +1,5 @@
-//! One lazy local inference process, official model libraries behind JSONL.
+//! Bounded independent local inference lanes, official libraries behind JSONL.
+//! ASR never queues behind identity; dropping one request kills only its lane.
 //! The process never listens on a socket and cannot be called by an MCP tool.
 
 use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
@@ -21,12 +22,14 @@ pub struct ModelWorkerConfig {
     pub rma_qwen_python: Option<PathBuf>,
     pub rma_qwen_worker: Option<PathBuf>,
     pub rma_qwen_model: Option<PathBuf>,
+    /// Local pyannote Community-1 snapshot; never downloaded during a turn.
+    pub diarization_model: Option<PathBuf>,
 }
 
 impl Default for ModelWorkerConfig {
     fn default() -> Self {
         Self { python: "python3".into(), script: None, model_dir: None, request_timeout_seconds: 120, voice: None,
-            asr_backend: "whisper".into(), rma_qwen_python: None, rma_qwen_worker: None, rma_qwen_model: None }
+            asr_backend: "whisper".into(), rma_qwen_python: None, rma_qwen_worker: None, rma_qwen_model: None, diarization_model: None }
     }
 }
 
@@ -49,19 +52,26 @@ impl Drop for Process {
 pub struct ModelWorker {
     config: ModelWorkerConfig,
     data_root: PathBuf,
-    process: Mutex<Option<Process>>,
+    lanes: [Mutex<Option<Process>>; 5],
     cancel: watch::Sender<u64>,
 }
 
 impl ModelWorker {
     pub fn new(config: ModelWorkerConfig, data_root: PathBuf) -> Arc<Self> {
         let (cancel, _) = watch::channel(0);
-        Arc::new(Self { config, data_root, process: Mutex::new(None), cancel })
+        Arc::new(Self { config, data_root, lanes: std::array::from_fn(|_| Mutex::new(None)), cancel })
     }
 
     pub fn configured(&self) -> bool {
         self.config.script.as_ref().is_some_and(|p| p.is_file())
             && self.config.model_dir.is_some()
+    }
+
+    fn lane(&self, op: &str) -> &Mutex<Option<Process>> {
+        &self.lanes[match op {
+            "transcribe" => 0, "speaker_embed" | "face_embed" | "diarize" => 1,
+            "tts" => 2, "display_image" | "prepare_image" | "render_chart" => 3, _ => 4,
+        }]
     }
 
     fn spawn(&self) -> Result<Process, String> {
@@ -84,7 +94,8 @@ impl ModelWorker {
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
             .kill_on_drop(true);
         for (flag, path) in [("--rma-qwen-python", &self.config.rma_qwen_python),
-            ("--rma-qwen-worker", &self.config.rma_qwen_worker), ("--rma-qwen-model", &self.config.rma_qwen_model)] {
+            ("--rma-qwen-worker", &self.config.rma_qwen_worker), ("--rma-qwen-model", &self.config.rma_qwen_model),
+            ("--diarization-model", &self.config.diarization_model)] {
             if let Some(path) = path { command.arg(flag).arg(path); }
         }
         // Cancellation kills say/ffmpeg descendants too, never a shell command.
@@ -97,7 +108,7 @@ impl ModelWorker {
         Ok(Process { child, input, output })
     }
 
-    /// Inference is serialized; callers get busy rather than retaining unbounded media.
+    /// Each lane is serialized. The Brain bounds admitted inputs; waits are bounded too.
     pub async fn call(&self, op: &str, payload: Value) -> Result<Value, String> {
         self.call_at_generation(op,payload,self.generation()).await
     }
@@ -107,7 +118,11 @@ impl ModelWorker {
     pub async fn call_at_generation(&self, op:&str, payload:Value, generation:u64) -> Result<Value,String> {
         let mut cancelled = self.cancel.subscribe();
         if *cancelled.borrow() != generation { return Err("cancelled".into()); }
-        let mut slot = self.process.try_lock().map_err(|_| "local_worker_busy")?;
+        let mut slot = tokio::select! {
+            slot = timeout(Duration::from_secs(15), self.lane(op).lock()) => slot.map_err(|_| "local_worker_lane_busy")?,
+            _ = cancelled.changed() => return Err("cancelled".into()),
+        };
+        if self.generation() != generation { return Err("cancelled".into()); }
         if slot.is_none() { *slot = Some(self.spawn()?); }
         let request_id = uuid::Uuid::new_v4().to_string();
         let mut bytes = serde_json::to_vec(&json!({"id":request_id,"op":op,"payload":payload})).map_err(|e| e.to_string())?;
@@ -166,7 +181,9 @@ impl ModelWorker {
 
     pub async fn stop(&self) {
         self.cancel_current();
-        if let Some(mut process) = self.process.lock().await.take() { kill_process(&mut process.child).await; }
+        for lane in &self.lanes {
+            if let Some(mut process) = lane.lock().await.take() { kill_process(&mut process.child).await; }
+        }
     }
 
     pub fn voice(&self) -> Option<&str> { self.config.voice.as_deref() }

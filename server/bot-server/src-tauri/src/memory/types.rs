@@ -16,6 +16,15 @@ pub struct MemoryConfig {
     pub history_ttl_secs: u64,
     pub history_max_turns: usize,
     pub history_max_chars: usize,
+    /// Empty resolves the OS IANA zone once when the household is created.
+    pub household_timezone: String,
+    /// New household sharing is a distinct opt-in; old private transcript
+    /// consent must not silently enable a shared archive during migration.
+    pub household_history_enabled: bool,
+    pub household_retention_secs: u64,
+    /// Future memory recall permission; automatic extraction cannot enable it.
+    pub household_allow_cloud: bool,
+    pub graphiti: super::household_types::GraphitiConfig,
     pub max_conversations: usize,
     pub min_enrollment_samples: usize,
     pub max_enrollment_samples: usize,
@@ -39,6 +48,11 @@ impl Default for MemoryConfig {
             history_ttl_secs: 86_400,
             history_max_turns: 24,
             history_max_chars: 4_000,
+            household_timezone: String::new(),
+            household_history_enabled: false,
+            household_retention_secs: 30 * 86_400,
+            household_allow_cloud: false,
+            graphiti: Default::default(),
             max_conversations: 4_096,
             min_enrollment_samples: 3,
             max_enrollment_samples: 12,
@@ -53,6 +67,12 @@ impl Default for MemoryConfig {
 
 impl MemoryConfig {
     pub(crate) fn validate(&self) -> Result<(), String> {
+        if !self.household_timezone.is_empty() && self.household_timezone.parse::<chrono_tz::Tz>().is_err() {
+            return Err("household_timezone must be an IANA timezone".into());
+        }
+        if !(86_400..=31_536_000).contains(&self.household_retention_secs) {
+            return Err("household retention must be 1..365 days".into());
+        }
         if !(1..=256).contains(&self.max_profiles)
             || !(1..=20_000).contains(&self.max_memories)
             || !(32..=8_000).contains(&self.max_memory_chars)
@@ -99,6 +119,9 @@ pub struct Profile {
     pub is_child: bool,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    /// Archived alias metadata remains visible for historical attribution.
+    #[serde(default)]
+    pub merged_into: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -189,6 +212,10 @@ pub struct ContextRequest {
 pub struct MemoryContext {
     pub text: String,
     pub memory_ids: Vec<String>,
+    /// Immutable dependency keys for the records actually included in text.
+    /// A later edit creates a new key; a permanently fenced old key is never reused.
+    #[serde(default)]
+    pub source_refs: Vec<String>,
     pub profile_id: Option<String>,
     pub requires_profile_confirmation: bool,
 }

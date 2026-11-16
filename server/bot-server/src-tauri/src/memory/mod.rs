@@ -7,7 +7,15 @@
 mod identity;
 mod store;
 mod types;
+mod household_types;
+mod household;
+mod household_jobs;
+mod profile_merge;
+mod provenance;
+pub mod graphiti;
 
 pub use identity::fuse_identity;
 pub use store::{Store, ExtractedFact};
 pub use types::*;
+pub use household_types::*;
+pub use provenance::household_source_ref;

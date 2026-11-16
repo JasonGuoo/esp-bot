@@ -16,6 +16,8 @@ tauri-build = { version = "2", features = [] }
 cc = "=1.10.0"
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"
 tauri = { version = "2", features = [] }
 axum = { version = "0.8", features = ["ws"], optional = true }
 mdns-sd = "0.21"

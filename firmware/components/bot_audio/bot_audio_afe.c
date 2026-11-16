@@ -74,7 +74,7 @@ static void reason(bot_audio_afe_t *afe, const char *text)
     snprintf(afe->reason, sizeof(afe->reason), "%s", text);
 }
 
-esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char *name)
+esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char *name, bool reference_input)
 {
     memset(afe, 0, sizeof(*afe));
     afe->wake_status = BOT_AUDIO_WAKE_MODEL_MISSING;
@@ -120,15 +120,17 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
     }
     if (selected) snprintf(afe->model_name, sizeof(afe->model_name), "%s", selected);
 
-    /* The AFE sees only the selected primary mic. The second mic is reserved
-     * for local direction estimation; neither input is an AEC reference. */
-    afe_config_t *cfg = afe_config_init("M", afe->models, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+    /* Official GMF aec_rec/sdkconfig.defaults.esp32s31 uses MRMN:
+     * microphone, ES8389 DAC reference, microphone, unused. All four samples
+     * share one hardware TDM frame. No software playback FIFO is used as ref. */
+    afe_config_t *cfg = afe_config_init(reference_input ? "MRMN" : "M", afe->models,
+                                       AFE_TYPE_SR, AFE_MODE_LOW_COST);
     if (!cfg) {
         afe->wake_status = BOT_AUDIO_WAKE_UNAVAILABLE;
         reason(afe, "Official AFE configuration allocation failed");
         return ESP_ERR_NO_MEM;
     }
-    cfg->aec_init = false;
+    cfg->aec_init = reference_input;
     cfg->se_init = false;
     cfg->ns_init = false;
     cfg->ns_model_name = NULL;
@@ -162,7 +164,7 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
     cfg->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 
     afe_config_t *checked = afe_config_check(cfg);
-    if (!checked || checked->aec_init || checked->wakenet_init != (selected != NULL) ||
+    if (!checked || checked->aec_init != reference_input || checked->wakenet_init != (selected != NULL) ||
         (selected && (!checked->wakenet_model_name ||
                       strcmp(checked->wakenet_model_name, selected) != 0 ||
                       checked->wakenet_model_name_2 != NULL))) {
@@ -192,11 +194,12 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
     ESP_LOGI("bot_audio", "AFE format: feed=%d/%d channels fetch=%d/%d channels rate=%d",
              samples, input_channels, fetched, output_channels, sample_rate);
     if (samples <= 0 || samples > 4096 || fetched <= 0 || fetched > 4096 ||
-        input_channels != 1 || output_channels != 1 || sample_rate != BOT_AUDIO_SAMPLE_RATE) {
+        input_channels != (reference_input ? 4 : 1) || output_channels != 1 || sample_rate != BOT_AUDIO_SAMPLE_RATE) {
         afe->wake_status = BOT_AUDIO_WAKE_UNAVAILABLE;
         reason(afe, "AFE format does not match the 16 kHz mono owner contract");
         return ESP_ERR_INVALID_SIZE;
     }
+    afe->reference_input = reference_input;
     afe->feed_samples = (size_t)samples;
     afe->fetch_samples = (size_t)fetched;
     /* Keep one official MN instance for explicitly authorized local controls,
@@ -213,7 +216,8 @@ esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *label, const char
     if (selected) {
         afe->wake_status = BOT_AUDIO_WAKE_READY;
         afe->wake_backend = BOT_AUDIO_WAKE_BACKEND_WAKENET;
-        reason(afe, "Dedicated full 小呆小呆 WakeNet ready; AEC and automatic barge-in unavailable");
+        reason(afe, reference_input ? "Dedicated wake model and hardware-reference AFE ready; acoustic calibration pending" :
+                    "Dedicated full 小呆小呆 WakeNet ready; half-duplex suppression active");
     } else if (fallback_enabled && multinet_name) {
         if (keyword_error == ESP_OK) {
             afe->wake_status = BOT_AUDIO_WAKE_READY;

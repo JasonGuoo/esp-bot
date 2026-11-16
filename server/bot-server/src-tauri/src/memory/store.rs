@@ -54,7 +54,7 @@ impl Store {
                 tx.execute_batch(include_str!("schema.sql")).map_err(db_error)?;
                 tx.commit().map_err(db_error)?;
             }
-            1 | 2 | 3 | 4 => {}
+            1 | 2 | 3 | 4 | 5 => {}
             _ => return Err(format!("unsupported memory database schema version {version}")),
         }
         if version < 2 {
@@ -98,7 +98,13 @@ impl Store {
                 );
                 PRAGMA user_version = 4; COMMIT;").map_err(db_error)?;
         }
+        if version < 5 {
+            let tx = db.transaction().map_err(db_error)?;
+            tx.execute_batch(include_str!("household_schema.sql")).map_err(db_error)?;
+            tx.commit().map_err(db_error)?;
+        }
         let store = Arc::new(Self { config, db: Mutex::new(db), path });
+        store.initialize_household()?;
         store.purge_expired()?;
         Ok(store)
     }
@@ -122,6 +128,7 @@ impl Store {
             is_child: input.is_child,
             created_at_ms: now,
             updated_at_ms: now,
+            merged_into: None,
         };
         tx.execute(
             "INSERT INTO profiles(id, display_name, is_child, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -137,7 +144,7 @@ impl Store {
         let name = clean_text(&input.display_name, 80, false, "display_name")?;
         let mut db = self.connection()?;
         let tx = db.transaction().map_err(db_error)?;
-        profile_exists(&tx, id)?;
+        super::profile_merge::active_profile(&tx, id)?;
         tx.execute(
             "UPDATE profiles SET display_name = ?1, is_child = ?2, updated_at_ms = ?3 WHERE id = ?4",
             params![name, input.is_child, now_ms(), id],
@@ -154,7 +161,7 @@ impl Store {
     pub fn list_profiles(&self) -> Result<Vec<Profile>, String> {
         let db = self.connection()?;
         let mut stmt = db.prepare(
-            "SELECT id, display_name, is_child, created_at_ms, updated_at_ms FROM profiles ORDER BY created_at_ms, id",
+            "SELECT p.id,p.display_name,p.is_child,p.created_at_ms,p.updated_at_ms,a.target_profile_id FROM profiles p LEFT JOIN profile_aliases a ON a.source_profile_id=p.id ORDER BY p.created_at_ms,p.id",
         ).map_err(db_error)?;
         let rows = stmt.query_map([], profile_row).map_err(db_error)?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)
@@ -166,6 +173,9 @@ impl Store {
         validate_id(id)?;
         let mut db = self.connection()?;
         let tx = db.transaction().map_err(db_error)?;
+        let aliases={let mut q=tx.prepare("SELECT source_profile_id FROM profile_aliases WHERE target_profile_id=?1").map_err(db_error)?;let rows=q.query_map([id],|r|r.get::<_,String>(0)).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?};
+        for alias in aliases{super::household::forget_profile_data(&tx,&alias)?;tx.execute("DELETE FROM profiles WHERE id=?1",[alias]).map_err(db_error)?;}
+        super::household::forget_profile_data(&tx,id)?;
         tx.execute("DELETE FROM profiles WHERE id = ?1", [id]).map_err(db_error)?;
         bump_revision(&tx)?;
         tx.commit().map_err(db_error)
@@ -192,7 +202,7 @@ impl Store {
         }
         let mut db = self.connection()?;
         let tx = db.transaction().map_err(db_error)?;
-        if let Some(profile) = input.profile_id.as_deref() { profile_exists(&tx, profile)?; }
+        if let Some(profile) = input.profile_id.as_deref() { super::profile_merge::active_profile(&tx, profile)?; }
         let previous = tx.query_row(
             "SELECT id, scope, profile_id, content, category, source, source_ref, confirmed, allow_cloud, created_at_ms, updated_at_ms, expires_at_ms FROM memories WHERE id = ?1",
             [&id], memory_row,
@@ -277,25 +287,25 @@ impl Store {
             let db = self.connection()?;
             if let Some(id) = selected.as_deref() { profile_exists(&db, id)?; }
             let mut stmt = db.prepare(
-                "SELECT id, scope, profile_id, content, category, source, source_ref, confirmed, allow_cloud, created_at_ms, updated_at_ms, expires_at_ms\n\
+                "SELECT id, scope, profile_id, content, category, source, source_ref, confirmed, allow_cloud, created_at_ms, updated_at_ms, expires_at_ms, (SELECT r.source_ref FROM legacy_memory_source_refs r WHERE r.memory_id=memories.id)\n\
                  FROM memories WHERE confirmed = 1\n\
                  AND (expires_at_ms IS NULL OR expires_at_ms > ?1)\n\
                  AND ((?2 = 1 AND scope = 'household') OR (scope = 'profile' AND profile_id = ?3))\n\
                  AND (?4 = 0 OR allow_cloud = 1)",
             ).map_err(db_error)?;
             let rows = stmt.query_map(params![now_ms(), request.include_household,
-                selected.as_deref(), request.destination == ContextDestination::Cloud], memory_row)
+                selected.as_deref(), request.destination == ContextDestination::Cloud], |r| Ok((memory_row(r)?,r.get::<_,String>(12)?)))
                 .map_err(db_error)?;
             rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?
         };
         let terms = query_terms(&request.query);
         let normalized_query = request.query.trim().to_lowercase();
-        let mut ranked: Vec<_> = records.into_iter().map(|record| {
+        let mut ranked: Vec<_> = records.into_iter().map(|(record,source_ref)| {
             let haystack = format!("{} {}", record.category, record.content).to_lowercase();
             let mut score = terms.iter().filter(|term| haystack.contains(term.as_str()))
                 .map(|term| term.chars().count().min(8)).sum::<usize>();
             if !normalized_query.is_empty() && haystack.contains(&normalized_query) { score += 16; }
-            (score, record)
+            (score, record, source_ref)
         }).collect();
         ranked.sort_by(|a, b| b.0.cmp(&a.0)
             .then_with(|| b.1.updated_at_ms.cmp(&a.1.updated_at_ms))
@@ -305,11 +315,12 @@ impl Store {
         let mut text = prefix.to_owned();
         let mut used = text.chars().count();
         let mut memory_ids = Vec::new();
-        for (_, record) in ranked {
+        let mut source_refs = Vec::new();
+        for (_, record, source_ref) in ranked {
             if memory_ids.len() >= self.config.context_max_items { break; }
             let line = serde_json::to_string(&json!({
                 "id": record.id, "scope": record.scope, "category": record.category,
-                "content": record.content, "source": record.source,
+                "content": record.content, "source": record.source, "source_ref": source_ref,
             })).map_err(|_| "cannot encode memory context".to_string())?;
             let size = line.chars().count() + 1;
             if used + size > self.config.context_max_chars { continue; }
@@ -317,10 +328,11 @@ impl Store {
             text.push('\n');
             used += size;
             memory_ids.push(record.id);
+            source_refs.push(source_ref);
         }
         if memory_ids.is_empty() { text.clear(); }
         Ok(MemoryContext {
-            text, memory_ids, profile_id: selected,
+            text, memory_ids, source_refs, profile_id: selected,
             requires_profile_confirmation: request.profile_id.is_some() && !request.profile_confirmed,
         })
     }
@@ -447,10 +459,12 @@ impl Store {
             } else {
                 let count:i64=tx.query_row("SELECT count(*) FROM memories",[],|r|r.get(0)).map_err(db_error)?;
                 if count>=self.config.max_memories as i64 {break;}
-                tx.execute("INSERT INTO memories(id,scope,profile_id,content,category,source,source_ref,confirmed,allow_cloud,created_at_ms,updated_at_ms)
-                    SELECT ?1,?2,?3,?4,?5,'user_statement',?6,1,1,?7,?7 WHERE NOT EXISTS
+                let memory_id=format!("memory_{}",Uuid::new_v4().simple());
+                let inserted=tx.execute("INSERT INTO memories(id,scope,profile_id,content,category,source,source_ref,confirmed,allow_cloud,created_at_ms,updated_at_ms)
+                    SELECT ?1,?2,?3,?4,?5,'user_statement',?6,0,0,?7,?7 WHERE NOT EXISTS
                     (SELECT 1 FROM memories WHERE scope=?2 AND profile_id IS ?3 AND content=?4)",
-                    params![format!("memory_{}",Uuid::new_v4().simple()),scope,owner,content,category,format!("auto:{conversation}"),now]).map_err(db_error)?;
+                    params![memory_id,scope,owner,content,category,format!("auto:{conversation}"),now]).map_err(db_error)?;
+                if inserted!=0 {tx.execute("INSERT INTO legacy_memory_evidence(memory_id,conversation_id,job_id,quote,at_ms) VALUES(?1,?2,?3,?4,?5)",params![memory_id,conversation,id,quote,now]).map_err(db_error)?;}
             }
             changed=true;
         }
@@ -469,16 +483,18 @@ impl Store {
 
     pub fn assign_unattributed(&self,id:&str,profile:&str) -> Result<(),String> {
         validate_id(id)?;validate_id(profile)?;
-        let mut db=self.connection()?;let tx=db.transaction().map_err(db_error)?;profile_exists(&tx,profile)?;
-        let item:Option<(String,String,String)>=tx.query_row("SELECT content,category,conversation_id FROM unattributed_observations WHERE id=?1",[id],
-            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional().map_err(db_error)?;
-        let (content,category,conversation)=item.ok_or("unattributed memory no longer exists")?;
+        let mut db=self.connection()?;let tx=db.transaction().map_err(db_error)?;super::profile_merge::active_profile(&tx,profile)?;
+        let item:Option<(String,String,String,String,i64)>=tx.query_row("SELECT content,category,conversation_id,quote,created_at_ms FROM unattributed_observations WHERE id=?1",[id],
+            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(db_error)?;
+        let (content,category,conversation,quote,observed_at)=item.ok_or("unattributed memory no longer exists")?;
         let count:i64=tx.query_row("SELECT count(*) FROM memories",[],|r|r.get(0)).map_err(db_error)?;
         if count>=self.config.max_memories as i64 {return Err("memory capacity reached".into());}
         let now=now_ms();
+        let memory_id=format!("memory_{}",Uuid::new_v4().simple());
         tx.execute("INSERT INTO memories(id,scope,profile_id,content,category,source,source_ref,confirmed,allow_cloud,created_at_ms,updated_at_ms)
-            VALUES(?1,'profile',?2,?3,?4,'user_statement',?5,1,1,?6,?6)",
-            params![format!("memory_{}",Uuid::new_v4().simple()),profile,content,category,format!("auto:{conversation}"),now]).map_err(db_error)?;
+            VALUES(?1,'profile',?2,?3,?4,'user_statement',?5,1,0,?6,?6)",
+            params![memory_id,profile,content,category,format!("auto:{conversation}"),now]).map_err(db_error)?;
+        tx.execute("INSERT INTO legacy_memory_evidence(memory_id,conversation_id,quote,at_ms) VALUES(?1,?2,?3,?4)",params![memory_id,conversation,quote,observed_at]).map_err(db_error)?;
         suppress_pending_fact(&tx, "unattributed", None, Some(&conversation), &content)?;
         tx.execute("DELETE FROM unattributed_observations WHERE id=?1",[id]).map_err(db_error)?;
         bump_revision(&tx)?;tx.commit().map_err(db_error)
@@ -523,7 +539,7 @@ impl Store {
     pub fn conversation_ids_for_profile(&self, profile_id: &str) -> Result<Vec<String>, String> {
         validate_id(profile_id)?;
         let db = self.connection()?;
-        let mut stmt = db.prepare("SELECT id FROM conversations WHERE profile_id = ?1 ORDER BY created_at_ms, id")
+        let mut stmt = db.prepare("SELECT id FROM conversations WHERE profile_id = ?1 OR profile_id IN(SELECT source_profile_id FROM profile_aliases WHERE target_profile_id=?1) ORDER BY created_at_ms, id")
             .map_err(db_error)?;
         let rows = stmt.query_map([profile_id], |r| r.get(0)).map_err(db_error)?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)
@@ -540,6 +556,8 @@ impl Store {
         validate_id(conversation_id)?;
         let mut db = self.connection()?;
         let tx = db.transaction().map_err(db_error)?;
+        super::household::forget_conversation_data(&tx,conversation_id)?;
+        tx.execute("DELETE FROM memories WHERE source_ref=?1",[format!("auto:{conversation_id}")]).map_err(db_error)?;
         tx.execute("DELETE FROM unattributed_observations WHERE conversation_id = ?1",[conversation_id]).map_err(db_error)?;
         tx.execute("DELETE FROM conversations WHERE id = ?1", [conversation_id]).map_err(db_error)?;
         bump_revision(&tx)?;
@@ -597,7 +615,7 @@ impl Store {
         };
         Ok(json!({
             "path": self.path,
-            "schema_version": 4,
+            "schema_version": 5,
             "revision": count("SELECT revision FROM data_revision WHERE singleton = 1")?,
             "profiles": count("SELECT count(*) FROM profiles")?,
             "memories": count("SELECT count(*) FROM memories")?,
@@ -690,7 +708,8 @@ pub(super) fn enum_column<T: DeserializeOwned>(row: &Row<'_>, column: usize) -> 
 
 fn profile_row(row: &Row<'_>) -> rusqlite::Result<Profile> {
     Ok(Profile { id: row.get(0)?, display_name: row.get(1)?, is_child: row.get(2)?,
-        created_at_ms: row.get(3)?, updated_at_ms: row.get(4)? })
+        created_at_ms: row.get(3)?, updated_at_ms: row.get(4)?,
+        merged_into: if row.as_ref().column_count()>5 {row.get(5)?}else{None} })
 }
 
 fn memory_row(row: &Row<'_>) -> rusqlite::Result<MemoryRecord> {

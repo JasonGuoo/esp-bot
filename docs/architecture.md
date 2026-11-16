@@ -1,8 +1,8 @@
 # 小呆系统架构：Bot 交互终端与 Mac 家庭后端
 
-**当前设计：2026-11-16；源码对照：`90972a37530b68b8c8c9729960ac15e901c9d946`。** 本文是系统职责与产品约束的总入口。新家庭设计详见 [家庭陪伴规格](specs/household-companion/README.md)，事件与所有权见 [模块契约](module-contracts.md)，开发次序见 [实施计划](specs/household-companion/implementation-plan.md)。
+**当前设计与源码交付：2026-11-16；开发基线：`5ae0c780e146a72ebf10f71f4d6976a0ed47e2fe`。** 本文是系统职责与产品约束的总入口。新家庭设计详见 [家庭陪伴规格](specs/household-companion/README.md)，事件与所有权见 [模块契约](module-contracts.md)，开发次序见 [实施计划](specs/household-companion/implementation-plan.md)。
 
-**设计与实现分开：** 这次确定的是下一阶段目标，未新增运行代码。已有 Mac 构建、S31 烧录与实际声音/设备结果以 [2026-11-15 验收](review-acceptance-2026-11-15.md) 为准。11 月 6 日、8 日、13 日的交付状态保留在各自记录中，不作为当前“尚无 WSS / 没有硬件”的判断依据。
+**源码开发完成，待测试：** 家庭、任务、呈现、身份和记忆链路已接线，具体入口、配置及剩余限制见 [2026-11-16 实施记录](specs/household-companion/implementation-2026-11-16.md)。本轮未编译、未运行模型、未执行 Mac GUI/打印/实板验收，没有 CI。[2026-11-15 验收](review-acceptance-2026-11-15.md) 只证明对应旧版本；各旧日期交付快照继续保留。
 
 ## 1. 产品方向与硬件约束
 
@@ -20,7 +20,7 @@
 | 能力 | Bot | Mac bot-server |
 | --- | --- | --- |
 | 唤醒与反馈 | 本地完整词、触摸、短应答、表情、字幕、立即停止 | 提供应答策略/素材更新，接收明确授权的输入 |
-| 声音理解 | 单 codec owner、有界 PCM、必要 VAD/帧序号；AEC 独立开发 | ASR 与声纹独立通道并行，后续多人分段/重叠判断 |
+| 声音理解 | 单 codec owner、有界 PCM、必要 VAD/帧序号；真实参考 AEC 源码可选、默认关闭 | ASR 与声纹独立通道并行，已接多人分段/重叠适配；实际模型效果待验收 |
 | 人物与注意力 | 短期 track、轻量相对眼睛位置和本地动画 | 家庭成员身份、模板、人工标注、来源修订；身份不等于授权 |
 | 对话与记忆 | 当前激活和执行 token，不保存整个家庭知识图 | 一天一个家庭逻辑记录、跨天话题、OpenCode compact、长期记忆与检索 |
 | 图文声音呈现 | 有界媒体解码/播放、相对时钟、真实回执、内容区域与表情 | 呈现规划、素材来源、排版/转码/TTS、音画依赖和能力降级 |
@@ -50,9 +50,9 @@
 
 显式唤醒后，运行时授权的音频送 Mac；ASR 与声纹应使用同一来源独立执行。ASR 有效后普通问题即可处理。身份较晚返回只修订说话者标注，不能重放工具、轮换整个家庭会话或追认权限。短句、多人重叠或无模板时保留未知，不强制配给一个人。
 
-当前代码的 ASR→声纹是顺序路径，Python worker 也只有一个调用槽；并行通道是 [HC-03](specs/household-companion/implementation-plan.md#hc-03) 的工作。多人 diarization 和家庭成员声纹匹配不同，后者需要实际模板/阈值；音量/DOA 和画面中的某个人都不能直接作为身份。
+当前源码使用独立受管 worker 通道处理 ASR、身份、TTS、记忆与媒体；身份结果通过带版本的来源观察异步补充，不串在普通回答关键路径上。多人分段复用 pyannote Community-1，合格单人片段再做 ECAPA 模板匹配；部署、中文和儿童语音效果尚未实测。音量/DOA 和画面中的某个人不能直接作为身份。
 
-现有 104 条本地语音继续复用。未来播放须区分唤醒 ACK、任务 ACK、真实进度、内容段和最终回答；中间 ACK 播完不能结束任务或换成下一轮 token。当前半双工与触摸停止保留；AEC/播放中语音打断在 [HC-14](specs/household-companion/implementation-plan.md#hc-14) 单独开发验收。
+现有 104 条本地语音继续复用。播放已区分唤醒 ACK、任务 ACK、真实进度、内容段、最终回答和试听；受管片段的硬件完成先回到思考态，最终呈现的媒体回执全部成功后才准备追问。当前半双工与触摸停止保留。单 codec 的实际 DAC 参考已接入 ESP-SR AFE，AEC/播放中语音打断均默认关闭，声学和资源验收仍在 [HC-14](specs/household-companion/implementation-plan.md#hc-14)。
 
 被动状态、LISTENING/THINKING/SPEAKING 子状态与可见图文的阅读许可分开。黑色覆盖层不等于背光物理断电。相机不可用时眼睛位置/人类目光保持 unknown；固定头部不能追到视野外的人，也不能声称已经物理对齐。[眼睛与头部](eye-contact.md)的相机相对几何和独立 gaze/location 规则保持。
 
@@ -62,17 +62,17 @@
 
 SQLite 先持久化原始输入、来源修订、实际呈现与动作证据。前台 OpenCode 按家庭有序接收输入，通过原生 compact 管理有限上下文；后台独立作业整理事件、主题、学习观察和耐久事实。compact 摘要、每日回顾、长期记忆、原始对话分别有覆盖范围与来源。
 
-Graphiti v0.31.2 是时序知识图/检索的选定评估候选，以 SQLite 为权威、图为可重建派生索引；官方 Saga 摘要不直接替代家庭日记。借鉴 Letta 的后台反思/水位思想，不另换主 Agent；Mem0 作为较简单事实存储的备选。[家庭记忆规范](specs/household-companion/household-memory.md)与[开源研究](research/household-memory-open-source-2026-11-16.md)记录版本、适配门槛和取舍。
+Graphiti v0.31.2 的受管适配、来源映射和重建作业已接入源码，以 SQLite 为权威、图为可重建派生索引；实际模型/数据库组合仍待部署验收，官方 Saga 摘要不直接替代家庭日记。借鉴 Letta 的后台反思/水位思想，不另换主 Agent；Mem0 作为较简单事实存储的备选。[家庭记忆规范](specs/household-companion/household-memory.md)与[开源研究](research/household-memory-open-source-2026-11-16.md)记录版本、适配门槛和取舍。
 
 说话者不等于事实主体，讲过不等于掌握；学习状态必须有实际作答/后续保持等证据。改标、纠错、删除要传播到派生摘要/索引/受影响上下文。旧个人私密数据、留存关闭选择和外发限制在迁移中保留，不默认变成家庭公开资料。
 
 ## 6. 持续任务与呈现
 
-Mac 任务有独立 `task_id`、状态、进度、取消、素材与效果回执。任务可以跨设备激活和午夜，但旧输出许可失效后不能自行重新播报。当前全局 `turn_gate`/`ActiveTurn` 必须解耦，不能只是把原阻塞流程放进后台线程；同一 OpenCode 前台会话仍需串行输入。
+Mac 任务有独立 `task_id`、状态、进度、取消、素材与效果回执。任务可以跨设备激活和午夜，但旧输出许可失效后不能自行重新播报。当前按会话串行前台输入，持久任务使用独立执行会话和有限调度槽；不会在前台会话门内等待后台任务完成。原生 compact 的接纳和完成核对分开，SSE 按当前 inbox 投递证据归属本轮。
 
 `PresentationPlanner` 是专门的呈现职责：用模板或主模型同轮语义计划选择讲多少、显示什么、何时换图与表情；必要时才额外调用规划模型。冻结语义片段后并行准备 TTS 和图片，分别记录不可变素材、播放尝试和实际回执。必需图像失败是部分完成，网络发送结束不是用户已看/已听。
 
-图文、准确笔顺/公式/示意图、音视频检索与创意插画采用适合的来源和渲染手段。Mac 负责排版/字体/缩放/转码，Bot 负责经过能力协商的有界播放；保留来源以便回看和打印。先交付静态图文与语音，视频在实际 codec、内存、JPEG 争用和同步能力通过后启用。
+图文、准确笔顺/公式/示意图、音视频检索与创意插画采用适合的来源和渲染手段。Mac 负责排版/字体/缩放/转码，Bot 负责经过能力协商的有界播放；保留来源以便回看和打印。源码已接静态图文、分段语音、Mac 媒体预览和有界 JPEG 帧播放；视频上限是资源预算，实际 codec、内存、JPEG 争用及同步效果尚待实板验收。
 
 体验遵循“短应答→真实阶段→逐步回答”。进度来自任务/工具事件，不能编造正在搜索或画图。打印等动作使用明确的意图、幂等键和实际任务标识；提交打印队列不等于纸已输出。详见 [呈现与任务](specs/household-companion/presentation-and-tasks.md)。
 
@@ -80,12 +80,12 @@ Mac 任务有独立 `task_id`、状态、进度、取消、素材与效果回执
 
 现有配对 Mac 发现和认证 WSS v3 已接入固件；WSS 承载凭据、控制和文字。用户当前选择的逐轮局域网 PCM TCP 带完整性校验但不保密，本设计不悄悄改变这项选择。LAN v1 仍是独立诊断边界。BLE 配网/低带宽控制继续作为独立后续工作；不能承诺 BLE 全语音/视频。
 
-当前协议以 [shared/mac-brain-v3.md](../shared/mac-brain-v3.md)、[已有语音任务协议](specs/server-voice-tasks/protocol.md)和实际头文件为准。家庭/任务/呈现的新增 ID、状态和能力字段是目标契约，先协商版本与旧端降级，再改线协议。旧 Python Brain/HTTP poller 是历史原型，不是选择中的后端。
+当前协议以 [shared/mac-brain-v3.md](../shared/mac-brain-v3.md)、[已有语音任务协议](specs/server-voice-tasks/protocol.md)和实际头文件为准。家庭/任务/呈现的领域 ID 与设备 runtime 分开；`presentation.segments.v1` 经能力协商启用，旧端保留单次回复契约。精确字段和跨片段音频通道语义见 [固件接线记录](../firmware/HOUSEHOLD_INTEGRATION.md)。旧 Python Brain/HTTP poller 是历史原型，不是选择中的后端。
 
 ## 8. 当前状态与交付纪律
 
-可复用基础包括 runtime/bus、完整词唤醒与本地语音、WSS/逐轮媒体、Mac ASR/OpenCode/TTS、身份模板代码、SQLite 记忆和受限图文显示。家庭日记录、并行身份、持久任务、结构化呈现、多媒体同步和 Graphiti 尚需按 [HC-01～HC-15](specs/household-companion/implementation-plan.md) 开发。实板/模型的实际限制从验收记录读取，不能因为已有适配代码就宣称家庭身份识别通过。
+[HC-01～HC-15](specs/household-companion/implementation-plan.md) 的源码和手工验收记录入口已交付，当前状态统一为“开发完成，待测试”。包括家庭日记录、并行身份、持久任务、结构化呈现、媒体准备、Graphiti、人工标注与学习证据；HC-15 的 18 个场景没有执行，也没有勾选通过。完整功能边界和未部署依赖以 [实施记录](specs/household-companion/implementation-2026-11-16.md) 为准。
 
-已有 [#7～#11](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+is%3Aopen) 保留为独立缺陷，特别是动态记忆导致会话重置与准备语音进度缺失；设计文档合并不等于修复。
+已有 [#7～#11](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+is%3Aopen) 的停止、路由冷却、稳定会话、设置关闭顺序和 TTS 进度路径已作源码修正，仍单独保持待测试，不因源码合并宣称已验收。
 
 坚持官方示例和成熟项目优先、一个所有者、明确来源、可取消和诚实回执。**No CI。** 没有合适硬件/模型时继续写模块化代码，交付时分别说明已写源码、构建、本机运行与实板验收。

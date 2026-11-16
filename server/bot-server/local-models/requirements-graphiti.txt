@@ -1,0 +1,3 @@
+# Optional, isolated sidecar environment. No dependency/model is installed at
+# app startup. Python >= 3.10; a local FalkorDB or Neo4j service is configured.
+graphiti-core[falkordb]==0.31.2

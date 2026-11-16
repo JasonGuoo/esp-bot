@@ -13,13 +13,16 @@ pub struct BrainConfig {
     pub memory: MemoryConfig,
     pub gateway: GatewayConfig,
     pub conversation: ConversationConfig,
+    pub tasks: super::tasks::TaskConfig,
+    pub presentation: super::presentation::PresentationConfig,
 }
 
 impl Default for BrainConfig {
     fn default() -> Self {
         Self { schema_version: 1, auto_start: false, harness: HarnessConfig::default(),
             models: ModelWorkerConfig::default(), memory: MemoryConfig::default(),
-            gateway: GatewayConfig::default(), conversation: ConversationConfig::default() }
+            gateway: GatewayConfig::default(), conversation: ConversationConfig::default(),
+            tasks: Default::default(), presentation: Default::default() }
     }
 }
 
@@ -76,9 +79,13 @@ pub fn load_or_create(dir: &Path, bundled_worker: Option<PathBuf>) -> Result<Bra
     // Installations migrated by our helper use this known default; prefer the
     // current signed bundle on updates. User-selected custom workers are kept.
     if config.models.script.as_deref() == Some(dir.join("engines/local-models/worker.py").as_path()) {
-        if let Some(resource) = bundled_worker { config.models.script = Some(resource); }
+        if let Some(resource) = bundled_worker.clone() { config.models.script = Some(resource); }
     }
     if config.models.model_dir.is_none() { config.models.model_dir = Some(dir.join("models/local")); }
+    if config.tasks.media_script.is_none() { config.tasks.media_script = bundled_worker.as_ref().or(config.models.script.as_ref()).and_then(|p|p.parent()).map(|p|p.join("media_prepare.py")).filter(|p|p.is_file()); }
+    // Media helpers use Pillow from the explicitly configured local-model
+    // environment. Keep an operator-selected separate interpreter intact.
+    if config.tasks.python==super::tasks::TaskConfig::default().python {config.tasks.python=config.models.python.clone();}
     validate(&config)?;
     if config.harness.upgrade_route_order() {
         // Persist the revision with the route change in one atomic write. Do
@@ -92,6 +99,9 @@ pub fn validate(config: &BrainConfig) -> Result<(), String> {
     if config.schema_version != 1 { return Err("unsupported_brain_config_version".into()); }
     config.harness.validate()?;
     config.memory.validate()?;
+    config.tasks.validate()?;
+    config.presentation.validate()?;
+    if config.models.diarization_model.as_ref().is_some_and(|p|!p.is_absolute()){return Err("diarization_path_must_be_absolute".into());}
     if !(100..=4000).contains(&config.conversation.max_reply_characters) { return Err("reply_limit_must_be_100_to_4000".into()); }
     if !(30..=1800).contains(&config.conversation.idle_session_seconds) { return Err("session_idle_must_be_30_to_1800_seconds".into()); }
     if config.conversation.media_hosts.len() > 32 || config.conversation.media_hosts.iter().any(|host|

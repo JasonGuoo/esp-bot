@@ -1,6 +1,8 @@
 # 小呆 Mac Brain v3：设备控制与音频协议
 
-**2026-11-13 更新：** Mac 服务端和 ESP32-S31 固件加入可选自由问答语音、播放就绪/
+**2026-11-16 当前状态：源码开发完成，待测试。** 新增 `presentation.segments.v1`、分段真实回执、独立输出 lease，以及同一音频 TCP 连接上的多段播放。领域任务/家庭记录与设备 runtime 分开；旧客户端保留原单次回复。精确固件接线见 [HOUSEHOLD_INTEGRATION.md](../firmware/HOUSEHOLD_INTEGRATION.md)，配置及剩余边界见 [实施记录](../docs/specs/household-companion/implementation-2026-11-16.md)。本轮未编译 Rust/TypeScript/ESP-IDF、未运行模型、未执行 Mac GUI/打印/实板验证，没有 CI；[11 月 15 日验收](../docs/review-acceptance-2026-11-15.md) 仅对应旧版本。
+
+**2026-11-13 初始交付快照：** Mac 服务端和 ESP32-S31 固件加入可选自由问答语音、播放就绪/
 硬件回执、同回合起音保留与下一句预连接的源码。默认仍为静默图文，用户开启设备
 “语音回答”后才协商音频。以下是源代码契约；本次环境没有 Cargo、S31 ESP-IDF
 或实板，未做 Rust/固件构建、真实 TTS/模型调用或扬声器验收。已有实机记录见
@@ -14,7 +16,8 @@ TXT 包含 `proto=3`、`path=/v3/brain/ws` 和公有配对 CA 的 DER SHA-256 �
 本文对应以下源码；调整实现时应同步更新本文：
 
 - [gateway.rs](../server/bot-server/src-tauri/src/brain/gateway.rs)：握手、会话、请求、取消、音频下行。
-- [plain_audio.rs](../server/bot-server/src-tauri/src/brain/plain_audio.rs)：逐回合局域网明文音频与完整性校验。
+- [gateway/segments.rs](../server/bot-server/src-tauri/src/brain/gateway/segments.rs)：分段调度、输出 lease、素材与硬件回执归属。
+- [plain_audio.rs](../server/bot-server/src-tauri/src/brain/plain_audio.rs)：逐回合局域网明文音频与完整性校验；连接支持多段下行流。
 - [media.rs](../server/bot-server/src-tauri/src/brain/media.rs)：PCM 边界和二进制帧。
 - [credentials.rs](../server/bot-server/src-tauri/src/brain/credentials.rs)：设备凭据。
 - [mod.rs](../server/bot-server/src-tauri/src/brain/mod.rs)：回合协调和返回值。
@@ -64,7 +67,7 @@ TLS 使用服务端证书认证，设备凭据使用 Bearer；当前没有客户
   "v": 3,
   "type": "welcome",
   "device_id": "xiaodai-001",
-  "capabilities": ["assistant.text", "audio.pcm16", "speaker.candidate", "scene.cards", "display.reply.v1", "audio.reply.v1"],
+  "capabilities": ["assistant.text", "audio.pcm16", "speaker.candidate", "scene.cards", "display.reply.v1", "audio.reply.v1", "presentation.segments.v1"],
   "sample_rate": 16000,
   "max_audio_seconds": 30,
   "requires_activation": true
@@ -72,7 +75,7 @@ TLS 使用服务端证书认证，设备凭据使用 Bearer；当前没有客户
 ```
 
 这里的 capabilities 表示服务端协议入口；不代表本地模型已经安装、模型权重已加载，
-也不代表设备已经支持网页、图片或音频渲染。
+也不代替设备的输出能力协商和实际显示/播放回执。当前设备支持有界文字、JPEG 与 PCM；没有网页浏览器或任意视频格式解码器。
 
 ## 2. 唯一 JSON 信封与 ID
 
@@ -149,14 +152,14 @@ Mac 生成的会话格式为 `device-<device_id>-<32 位 UUID>`，内部回合�
 | `session.open` | 没有已打开会话、执行中回合或待发送音频 | 打开一次明确激活的会话，立即响应 |
 | `assistant.text` | 已打开会话，没有采集、执行或播放 | 使用设备已有 ASR / 明确文本，完成整个回合后响应 |
 | `audio.begin` | 已打开会话，没有采集、执行或播放 | 在内存开始接收一段 PCM，立即响应 |
-| `audio.commit` | 已打开会话，存在对应 PCM，当前未执行或播放 | 封装 WAV，调用 Mac ASR，再完成回合后响应 |
+| `audio.commit` | 已打开会话，存在对应 PCM，当前未执行或播放 | 封装 WAV，接入 ASR/身份通道；分段模式可返回 `presentation_pending` 并继续异步交付 |
 | `audio.playback.ready` | 当前回复声明 `playback_ack=hardware_v1`；令牌和 stream 匹配 | 设备已保留唯一硬件播放队列，Mac 才开始发送 PCM |
-| `audio.playback.report` | 当前播放的完整令牌和 stream 匹配 | 上报 `started / finished / failed / cancelled`，终态释放 Mac 播放状态 |
+| `audio.playback.report` | 当前播放的完整令牌和 stream 匹配 | 上报 `started / finished / failed / cancelled`，终态释放该音频流，不自动结束整份呈现 |
+| `presentation.segment.report` | 已协商分段；runtime、plan、lease、index、segment、seq 全部匹配 | 汇总该片段的实际媒体终态及停留；成功后才允许下一片段 |
 | `assistant.cancel` | 无需 runtime 参数 | 取消本连接采集、回合和音频下行，保留已打开会话 |
 | `session.close` | 无需 runtime 参数 | 同上，并结束本连接会话 |
 
-同一连接只允许一段输入采集或一个回合/播放流程。不同设备连接和 Mac 控制台还共享
-单个 Brain 回合执行门，繁忙时可能返回 `brain_busy`；连接数上限不等于并行推理数。
+同一设备连接仍只允许一段输入采集或一个前台回合/呈现流程。同一 OpenCode 前台会话串行接纳输入；持久后台任务使用独立执行会话与有限调度槽，不以原单个 `ActiveTurn` 承载全部工作。worker 和任务容量仍有界，连接数上限不等于并行推理数。
 
 ### 4.1 明确唤醒或触摸
 
@@ -192,11 +195,21 @@ Mac 生成的会话格式为 `device-<device_id>-<32 位 UUID>`，内部回合�
 
 ### 4.1.1 图文和语音能力
 
-当前固件在上述 payload 内额外发送：
+当前固件在上述 payload 内发送输出能力；只有服务器广告 `presentation.segments.v1` 时才请求分段扩展：
 
 ```json
-{"output":{"version":1,"audio":false,"cards":["text","image"],"image":{"mime":"image/jpeg","max_width":480,"max_height":272,"max_bytes":65536}}}
+{
+  "output": {
+    "version": 1, "audio": false, "cards": ["text", "image"],
+    "image": {"mime":"image/jpeg","max_width":480,"max_height":272,"max_bytes":65536},
+    "presentation": {"version":1,"max_segments":64,"max_duration_ms":120000,"frame_ack":true},
+    "video": {"mime":"video/x-motion-jpeg","transport":"jpeg_frames","max_width":480,
+      "max_height":272,"max_frame_bytes":65536,"max_fps":5,"max_duration_ms":15000}
+  }
+}
 ```
+
+Mac 确认 `payload.output.presentation` 后才发送分段事件；缺少该确认时保持原单次图文/语音路径。当前 `video` 是设备上限描述，Mac 不把它作为任意 codec 协商，也不逐项回显 `video`；实际 JPEG 帧限制见 §7.1。
 
 用户开启设备的 `spoken_answers` 设置且 Mac 广告 `audio.reply.v1` 时，`audio`
 改为 `true`。Mac 在 `payload.output` 原样确认音频选择，之后每轮按此会话值设置
@@ -300,6 +313,7 @@ ASR，也不从文字进行声纹识别。设备不能通过请求指定 `profil
 类型、数据和 32 字节 HMAC-SHA256。长度计算包括类型、数据和 HMAC，不包括长度自身；
 HMAC 覆盖类型与数据。上行类型为 `I`，下行类型为 `O`，数据均为完整 XDAI 帧。
 下行结束类型为 `E`，数据是 little-endian 的 `stream_id` 和帧数（各 4 字节）。
+**`E` 仅结束一条音频 stream，不关闭 TCP，也不结束任务或整份呈现。** 分段模式复用 `audio.begin` 已认证的同一 TCP/HMAC 通道，顺序接收各自新 stream ID 的 `O…E`；各流 PCM 序号从 0 重新开始，先独立 ready，再发送、校验并等待硬件终态。不得复用上一流的序号、改贴新 token 或在中间段 E 后关闭 socket。最终呈现结束、进入追问准备、取消/断线时由所有者释放该通道。
 设备必须验证 HMAC、方向、stream 和连续帧数。此校验只能防篡改，不能隐藏语音内容。
 省略 `transport` 的客户端则直接以 WebSocket Binary message 发送完整 XDAI 帧。
 
@@ -386,7 +400,7 @@ WAV 转为所选通道的 PCM 二进制；可播放音频的描述在**顶层 `a
 URL 不包含凭据，不允许非 443 端口、IP 字面量、localhost 或 `.local` 主机。
 场景不承载可执行 HTML、脚本、动作轨迹或摄像头启动命令。设备应按自己的屏幕能力
 选择展示方式；`image` 卡片并不等同于已实现 GIF 解码，`web` 卡片也不等同于板端
-已经有浏览器。渲染能力只协商已实现的文字和有界静态图，不支持后台主动推送任务。
+已经有浏览器。旧单次路径协商文字和有界静态图；分段扩展可顺序执行有界 JPEG 帧。后台任务只有在原 runtime/output lease 仍有效时才可继续输出，完成任务本身不能主动唤醒设备或领取新许可。
 
 `identity_candidate` 是本地识别候选结果。它不是鉴权、家长确认、当前注意力对象或
 可自动使用个人记忆的证明；设备请求始终不携带受信任 profile。身份与记忆规则见
@@ -437,11 +451,9 @@ Mac 收到 ready 后才约每 20 ms 发送最多 640 字节 PCM。序号从 0 �
 `status` 可为 `started / finished / failed / cancelled`。finished 仅在服务器已发送
 完整内容、已收到 started、帧数和字节数吻合时接纳。重复终态回执幂等；新流不会
 接纳旧流回执。Mac 后端事件/回执流的 `device.audio` 记录 ready、硬件状态或 unavailable/unconfirmed，
-不将“排队/发完”记为“听完”。无 ready 最多等 5 秒，ready 后最多等 PCM 时长加
-10 秒，超时释放媒体并发带原 token/stream 的 `audio.cancelled`。
-本轮没有新增 Mac 前端的细分播放状态面板；以上状态是后端事件与日志契约。
+不将“排队/发完”记为“听完”。纯音频无 ready 最多等 5 秒；分段中带图像时给首次显示 30 秒准备窗口。ready 后最多等 PCM 时长加 10 秒，超时释放媒体并发带原 token/stream 的 `audio.cancelled`。家庭控制台可查看呈现计划及独立显示、音频和汇总回执；Mac 本地预览不记作 Bot 已播放。
 
-正常硬件 DONE 由 runtime 开启下一句；如果预留失败，或首个 STARTED 前硬件失败，
+旧单次回复的正常硬件 DONE 由 runtime 开启下一句；分段路径改为等待 §7.1 的汇总完成。旧路径如果预留失败，或首个 STARTED 前硬件失败，
 保留已接纳的文字并按文字回复结束。TTS 失败、WAV 格式错误或超长时，顶层 audio
 为 null，`payload.audio_status={requested,available,code}` 和 Mac `device.audio`
 说明原因，不发送半条截断 PCM。硬件完成仍不能证明扬声器连线、音量或人耳确实听到；
@@ -451,7 +463,7 @@ Mac 收到 ready 后才约每 20 ms 发送最多 640 字节 PCM。序号从 0 �
 一次；codec 仍应用用户音量和静音，网络路径不会解除静音。真实硬件写入进展刷新
 本轮无进展计时，WSS 心跳或网络发送进度不会延长硬件播放许可。
 
-当前链路按半双工工作：新协商客户端等待实际硬件终态期间，新的 begin/text 返回 `session_busy`。
+默认链路按半双工工作：新协商客户端等待实际硬件终态期间，新的 begin/text 返回 `session_busy`。
 需要打断时，设备先在本地立即停播并清空旧缓冲，再发：
 
 ```json
@@ -488,7 +500,53 @@ cancel/close 会清空播放状态并返回确认；不能要求此路径一定�
 
 `session.close` 的请求形式与 cancel 相同，只需替换 method；其确认也是
 `payload: {"cancelled": true}`，并要求下一次交互重新明确激活。关闭会话不删除历史。
-当前没有全双工、声学回声消除、自动声学打断、流式 ASR 或边生成边 TTS 的保证。
+当前默认不提供全双工效果保证。真实 DAC 参考 AEC 和播放中语音打断已有默认关闭的可选源码，未做声学校准；不能因开关存在声称效果通过。流式 ASR 和边生成边 TTS 也不在当前保证内。
+
+### 7.1 分段呈现、输出许可与汇总回执
+
+`audio.commit` 的成功响应可带 `payload.presentation_pending=true`。这表示前台请求已接纳，呈现/后台任务仍在原 runtime 下等待交付；固件不得同时走旧单次回复完成逻辑。服务端用 WSS `presentation.segment` 顺序发段，例如：
+
+```json
+{
+  "v":3,"type":"event","event":"presentation.segment",
+  "runtime":{"epoch":7,"session_id":12,"turn_id":2,"focus_generation":0},
+  "payload":{
+    "presentation_id":"plan-1","output_lease_id":"lease-1","presentation_index":1,
+    "segment_id":"segment-1","seq":1,"purpose":"task_ack","final":false,
+    "hold_ms":200,"scene":{"speech":"好，我来看看。","expression":"thinking","cards":[]},
+    "audio":null
+  }
+}
+```
+
+图卡沿用现有 `asset` 描述（JPEG、尺寸、字节数、SHA-256），音频沿用 §7 的 PCM 描述；一段最多一张图。无音频时 `audio:null` 合法。JPEG 动态帧使用 `media_kind:"mjpeg_frame"`；普通段必须省略 `media_kind`，不能发送 `null`。
+
+| 字段/约束 | 当前执行语义 |
+| --- | --- |
+| `presentation_id` / `output_lease_id` | 冻结计划与本次输出许可分别编号；读取素材、发段和回执均检查来源与 lease 有效性 |
+| `presentation_index` | 同 runtime 从 1 开始；仅在上一个 `task_ack`/`progress` 计划全部完成且没有在播段时，允许下一个 index、新计划和新 lease 从 seq 1 开始 |
+| `seq` / `segment_id` | 计划内从 1 严格递增；当前只有一段在途；每个 runtime 累计最多 64 段，每份计划最多 120 秒 |
+| `purpose` / `final` | 远端为 `task_ack`、`progress`、`content`、`final`；`final` 布尔值须与 final 用途一致。本地唤醒 ACK 和试听另有 runtime 许可 |
+| `hold_ms` | 0～30,000 ms；实际媒体就绪/完成后的最短停留，不能替代显示或音频证据 |
+| JPEG / PCM | JPEG ≤480×272、65,536 字节；PCM16 LE、16 kHz、单声道、每帧最多 320 样本；不在设备缓存完整视频 |
+| JPEG 帧短片 | 每帧可见停留至少 200 ms，连续墙钟预算 15 秒；Mac 准备最多 12 秒/60 帧，回压可能耗尽预算，不声明已达到 5 fps |
+
+设备先等文本/图像实际 LVGL flush，或明确记录图像失败降级，再发音频 ready。硬件 DONE 只清理该流并回到思考态；所有必要媒体成功及停留结束后，发送：
+
+```json
+{
+  "v":3,"type":"request","id":"r-segment-1","method":"presentation.segment.report",
+  "payload":{
+    "runtime":{"epoch":7,"session_id":12,"turn_id":2,"focus_generation":0},
+    "presentation_id":"plan-1","output_lease_id":"lease-1","presentation_index":1,
+    "segment_id":"segment-1","seq":1,"status":"completed","code":""
+  }
+}
+```
+
+`status` 只有 `completed` 或 `failed`。网关核对完整标识后才派下一段，并分别保存显示、音频和汇总证据；失败不会归成成功显示/播放。设备只有最后 `final` 段的汇总完成才准备下一句，ACK/进度播完继续等待。失败、取消、断线或新 runtime 撤销旧输出，旧段不得换贴新 token 后回流。
+
+后台任务可在 ACK/进度之后使用递增 index 交付新冻结计划，但不会通过修改原计划来混用 revision。预算不足时服务端保留 Mac 上的完整产物，记录 `device.presentation.deferred` 并用 `presentation_budget_exhausted` 结束设备交付；不能截断尾部再报告完整完成。设备停播或用户插话仅收回相应输出许可，不自动取消已提交的打印等持久工作；取消任务需要明确的任务范围。
 
 ## 8. 主动事件、超时与资源边界
 
@@ -497,7 +555,8 @@ cancel/close 会清空播放状态并返回确认；不能要求此路径一定�
 | `session.expired` | 未执行/未发送音频且超过会话空闲期限；清除会话和采集，再次交互需明确激活 |
 | `session.cancelled` | 家长全局取消，或取消广播接收落后后保守关闭会话；立即清空旧媒体与会话 |
 | `audio.cancelled` | 对应音频下行被家长取消；停止该 stream 并丢弃其剩余帧 |
-| `audio.complete` | 服务端结束发送流程；明文音频还需等待独立通道的 `E` 帧和本地播放缓冲排空 |
+| `audio.complete` | 服务端结束该 stream 的发送；明文音频仍需等待独立通道的 `E` 帧和本地播放缓冲排空 |
+| `presentation.segment` | 在当前 runtime/lease 下执行一段冻结内容；收齐该段实际回执后才接下一段 |
 
 前两个无关联请求 ID，新 Server 携带实际采集/回合的完整 runtime；设备仍兼容旧 Server
 省略 runtime 的整会话取消。音频取消必须校验原 token 和 stream。
@@ -561,9 +620,9 @@ cancel/close 会清空播放状态并返回确认；不能要求此路径一定�
 仍只用于诊断，不负责媒体。断线和本地停止会撤销会话，超出容量时停止而不继续发送。
 这些接线必须以实机和真实服务验证；连接上旧诊断通道不等于通过安全握手。
 
-USB 配对、Wi-Fi 联网及一次语音回合已有实测；两轮对话、稳定延迟、实体扬声器和长期
-内存余量仍须按本次记录逐项验收。
-专用完整唤醒词模型尚未准备，现阶段需明确触摸；语义卡片中的网页和图片也没有板端播放器。
+USB 配对、WSS、既有语音与图文链路的旧版本结果见 [2026-11-15 验收](../docs/review-acceptance-2026-11-15.md)；本轮家庭/分段/AEC 源码没有重新构建或实板执行，稳定延迟、连续播放、声学效果和长期内存余量都须按新版本验收。
+
+专用 WakeNet 模型仍未准备，但固件已有官方 MultiNet7 的完整“小呆小呆”命令路径和 104 条本地应答，不能再把当前入口描述为“只能触摸”。LVGL/官方 JPEG 路径已支持有界静态图，并接入逐帧 JPEG 短片；网页仍是来源链接，没有板端浏览器，也没有 MP4/H.264 通用解码器。AEC 与语音打断默认关闭，现有半双工及触摸停止保持兼容。
 
 本版 v3 **没有图像上传、人脸注册或人脸识别方法**。Mac 控制台已有明确点击的本地
 相机/文件识别入口，但不属于本设备协议。设备也不能通过本接口管理记忆、删除档案、

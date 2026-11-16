@@ -1,12 +1,16 @@
 # 工程路线与真实实现清单
 
-**当前路线：2026-11-16；源码基线 `90972a37530b68b8c8c9729960ac15e901c9d946`。** 用户选择 Bot 作为轻量交互终端、Mac 作为完整家庭后端。详细范围、依赖和逐步开发清单集中在 [家庭陪伴实施计划](specs/household-companion/implementation-plan.md)，避免在多个旧路线图分别维护进度。
+**当前源码交付：2026-11-16；开发基线 `5ae0c780e146a72ebf10f71f4d6976a0ed47e2fe`。** 用户选择 Bot 作为轻量交互终端、Mac 作为完整家庭后端。详细范围、依赖和逐步开发清单集中在 [家庭陪伴实施计划](specs/household-companion/implementation-plan.md)，避免在多个旧路线图分别维护进度。
 
-本次仅更新设计与计划。最近的构建/实板记录是 [2026-11-15 验收](review-acceptance-2026-11-15.md)；原 11 月 6 日 source-only 交付见 [local-runtime.md](local-runtime.md) 与 [board-bringup-2026-11-06.md](board-bringup-2026-11-06.md)，不能再将“硬件未到 / 固件没有 WSS”作为当前判断。
+**HC-01～HC-15 与 #7～#11 的源码开发完成，待测试。** 家庭档案、并行识别、连续上下文、持久任务、呈现/媒体/打印、后台记忆和家庭 UI 的实际接线与配置统一见 [2026-11-16 实施记录](specs/household-companion/implementation-2026-11-16.md)。HC-15 交付 18 个手工场景及记录入口，场景尚未执行。AEC/语音打断默认关闭；Graphiti、分段模型与媒体依赖需要用户环境准备和验收。
 
-## 1. 已有基础与本次缺口
+本轮未编译 Rust/TypeScript/ESP-IDF、未运行模型、未执行 Mac GUI/打印/实板检查，没有 CI。最近的 [2026-11-15 验收](review-acceptance-2026-11-15.md) 对应旧版本；原 11 月 6 日 source-only 交付见 [local-runtime.md](local-runtime.md) 与 [board-bringup-2026-11-06.md](board-bringup-2026-11-06.md)，不以旧快照描述当前代码。
 
-| 领域 | 当前可复用基础 | 后续工作 / 验收限制 |
+## 1. 设计时的基础与缺口（历史快照）
+
+下表保留设计对照提交 `90972a37530b68b8c8c9729960ac15e901c9d946` 的观察和拆分依据，**不是当前源码缺口清单**。当时未实现的家庭软件路径已在本次接线；仍未执行的声学、模型和硬件验收见上述实施记录。
+
+| 领域 | 设计时可复用基础 | 当时待开发工作 / 验收限制 |
 | --- | --- | --- |
 | 唤醒与本地反馈 | MultiNet7 完整“小呆小呆”、104 本地语音、运行时选择与表情 | 专用 WakeNet、稳定识别统计和更多家庭声学条件；任务中 ACK 完成语义需改造 |
 | 实时协调 | runtime/bus、单音频 owner、token/fence、触摸停止、设置持久化 | 输入、后台任务和输出许可解耦；已有 #7/#10 缺陷 |
@@ -32,9 +36,9 @@
 | F | 多人重叠分段与播放中 AEC 打断 | HC-13、HC-14 |
 | G | 贯穿各阶段的家庭场景与资源记录 | HC-15 |
 
-[每项开发步骤与验收条件](specs/household-companion/implementation-plan.md)包括代码入口、依赖、迁移/失败边界。GitHub [HC-00 总跟踪项](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-00%22)是动态状态入口。设计合并后再创建对应 issues；不能因文档合并关闭任何实现任务。
+[每项开发步骤与验收条件](specs/household-companion/implementation-plan.md)保留代码入口、依赖、迁移/失败边界。上述阶段的源码已交付，运行及效果验收仍待执行；GitHub [HC-00 / #13](https://github.com/JasonGuoo/esp-bot/issues/13) 与 #14～#28 是动态状态入口，不以源码合并替代验收关闭任务。
 
-现有 [#7](https://github.com/JasonGuoo/esp-bot/issues/7)、[#8](https://github.com/JasonGuoo/esp-bot/issues/8)、[#9](https://github.com/JasonGuoo/esp-bot/issues/9)、[#10](https://github.com/JasonGuoo/esp-bot/issues/10)、[#11](https://github.com/JasonGuoo/esp-bot/issues/11)仍单独跟踪。优先修复影响停止、连续追问和真实进度的路径，不为同一缺陷重复建单。
+现有 [#7](https://github.com/JasonGuoo/esp-bot/issues/7)、[#8](https://github.com/JasonGuoo/esp-bot/issues/8)、[#9](https://github.com/JasonGuoo/esp-bot/issues/9)、[#10](https://github.com/JasonGuoo/esp-bot/issues/10)、[#11](https://github.com/JasonGuoo/esp-bot/issues/11)已有对应源码修正，仍单独跟踪为待测试，不为同一缺陷重复建单。
 
 ## 3. 关键约束
 

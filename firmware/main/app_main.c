@@ -50,12 +50,17 @@ typedef struct {
     atomic_uint image_requested, image_started, image_flushing, image_ready;
     bool display_refresh_active; /* LVGL lock only; excludes diagnostic snapshots */
     unsigned text_generation, image_generation;
+    uint32_t result_sequence, image_sequence;
     bot_session_token_t result_token, image_token;
     char image_asset_id[BOT_DISPLAY_ASSET_ID_BYTES];
     attention_controller_t attention;
     idle_attention_t idle_attention;
     bot_runtime_snapshot_t desired;
     bot_voice_settings_t voice_persist_attempt;
+    /* Written only from the LVGL UI owner. Not the runtime session identity. */
+    uint32_t settings_lease, settings_revision;
+    bool settings_has_value;
+    bot_voice_settings_t settings_last_value;
     bot_preferences_request_t preferences;
     bot_preferences_result_t persisted;
     bot_voice_diagnostics_t voice_diagnostics;
@@ -197,6 +202,10 @@ static void audio_event(void *context, const bot_audio_event_t *source) {
         ESP_LOGI(TAG, "Full wake phrase detected: backend=%d score_available=%d score=%.3f",
                  source->wake_backend, source->confidence_available, (double)source->confidence);
         break;
+    case BOT_AUDIO_EVENT_BARGE_IN:
+        event.kind = BOT_EVENT_BARGE_IN;
+        event.data.playback.id = source->playback_id;
+        break;
     case BOT_AUDIO_EVENT_VAD_STARTED:
         event.kind = BOT_EVENT_UTTERANCE_STARTED;
         event.data.utterance.echo_safe = source->echo_safe;
@@ -236,18 +245,24 @@ static void audio_event(void *context, const bot_audio_event_t *source) {
     case BOT_AUDIO_EVENT_PLAYBACK_STARTED:
         event.kind = BOT_EVENT_PLAYBACK_STARTED;
         event.data.playback.id = source->playback_id;
+        event.data.playback.purpose = source->playback_purpose;
+        event.data.playback.presentation_managed = source->presentation_managed;
         event.data.playback.local_response = source->playback_source == BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE;
         event.data.playback.preview = source->playback_source == BOT_AUDIO_PLAYBACK_PREVIEW;
         break;
     case BOT_AUDIO_EVENT_PLAYBACK_PROGRESS:
         event.kind = BOT_EVENT_PLAYBACK_PROGRESS;
         event.data.playback.id = source->playback_id;
+        event.data.playback.purpose = source->playback_purpose;
+        event.data.playback.presentation_managed = source->presentation_managed;
         event.data.playback.local_response = source->playback_source == BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE;
         event.data.playback.preview = source->playback_source == BOT_AUDIO_PLAYBACK_PREVIEW;
         break;
     case BOT_AUDIO_EVENT_PLAYBACK_DONE:
         event.kind = BOT_EVENT_PLAYBACK_DONE;
         event.data.playback.id = source->playback_id;
+        event.data.playback.purpose = source->playback_purpose;
+        event.data.playback.presentation_managed = source->presentation_managed;
         event.data.playback.local_response = source->playback_source == BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE;
         event.data.playback.preview = source->playback_source == BOT_AUDIO_PLAYBACK_PREVIEW;
         break;
@@ -255,6 +270,8 @@ static void audio_event(void *context, const bot_audio_event_t *source) {
     case BOT_AUDIO_EVENT_PLAYBACK_FAILED:
         event.kind = BOT_EVENT_PLAYBACK_FAILED;
         event.data.playback.id = source->playback_id;
+        event.data.playback.purpose = source->playback_purpose;
+        event.data.playback.presentation_managed = source->presentation_managed;
         event.data.playback.local_response = source->playback_source == BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE;
         event.data.playback.preview = source->playback_source == BOT_AUDIO_PLAYBACK_PREVIEW;
         break;
@@ -466,6 +483,17 @@ static void face_event(face_event_t event, void *context) {
     bot_event_t message = { .source = BOT_SOURCE_LOCAL_UI, .observed_ms = bot_platform_now_ms(),
         .kind = event == FACE_EVENT_RESULT_DISMISSED ? BOT_EVENT_RESULT_DISMISSED :
                 event == FACE_EVENT_SETTINGS_OPENED ? BOT_EVENT_SETTINGS_OPEN : BOT_EVENT_SETTINGS_CLOSE };
+    if (event == FACE_EVENT_SETTINGS_OPENED) {
+        if (++app->settings_lease == 0) ++app->settings_lease;
+        app->settings_revision = 0;
+        app->settings_has_value = false;
+    }
+    message.settings_lease = app->settings_lease;
+    if (event == FACE_EVENT_SETTINGS_CLOSED && app->settings_has_value) {
+        message.settings_revision = app->settings_revision;
+        message.settings_has_value = true;
+        message.data.voice_settings = app->settings_last_value;
+    }
     post(app, &message);
 }
 static void theme_applied(const char *theme, void *context) {
@@ -478,13 +506,19 @@ static bool sound_settings_request(const bot_voice_settings_t *settings, void *c
     app_t *app = context;
     if (!bot_voice_settings_valid(settings)) return false;
     const bot_event_t event = { .kind = BOT_EVENT_VOICE_SETTINGS, .source = BOT_SOURCE_LOCAL_UI,
-        .observed_ms = bot_platform_now_ms(), .data.voice_settings = *settings };
-    return bot_bus_post(app->bus, &event, 0) == ESP_OK;
+        .observed_ms = bot_platform_now_ms(), .data.voice_settings = *settings,
+        .settings_lease = app->settings_lease, .settings_revision = app->settings_revision + 1 };
+    if (!event.settings_lease || !event.settings_revision ||
+        bot_bus_post(app->bus, &event, 0) != ESP_OK) return false;
+    app->settings_revision = event.settings_revision;
+    app->settings_last_value = *settings;
+    app->settings_has_value = true;
+    return true;
 }
 static bool sound_preview_request(void *context) {
     app_t *app = context;
     const bot_event_t event = { .kind = BOT_EVENT_SOUND_PREVIEW, .source = BOT_SOURCE_LOCAL_UI,
-        .observed_ms = bot_platform_now_ms() };
+        .observed_ms = bot_platform_now_ms(), .settings_lease = app->settings_lease };
     return bot_bus_post(app->bus, &event, 0) == ESP_OK;
 }
 static bool set_voice_theme(void *context, const char *theme) {
@@ -891,11 +925,14 @@ static void reconcile(app_t *app, uint32_t now_ms) {
             app->result_token=(bot_session_token_t){0};
             app->image_token=(bot_session_token_t){0};
             clear_display_receipts(app);
-        } else if (!same_runtime_token(app->result_token,s->reading_token)) {
+        } else if (!same_runtime_token(app->result_token,s->reading_token) ||
+                   app->result_sequence != s->reading_sequence) {
             clear_display_receipts(app);
             face_set_result_text(app->face,"");
-            face_set_result_text(app->face,s->reading_text);
+            if (s->reading_sequence) face_set_result_segment(app->face,s->reading_text);
+            else face_set_result_text(app->face,s->reading_text);
             app->result_token=s->reading_token;
+            app->result_sequence=s->reading_sequence;
             app->image_token=(bot_session_token_t){0};
             if (!++app->text_generation) ++app->text_generation;
             atomic_store(&app->text_requested,app->text_generation);
@@ -915,9 +952,11 @@ static void reconcile(app_t *app, uint32_t now_ms) {
         bot_display_image_t image;
         if (brain_secure_take_image(&image)) {
             bool current=showing_result && same_runtime_token(image.token,s->reading_token) &&
+                image.presentation_sequence == s->reading_sequence &&
                 (s->followup_armed || same_runtime_token(image.token,s->token));
             if (current && face_set_result_image(app->face,image.pixels,image.width,image.height)) {
                 app->image_token=image.token;
+                app->image_sequence=image.presentation_sequence;
                 snprintf(app->image_asset_id,sizeof(app->image_asset_id),"%s",image.asset_id);
                 if (!++app->image_generation) ++app->image_generation;
                 atomic_store(&app->image_requested,app->image_generation);
@@ -932,11 +971,11 @@ static void reconcile(app_t *app, uint32_t now_ms) {
         if (text_ready && text_ready==app->text_generation && showing_result && platform.display_awake &&
             same_runtime_token(app->result_token,s->reading_token) &&
             (s->followup_armed || same_runtime_token(app->result_token,s->token)) && face_result_visible(app->face) &&
-            !brain_secure_display_report(app->result_token,"text",NULL,true,NULL)) atomic_store(&app->text_ready,text_ready);
+            !brain_secure_display_report_sequence(app->result_token,app->result_sequence,"text",NULL,true,NULL)) atomic_store(&app->text_ready,text_ready);
         if (image_ready && image_ready==app->image_generation && showing_result && platform.display_awake &&
             same_runtime_token(app->image_token,s->reading_token) &&
             (s->followup_armed || same_runtime_token(app->image_token,s->token)) && face_result_visible(app->face) &&
-            !brain_secure_display_report(app->image_token,"image",app->image_asset_id,true,NULL)) atomic_store(&app->image_ready,image_ready);
+            !brain_secure_display_report_sequence(app->image_token,app->image_sequence,"image",app->image_asset_id,true,NULL)) atomic_store(&app->image_ready,image_ready);
         bot_platform_display_unlock();
     }
     if (expression_changed)
@@ -1128,7 +1167,11 @@ void app_main(void) {
         bot_platform_display_unlock();
     }
     config.allow_audio_uplink = true; /* runtime still requires authenticated WSS and explicit activation */
-    config.allow_barge_in = false; /* no measured AEC reference */
+#if CONFIG_BOT_AUDIO_AEC_BARGE_IN
+    config.allow_barge_in = true; /* audio owner still requires live hardware reference gates */
+#else
+    config.allow_barge_in = false;
+#endif
     bot_runtime_ops_t ops = { .apply_state = apply_state, .stop_output = stop_output,
         .cancel_remote = cancel_remote, .command_result = command_result,
         .now_ms = runtime_now_ms, .play_wake_response = play_wake_response,

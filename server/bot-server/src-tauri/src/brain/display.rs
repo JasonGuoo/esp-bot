@@ -65,7 +65,7 @@ fn verified_file(root: &Path, source: &str, evidence: &[ToolEvidence]) -> Result
     Ok(bytes)
 }
 
-fn public_address(ip: IpAddr) -> bool {
+pub(super) fn public_address(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
             let [a,b,c,_]=ip.octets();
@@ -81,7 +81,7 @@ fn public_address(ip: IpAddr) -> bool {
     }
 }
 
-fn allowed_url(url:&reqwest::Url, hosts:&[String]) -> bool {
+pub(super) fn allowed_url(url:&reqwest::Url, hosts:&[String]) -> bool {
     let Some(host)=url.host_str() else {return false};
     url.scheme()=="https" && url.username().is_empty() && url.password().is_none()
         && url.port_or_known_default()==Some(443) && host.parse::<IpAddr>().is_err()
@@ -157,6 +157,53 @@ fn chart_request(visual: &Value, evidence: &[ToolEvidence], transcript: &str) ->
     Ok((json!({"kind":"bars","unit":unit,"series":[
         {"label":first.0,"value":first.1},{"label":second.0,"value":second.1}
     ]}),conclusion))
+}
+
+/// Decide any deterministic speech changes before the presentation is frozen.
+/// Asset preparation below must never rewrite this semantic conclusion.
+pub(crate) fn semantic_speech(visual:Option<&Value>,evidence:&[ToolEvidence],transcript:&str)->Result<Option<String>,String>{
+    match visual.and_then(|v|v["kind"].as_str()){
+        Some("bars")=>chart_request(visual.unwrap(),evidence,transcript).map(|(_,speech)|Some(speech)),
+        _=>Ok(None),
+    }
+}
+
+/// Load and pin real stroke-source evidence before any speech or image starts.
+/// Only a host-configured local dataset can supply it; model-proposed SVG paths
+/// or median coordinates are never accepted as stroke-order evidence.
+pub(crate) async fn semantic_speech_with_tasks(tasks:&Arc<super::tasks::TaskService>,visual:Option<&mut Value>,evidence:&[ToolEvidence],transcript:&str)->Result<Option<String>,String>{
+    let Some(visual)=visual else{return Ok(None)};
+    if visual["kind"]!="stroke"{return semantic_speech(Some(visual),evidence,transcript);}
+    let character=visual["character"].as_str().filter(|s|s.chars().count()==1).ok_or("stroke_character_invalid")?.to_owned();
+    if let Some(object)=visual.as_object_mut(){object.remove("_stroke_record_sha256");object.remove("_stroke_unavailable_reason");}
+    let info=super::capabilities::stroke_info(tasks,&character).await.unwrap_or_else(|_|json!({"visual_available":false,"unavailable_reason":"stroke_dataset_unavailable"}));
+    if info["visual_available"]==true{
+        let count=info["stroke_count"].as_u64().filter(|n|*n>0&&*n<=48).ok_or("stroke_count_invalid")?;
+        let digest=info["record_sha256"].as_str().filter(|s|s.len()==64&&s.bytes().all(|b|b.is_ascii_hexdigit())).ok_or("stroke_source_digest_invalid")?;
+        visual["_stroke_record_sha256"]=json!(digest);
+        Ok(Some(format!("“{character}”共有 {count} 笔。我会按本地笔顺资料展示，红点表示起笔位置。")))
+    }else{
+        visual["_stroke_unavailable_reason"]=info["unavailable_reason"].clone();
+        Ok(Some(format!("我先展示“{character}”的字形。这个字的可靠笔顺资料暂时不可用，现在还不能演示笔顺。")))
+    }
+}
+
+pub(crate) async fn prepare_with_tasks(
+    models:&Arc<ModelWorker>,tasks:&Arc<super::tasks::TaskService>,root:&Path,visual:Option<&Value>,evidence:&[ToolEvidence],transcript:&str,hosts:&[String],
+)->Result<Option<(PreparedImage,Option<String>)>,String>{
+    let Some(visual)=visual else{return Ok(None)};
+    match visual["kind"].as_str().unwrap_or("none"){
+        "text"|"spelling"|"diagram"|"stroke"=>Ok(Some((super::capabilities::render_preview(tasks,visual).await?,None))),
+        "artifact"|"media"=>{
+            let id=visual["poster_artifact_id"].as_str().or(visual["artifact_id"].as_str()).ok_or("image_artifact_missing")?;
+            let asset=tasks.artifacts.verify(id)?;let width=asset.source.pointer("/metadata/width").and_then(Value::as_u64).unwrap_or(0);
+            let height=asset.source.pointer("/metadata/height").and_then(Value::as_u64).unwrap_or(0);
+            if asset.mime_type!="image/jpeg"||asset.bytes>65_536||width==0||width>480||height==0||height>272{return Err("image_artifact_requires_prepare".into());}
+            let bytes=tasks.artifacts.read(id,0,65_536)?;
+            Ok(Some((PreparedImage{bytes,width:width as u32,height:height as u32,digest:asset.digest,title:asset.title},None)))
+        },
+        _=>prepare(models,root,Some(visual),evidence,transcript,hosts).await,
+    }
 }
 
 pub(crate) async fn prepare(

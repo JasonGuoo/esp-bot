@@ -4,9 +4,12 @@
 
 - Read [the household companion design](docs/specs/household-companion/README.md)
   and [HC-01–HC-15 implementation plan](docs/specs/household-companion/implementation-plan.md)
-  before new architecture work. These are accepted targets, **not implemented
-  capabilities**. They supersede older person-isolated conversation, device
-  Cloud Direct and monolithic turn/task assumptions below.
+  before new architecture work. The [November 16 implementation record](docs/specs/household-companion/implementation-2026-11-16.md)
+  describes the completed source integration and remaining acceptance. **Source
+  development is complete; testing is pending.** No Rust/TypeScript/ESP-IDF build,
+  model call, Mac GUI run, printing or physical-board validation was performed for
+  this delivery. The accepted direction supersedes older person-isolated
+  conversation, device Cloud Direct and monolithic turn/task assumptions below.
 - Keep Bot a responsive terminal connected to its paired Mac. Device owns
   complete local wake, one audio owner, local stop, bounded playback and runtime
   arbitration. Mac owns ASR/identity, OpenCode, household memory, presentation
@@ -18,17 +21,23 @@
   participants/entities. Separate archive, OpenCode context/compaction,
   background memory, device activation, task and output-lease lifecycles.
   Preserve original sources, corrections, deletion and existing private scopes.
-- SQLite remains authoritative; evaluate Graphiti as a rebuildable derived
-  index. Reuse upstream implementations rather than adding a competing agent
-  runtime or a new memory framework.
+- SQLite remains authoritative; the pinned Graphiti v0.31.2 adapter is a
+  rebuildable derived index. Its model/database deployment remains untested;
+  enabling configuration does not prove readiness. Reuse upstream implementations
+  rather than adding a competing agent runtime or a new memory framework.
 - Treat presentation as a first-class server responsibility: frozen semantic
   segments, immutable assets, synchronized bounded playback and actual receipts.
   ACK/progress completion must not end the task; report real task stages.
   Printing requires an explicit intent and traceable, idempotent effect receipts.
-- Historical delivery notes below describe their original snapshots. Current
-  hardware/build evidence is in [2026-11-15 acceptance](docs/review-acceptance-2026-11-15.md).
-  The no-CI and precise verification rules remain unchanged. Design merges do
-  not close existing implementation bugs or imply a new device validation.
+- The firmware [integration contract](firmware/HOUSEHOLD_INTEGRATION.md) records
+  negotiated segments, output leases, hardware/display receipts and the real
+  DAC-reference AEC path. AEC and acoustic barge-in default off; retain the
+  half-duplex fallback. Never treat source integration as acoustic validation.
+- Historical delivery notes below describe their original snapshots. Previous
+  hardware/build evidence is in [2026-11-15 acceptance](docs/review-acceptance-2026-11-15.md)
+  and does not validate this revision. HC-01–HC-15 and the #7–#11 source fixes
+  remain pending acceptance. The no-CI and precise verification rules below
+  remain unchanged; neither design nor source merge implies a new device pass.
 
 ## User's research and reuse priority
 

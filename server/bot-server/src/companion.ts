@@ -2,13 +2,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LocalCamera, PcmRecorder, base64ToBuffer, readImageFile, readWavFile, type CapturedWav } from "./capture";
 import { CONSOLE_PANELS, consoleTemplate, type ConsolePanel } from "./console-layout";
+import { mountHousehold } from "./household";
 import { deviceDeliveryText, deviceReplyMetrics, renderActivity, renderCapabilities, renderDeviceStatus, renderRuntimeMetrics, renderTurnTimings, turnStageMetric, harnessTimingMetric, type DeviceDisplayReport } from "./console-presenters";
 import "./companion.css";
 import "./console.css";
 
 type JsonObject = Record<string, unknown>;
 type DeviceTurnView = { id: string; device: string; text: DeviceDisplayReport; image: DeviceDisplayReport };
-type Profile = { id: string; display_name: string; is_child: boolean };
+type Profile = { id: string; display_name: string; is_child: boolean; merged_into?: string | null };
 type MemoryRecord = {
   id: string; scope: "household" | "profile"; profile_id: string | null; content: string;
   category: string; source: string; source_ref: string | null; confirmed: boolean;
@@ -22,6 +23,9 @@ type TurnResult = {
   turn_id: string; conversation_id: string; transcript: string; scene: Scene;
   provider_id: string; model_id: string; audio: unknown; identity_candidate: unknown; warnings: string[];
   timings?: unknown;
+  journal?: unknown;
+  presentation?: unknown;
+  task_ids?: string[];
 };
 type IdentityKind = "face" | "speaker";
 type CapturePurpose = "chat" | "enroll" | "recognize";
@@ -115,6 +119,9 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   let turnGeneration = 0;
   let mediaGeneration = 0;
   let turnBusy = false;
+  let backendCancellable = false;
+  let householdPlaying = false;
+  let stopBusy = false;
   let operationBusy = false;
   let statusBusy = false;
   let statusAgain = false;
@@ -157,6 +164,10 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   const request = async <T = unknown>(method: string, payload: unknown = {}): Promise<T> => {
     return invoke<T>("companion_request", { method, payload });
   };
+  const householdController = mountHousehold($("#cc-panel-household"), $("#cc-panel-tasks"), {
+    request, notice, profiles: () => profiles, onProfilesChange: refreshFamily,
+    onPlaybackChange: (playing) => { householdPlaying = playing; updateControls(); },
+  });
 
   function notice(text: string, error = false): void {
     if (disposed) return;
@@ -219,6 +230,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     if (next === "family" || next === "memory") void refreshFamily();
     if (next === "devices") void refreshCredentials().catch((error) => notice(errorText(error), true));
     if (next === "tools") void refreshPermissions();
+    householdController.setPanel(next, visible);
   }
   function updateControls(): void {
     const blocked = turnBusy || operationBusy || captureConverting;
@@ -227,7 +239,11 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     profileSelect.disabled = blocked || recordPurpose !== null;
     $<HTMLButtonElement>("#cc-start").disabled = blocked || serviceReady;
     $<HTMLButtonElement>("#cc-service-stop").disabled = operationBusy || !serviceRunning;
-    $<HTMLButtonElement>("#cc-stop").disabled = !(turnBusy || recordPurpose || captureConverting || audio || operationBusy);
+    // Device turns may be waiting, presenting or listening after foreground
+    // inference has returned. Only the backend's live lifecycle is authoritative;
+    // a retained result card and unrelated configuration writes are not work to stop.
+    $<HTMLButtonElement>("#cc-stop").disabled = stopBusy || !(turnBusy || recordPurpose !== null
+      || captureConverting || cameraDialog.open || audio !== null || householdPlaying || backendCancellable);
     memberFocus.disabled = blocked;
     $<HTMLButtonElement>("#cc-record").disabled = blocked || (recordPurpose !== null && recordPurpose !== "chat");
     $<HTMLButtonElement>("#cc-choose-wav").disabled = blocked || recordPurpose !== null;
@@ -282,12 +298,13 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     audio = null;
     if (audioUrl) URL.revokeObjectURL(audioUrl);
     audioUrl = null;
+    updateControls();
   }
   function clearReplayClips(): void {
     for (const clip of replayClips.values()) { clip.control.disabled = true; clip.control.textContent = "音频已释放"; }
     replayClips.clear();
   }
-  function closeCamera(): void { cameraRequestGeneration += 1; camera.close(); if (cameraDialog.open) cameraDialog.close(); }
+  function closeCamera(): void { cameraRequestGeneration += 1; camera.close(); if (cameraDialog.open) cameraDialog.close(); updateControls(); }
   function cancelCapture(): void {
     const hadCapture = recordPurpose !== null || captureConverting;
     mediaGeneration += 1;
@@ -297,18 +314,21 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     updateControls();
   }
   async function stopConsole(show = true, all = false): Promise<void> {
+    if (stopBusy) return;
+    stopBusy = true;
     turnGeneration += 1;
     const turn = activeTurn;
     activeTurn = null; turnBusy = false;
-    cancelCapture(); closeCamera(); stopPlayback(); clearToken();
+    cancelCapture(); closeCamera(); stopPlayback(); householdController.stopMedia(); clearToken();
     wavDraft = null; renderDraft(); phase("idle", "已停止本地采集和播放。");
     updateControls();
     try {
       if (all) await request("assistant.cancel", { scope: "all" });
       else if (turn) await request("assistant.cancel", { scope: "turn", turn_id: turn });
-      if (show) notice(all ? "已停止控制台和设备互动。" : "已停止本轮互动。");
+      if (show) notice(all ? "已发送停止互动请求；后台任务可在“任务与作品”单独取消。" : "已停止本轮互动。");
     }
     catch (error) { if (show) notice(`本地采集和播放已停止；后端取消结果：${errorText(error)}`, true); }
+    finally { stopBusy = false; updateControls(); void refreshStatus(); }
   }
   function resetConversationView(): void {
     stopPlayback(); clearReplayClips();
@@ -381,11 +401,28 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     try {
       const url = URL.createObjectURL(new Blob([base64ToBuffer(base64, 24 * 1024 * 1024)], { type: "audio/wav" }));
       const player = element("audio", "cc-reply-audio"); player.controls = true; player.preload = "auto"; player.src = url;
-      audio = player; audioUrl = url; host.append(player);
+      audio = player; audioUrl = url; host.append(player); updateControls();
       player.addEventListener("playing", () => { if (audio === player) phase("speaking"); });
       player.addEventListener("ended", () => { if (audio === player) { stopPlayback(); if (!turnBusy) phase("idle", "还想接着聊哪一点？", "happy"); } });
       await player.play();
     } catch { notice("回复已经显示。浏览器没有自动播放声音时，可点击“播放回复”。"); }
+  }
+  function appendHouseholdLinks(host: HTMLElement, value: unknown): void {
+    const result = object(value);
+    const source = string(object(result.journal).conversation_turn_id);
+    const presentation = string(result.presentation_id, string(object(result.presentation).presentation_id));
+    const taskIds = list(result.task_ids).filter((id): id is string => typeof id === "string" && !!id);
+    if (!source && !presentation && !taskIds.length) return;
+    const actions = element("div", "cc-inline");
+    const run = async (target: ConsolePanel, action: () => Promise<void>) => {
+      activatePanel(target);
+      try { await action(); } catch (error) { notice(errorText(error), true); }
+    };
+    if (source) actions.append(button("查看本轮来源 / 标注", () => run("household", () => householdController.showSource(source))));
+    if (presentation) actions.append(button("查看图文与语音", () => run("tasks", () => householdController.showPresentation(presentation))));
+    taskIds.slice(0, 8).forEach((id, index) => actions.append(button(taskIds.length === 1 ? "查看后台任务" : `查看任务 ${index + 1}`, () => run("tasks", () => householdController.showTask(id)))));
+    host.append(actions);
+    if (taskIds.length) host.append(element("p", "cc-caption", "任务已接下，处理进度和最终作品会保存在“任务与作品”。"));
   }
   async function sendTurn(): Promise<void> {
     if (turnBusy || operationBusy || recordPurpose) return;
@@ -416,6 +453,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       reply.row.append(meta);
       const timingDetails = renderTurnTimings(result.timings);
       if (timingDetails) reply.row.append(timingDetails);
+      appendHouseholdLinks(reply.row, result);
       const wav = string(object(result.audio).wav_base64);
       if (wav) {
         const audioHost = element("div", "cc-audio-host");
@@ -436,7 +474,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       }
       if (result.identity_candidate) renderIdentity(result.identity_candidate, true);
       if (result.warnings?.length) notice(result.warnings.map(errorText).join("\n"));
-      phase("idle", "还想接着聊哪一点？", result.scene.expression);
+      phase("idle", result.task_ids?.length ? "这件事已接下，可以在“任务与作品”查看进度。" : "还想接着聊哪一点？", result.scene.expression);
       messages.scrollTop = messages.scrollHeight;
     } catch (error) {
       if (generation === turnGeneration) { notice(errorText(error), true); phase("error"); }
@@ -539,6 +577,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     $<HTMLButtonElement>("#cc-camera-snapshot").disabled = true;
     $("#cc-camera-title").textContent = purpose === "enroll" ? `给 ${profileName(selectedProfile)} 拍一份人脸样本` : "拍照识别一次";
     if (!cameraDialog.open) cameraDialog.showModal();
+    updateControls();
     try {
       await camera.open($<HTMLVideoElement>("#cc-camera-video"));
       if (generation === cameraRequestGeneration && cameraDialog.open) $<HTMLButtonElement>("#cc-camera-snapshot").disabled = false;
@@ -572,7 +611,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     memoryOwner.replaceChildren(new Option("请选择成员", ""));
     memberFocus.replaceChildren(new Option("未指定成员", ""));
     const host = $("#cc-profile-list"); host.replaceChildren();
-    for (const profile of profiles) {
+    for (const profile of profiles.filter(profile => !profile.merged_into)) {
       profileSelect.add(new Option(profile.display_name, profile.id));
       memoryOwner.add(new Option(profile.display_name, profile.id));
       memberFocus.add(new Option(profile.display_name, profile.id));
@@ -599,7 +638,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     profileSelect.value = selectedProfile ?? "";
     memberFocus.value = selectedProfile ?? "";
     memoryOwner.value = editingMemory?.profile_id ?? (previousOwner || selectedProfile || "");
-    if (!profiles.length) host.append(element("p", "cc-muted", "还没有家庭成员档案。可以先匿名聊天。"));
+    if (!profiles.some(profile => !profile.merged_into)) host.append(element("p", "cc-muted", "还没有家庭成员档案。可以先匿名聊天。"));
     updateControls();
   }
   async function refreshFamily(): Promise<void> {
@@ -611,7 +650,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     const [people, notes, identities, unattributed] = results;
     if (people.status === "fulfilled") {
       profiles = people.value;
-      if (selectedProfile && !profiles.some((profile) => profile.id === selectedProfile)) {
+      if (selectedProfile && !profiles.some((profile) => profile.id === selectedProfile && !profile.merged_into)) {
         await stopConsole(false); selectedProfile = null; clearSamples(); resetMemoryForm(); resetConversationView();
       }
       renderProfiles();
@@ -624,7 +663,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   }
   async function changeProfile(id: string | null): Promise<void> {
     if (id === selectedProfile) return;
-    if (id && !profiles.some((profile) => profile.id === id)) return;
+    if (id && !profiles.some((profile) => profile.id === id && !profile.merged_into)) return;
     await stopConsole(false);
     selectedProfile = id; clearSamples(); resetMemoryForm(); resetConversationView(); renderProfiles(); renderEnrollments();
     $("#cc-identity-result").textContent = "本轮成员已改变，尚未重新请求识别。";
@@ -679,7 +718,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       const actions=element("div", "cc-inline");
       const select=element("select", "cc-input"); select.setAttribute("aria-label", "选择这条记忆所属成员");
       const placeholder=element("option", "", "选择成员"); placeholder.value=""; select.append(placeholder);
-      for (const profile of profiles) {const option=element("option", "", profile.display_name); option.value=profile.id; select.append(option);}
+      for (const profile of profiles.filter(profile => !profile.merged_into)) {const option=element("option", "", profile.display_name); option.value=profile.id; select.append(option);}
       actions.append(select, button("归属给成员", () => perform("正在关联记忆…", async () => {
         if (!select.value) throw new Error("请先选择成员。");
         await request("memory.unattributed.assign", {id:item.id,profile_id:select.value}); await refreshFamily(); notice("记忆已关联到所选成员。");
@@ -742,6 +781,8 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       const value = object(await request("service.status"));
       if (disposed) return;
       const harness = object(value.harness);
+      backendCancellable = list(value.device_activity).some((activity) => object(activity).cancellable === true)
+        || list(value.active_turns).length > 0;
       serviceReady = value.ready === true && value.accepting_turns === true && harness.healthy === true;
       const gatewayListening = object(value.gateway).running === true;
       serviceRunning = harness.running === true || gatewayListening;
@@ -1331,7 +1372,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   function localCleanup(): void {
     keyInput.value = "";
     turnGeneration += 1; mediaGeneration += 1; recorder.cancel(); camera.close();
-    stopPlayback(); clearReplayClips(); clearToken(); samples = []; wavDraft = null;
+    stopPlayback(); householdController.stopMedia(); clearReplayClips(); clearToken(); samples = []; wavDraft = null;
   }
   const onPageHide = () => {
     const turn = activeTurn;
@@ -1350,9 +1391,14 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       if (kind.includes("permission")) void refreshPermissions();
       if (kind.includes("question")) void refreshQuestions();
       if (["service.started", "service.stopped", "harness_started", "harness_stopped"].includes(kind)) { void refreshStatus(); void refreshPermissions(); }
+      if (kind.startsWith("device.turn.") || kind.startsWith("device.presentation.")
+        || kind.startsWith("device.playback.") || kind === "device.activity"
+        || kind === "device.audio"
+        || ["turn.started", "turn.completed", "turn.failed", "turn.cancelled"].includes(kind)) void refreshStatus();
       if (kind === "service.started") phase("idle", "服务已启动，可以开始对话。");
       if (kind === "service.stopped") {
-        cancelCapture(); closeCamera(); stopPlayback(); phase("idle", "服务已停止。");
+        backendCancellable = false;
+        cancelCapture(); closeCamera(); stopPlayback(); householdController.stopMedia(); phase("idle", "服务已停止。");
         activeDeviceTurn = null;
         resultDeviceTurn = null;
         $("#cc-device-turn").hidden = true;
@@ -1364,6 +1410,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       }
       const eventTurn = string(data.turn_id);
       if (kind === "device.turn.started" && eventTurn) {
+        backendCancellable = true; updateControls();
         const device = string(object(data.payload).device_id);
         activeDeviceTurn = { id: eventTurn, device, text: null, image: null };
         deviceToolEvents.clear();
@@ -1433,6 +1480,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
           if (metrics) result.append(element("p", "cc-caption", metrics));
           const timingDetails = renderTurnTimings(payload.timings);
           if (timingDetails) result.append(timingDetails);
+          appendHouseholdLinks(result, payload);
           resultDelivery.textContent = deviceDeliveryText(activeDeviceTurn.text, activeDeviceTurn.image);
           resultDelivery.hidden = true;
           result.append(resultDelivery);
@@ -1465,6 +1513,10 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       if (disposed) return;
       for (const result of results) if (result.status === "rejected") { notice(errorText(result.reason), true); break; }
     });
+  $("#cc-panel-family .cc-context-bar").append(button("合并重复档案", async () => {
+    activatePanel("household");
+    try { await householdController.showMerge(); } catch (error) { notice(errorText(error), true); }
+  }));
   renderWelcome(); renderSamples(); resetMemoryForm(); renderCapabilities(container); addActivity("控制台已打开"); updateControls();
   let initialPanel = "talk";
   try { initialPanel = localStorage.getItem("espbot.console.panel") ?? "talk"; } catch { /* Use the daily conversation page. */ }
@@ -1475,10 +1527,11 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       visible = next;
       if (!visible) { keyInput.value = ""; cancelCapture(); closeCamera(); stopPlayback(); clearToken(); }
       else { void refreshStatus(); void refreshPermissions(); }
+      householdController.setPanel(panel, visible);
     },
     dispose(): void {
       if (disposed) return;
-      disposed = true; localCleanup(); unsubscribe?.(); unsubscribeLan?.();
+      disposed = true; localCleanup(); householdController.dispose(); unsubscribe?.(); unsubscribeLan?.();
       window.clearInterval(statusTimer); window.clearInterval(permissionTimer);
       window.removeEventListener("pagehide", onPageHide);
     },

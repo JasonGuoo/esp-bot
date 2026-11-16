@@ -40,6 +40,7 @@ typedef struct {
     bot_focus_snapshot_t focus;
     bot_wake_status_t wake_status;
     bool settings_open;
+    uint32_t settings_lease, settings_revision;
     bot_voice_settings_t voice_settings;
     bool sound_preview_active; /* explicit settings audition; no microphone/session lease */
     bool capture_ready;        /* AUDIO confirms current token's DMA fence is clear */
@@ -72,6 +73,7 @@ typedef struct {
     char caption[BOT_CAPTION_MAX_BYTES + 1];
     /* Last completed visual reply. Its lifetime is independent of microphone permission. */
     bot_session_token_t reading_token;
+    uint32_t reading_sequence; /* presentation segment generation, zero for legacy */
     char reading_text[BOT_CAPTION_MAX_BYTES + 1];
     /* Terminal notices survive automatic session expiry with the retained reply.
      * A new user task or explicit dismissal clears them. Neither grants audio permission. */

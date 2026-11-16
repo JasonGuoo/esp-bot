@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "bot_voice.h"
+#include "bot_playback.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -58,6 +59,7 @@ typedef enum {
     BOT_AUDIO_EVENT_BUFFER_OVERFLOW,
     BOT_AUDIO_EVENT_CONTROLS_APPLIED,
     BOT_AUDIO_EVENT_PLAYBACK_PROGRESS, /* successful PCM writes only, <=1 event/s */
+    BOT_AUDIO_EVENT_BARGE_IN, /* AEC residual speech, exact playback token/id */
 } bot_audio_event_kind_t;
 
 typedef struct {
@@ -68,11 +70,13 @@ typedef struct {
     bool available;
     bot_audio_wake_status_t wake_status;
     bot_audio_wake_backend_t wake_backend;
-    bool echo_safe;              /* false for VAD: no validated reference/AEC */
+    bool echo_safe;              /* true for BARGE_IN only after actual-reference gates */
     bool confidence_available;   /* MultiNet native score only; false for WakeNet */
     float confidence;            /* uncalibrated model score, NOT measured accuracy */
     uint32_t playback_id;
     bot_audio_playback_source_t playback_source; /* playback events only */
+    bot_playback_purpose_t playback_purpose;
+    bool presentation_managed; /* completion waits for all segment receipts */
     int wake_word_index;
     bot_voice_command_t command;  /* LOCAL_COMMAND; runtime alone executes it */
     uint32_t controls_revision;
@@ -135,8 +139,11 @@ typedef struct {
     bool start_buffer_available;      /* allocation failure degrades onset retention, never local wake */
     bool codec_available, vad_available, wake_available;
     bool hardware_capture_timestamps; /* false */
-    bool aec_available;               /* false; no fabricated reference */
-    bool automatic_barge_in;          /* false; use explicit local cancellation */
+    bool aec_available;               /* live ESP-SR AEC with the real synchronous codec reference */
+    bool automatic_barge_in;          /* opt-in AND live reference/playback/resource gates */
+    bool playback_reference_valid; /* observed unclipped hardware reference, not calibration */
+    uint16_t playback_reference_peak;
+    uint64_t playback_reference_frames, playback_reference_rejections, barge_in_detections;
     bool voice_identity_available;    /* false; ESP-SR WakeNet is not voice identity */
     bool night_wake_supported;        /* true while started; audio has no sleep timer */
     bot_audio_wake_status_t wake_status;
@@ -156,6 +163,8 @@ typedef struct {
     uint32_t rx_discard_frames;       /* remaining DMA FIFO fence before PCM release */
     uint32_t playback_id;
     bot_audio_playback_source_t playback_source;
+    bot_playback_purpose_t playback_purpose;
+    bool presentation_managed;
     bot_voice_settings_t controls_requested, controls_applied;
     uint32_t controls_revision, controls_applied_revision;
     esp_err_t controls_error;
@@ -243,6 +252,10 @@ esp_err_t bot_audio_wait_for_followup(bot_audio_t *audio, const bot_audio_token_
  * No resampling/MP3/Opus decoder is hidden here. */
 esp_err_t bot_audio_playback_begin(bot_audio_t *audio, const bot_audio_token_t *token,
                                   uint32_t *playback_id);
+/** Explicit purpose for bounded presentation segments. Only FINAL may finish a
+ * legacy reply; managed segments wait for the presentation owner's receipt. */
+esp_err_t bot_audio_playback_begin_segment(bot_audio_t *audio, const bot_audio_token_t *token,
+                                           bot_playback_purpose_t purpose, uint32_t *out_id);
 /** Runtime-authorized local reply using the same sole codec/queue. Does not open
  * a microphone session or authorize PCM. Nonzero epoch/session_id identify the
  * runtime operation; they need not match the network audio session. set_session

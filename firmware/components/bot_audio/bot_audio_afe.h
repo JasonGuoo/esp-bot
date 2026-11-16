@@ -11,6 +11,7 @@ typedef struct {
     esp_afe_sr_data_t *data;
     size_t feed_samples;
     size_t fetch_samples;
+    bool reference_input;
     bot_audio_wake_status_t wake_status;
     bot_audio_wake_backend_t wake_backend;
     bot_audio_keyword_t keyword;
@@ -19,5 +20,5 @@ typedef struct {
 } bot_audio_afe_t;
 
 esp_err_t bot_audio_afe_open(bot_audio_afe_t *afe, const char *partition_label,
-                            const char *model_name);
+                            const char *model_name, bool reference_input);
 void bot_audio_afe_close(bot_audio_afe_t *afe);

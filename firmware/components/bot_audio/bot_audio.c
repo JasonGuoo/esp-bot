@@ -22,6 +22,7 @@
 #include "es8389_codec.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
@@ -90,8 +91,12 @@ struct bot_audio {
     int64_t last_sound_event_us, last_direction_us, last_loud_us, last_impulse_us, ambient_ready_us;
     float ambient_noise;
     bool codec_open;
-    int16_t *stereo_capture, *mono_capture;
+    int16_t *stereo_capture, *mono_capture, *reference_capture, *output_pcm;
     size_t capture_samples;
+    unsigned codec_channels;
+    int64_t reference_stable_us, reference_seen_us;
+    uint32_t barge_playback_id, barge_speech_samples;
+    bool barge_reported;
     uint32_t dma_frames;
     uint64_t capture_sequence;
     uint32_t gate_epoch;
@@ -384,6 +389,9 @@ static esp_err_t codec_open(bot_audio_t *a)
             .ws = BSP_I2S_LCLK, .dout = BSP_I2S_DOUT, .din = BSP_I2S_DSIN},
     };
     bus.slot_cfg.total_slot = 4;
+    a->codec_channels=a->afe.reference_input?4:2;
+    if (a->afe.reference_input)
+        bus.slot_cfg.slot_mask=I2S_TDM_SLOT0|I2S_TDM_SLOT1|I2S_TDM_SLOT2|I2S_TDM_SLOT3;
     i2s_chan_config_t dma = I2S_CHANNEL_DEFAULT_CONFIG(CONFIG_BSP_I2S_NUM, I2S_ROLE_MASTER);
     dma.auto_clear = true;
     a->dma_frames = dma.dma_desc_num * dma.dma_frame_num;
@@ -425,6 +433,7 @@ static esp_err_t codec_open(bot_audio_t *a)
         .sample_rate = BOT_AUDIO_SAMPLE_RATE, .bits_per_sample = 16, .channel = 4,
         .channel_mask = ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0) | ESP_CODEC_DEV_MAKE_CHANNEL_MASK(2),
     };
+    if (a->afe.reference_input) format.channel_mask=0x0f;
     err = esp_codec_dev_open(a->codec, &format);
     if (err != ESP_OK) return err;
     a->codec_open = true;
@@ -592,7 +601,8 @@ static void process_session_pcm(bot_audio_t *a, const bot_audio_pcm_t *frame,
 static void capture_worker(void *context)
 {
     bot_audio_t *a = context;
-    const size_t bytes = a->capture_samples * 2 * sizeof(int16_t);
+    const size_t bytes = a->capture_samples * a->codec_channels * sizeof(int16_t);
+    int16_t *input=a->reference_capture?a->reference_capture:a->stereo_capture;
     int64_t last_stack_sample_us = 0;
     LOCK(a);
     a->status.capture_running = true;
@@ -642,8 +652,8 @@ static void capture_worker(void *context)
         uint64_t sequence = ++a->capture_sequence;
         UNLOCK(a);
         int64_t started = esp_timer_get_time();
-        memset(a->stereo_capture, 0, bytes);
-        esp_err_t err = esp_codec_dev_read(a->codec, a->stereo_capture, (int)bytes);
+        memset(input, 0, bytes);
+        esp_err_t err = esp_codec_dev_read(a->codec, input, (int)bytes);
         int64_t observed = esp_timer_get_time();
         uint32_t read_time = elapsed_us(started);
         LOCK(a);
@@ -658,6 +668,9 @@ static void capture_worker(void *context)
             LOCK(a);
             bool changed = a->capture_good;
             a->capture_good = false;
+            a->status.playback_reference_valid=false;
+            a->status.automatic_barge_in=false;
+            a->reference_stable_us=a->reference_seen_us=0;
             a->status.vad_available = false;
             a->status.wake_available = false;
             a->status.capture_errors++;
@@ -670,7 +683,24 @@ static void capture_worker(void *context)
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
-        /* The primary mic remains the only AFE/authorized PCM input. */
+        /* Same I2S frame: M/R/M/N from the official S31 GMF example. Keep
+         * the physical microphones interleaved separately for existing DOA.
+         * The hardware reference includes the DAC gain/clock path; it is never
+         * synthesized from queued PCM or wall/read completion timestamps. */
+        uint16_t reference_peak=0;
+        unsigned reference_clipped=0;
+        if (a->reference_capture) {
+            for (size_t i=0;i<a->capture_samples;i++) {
+                a->stereo_capture[2*i]=input[4*i];
+                a->stereo_capture[2*i+1]=input[4*i+2];
+                int32_t ref=input[4*i+1];
+                uint16_t magnitude=(uint16_t)(ref<0?-ref:ref);
+                if (magnitude>reference_peak) reference_peak=magnitude;
+                if (magnitude>=32760) ++reference_clipped;
+            }
+        }
+        /* Raw authorized uplink remains mono and half-duplex even with AEC.
+         * Only a local interruption consumes AFE residual speech. */
         uint16_t peak = 0, peak2 = 0;
         uint32_t sum = 0, sum2 = 0;
         for (size_t i = 0; i < a->capture_samples; ++i) {
@@ -691,6 +721,22 @@ static void capture_worker(void *context)
         a->status.microphone_peak = peak;
         a->status.microphone_peak_2 = peak2;
         a->status.last_capture_us = observed;
+        if (a->afe.reference_input) {
+            a->status.playback_reference_peak=reference_peak;
+            bool reference_ok=reference_peak>=32 && reference_clipped==0 &&
+                read_time<a->capture_samples*1000000U/BOT_AUDIO_SAMPLE_RATE+100000U;
+            if (reference_ok && a->playback_requested && a->status.playback_running) {
+                if (!a->reference_stable_us) a->reference_stable_us=observed;
+                a->reference_seen_us=observed;
+                a->status.playback_reference_frames++;
+            } else if (reference_clipped || !a->playback_requested ||
+                       observed-a->reference_seen_us>200000) {
+                a->reference_stable_us=0;
+                if (a->playback_requested) a->status.playback_reference_rejections++;
+            }
+            a->status.playback_reference_valid=a->reference_stable_us &&
+                observed-a->reference_stable_us>=300000 && observed-a->reference_seen_us<=200000;
+        }
         bool afe_fresh = a->status.afe_running && a->status.afe_frames > 0 &&
                          observed - a->status.last_afe_result_us < 500000;
         a->status.vad_available = afe_fresh;
@@ -735,7 +781,8 @@ static void capture_worker(void *context)
             UNLOCK(a);
             int result = 0;
             int64_t afe_started = esp_timer_get_time();
-            if (feed_allowed) result = a->afe.iface->feed(a->afe.data, a->mono_capture);
+            if (feed_allowed) result = a->afe.iface->feed(a->afe.data,
+                a->afe.reference_input?a->reference_capture:a->mono_capture);
             /* WebRTC AGC may use a different native feed/fetch frame size.
              * Keep one capture/reset owner, accumulating only accepted input;
              * never block that owner waiting for input it has not fed yet. */
@@ -778,7 +825,8 @@ static void capture_worker(void *context)
         UNLOCK(a);
     }
     end_speech(a);
-    clear_audio(a->stereo_capture, bytes);
+    clear_audio(input, bytes);
+    clear_audio(a->stereo_capture, a->capture_samples*2*sizeof(int16_t));
     clear_audio(a->mono_capture, a->capture_samples * sizeof(int16_t));
     clear_start_buffer(a);
     LOCK(a);
@@ -826,6 +874,55 @@ static void apply_afe_fence(bot_audio_t *a)
     xSemaphoreGive(a->feed_lock);
 }
 
+/* Capture worker only. The reference and microphones came from the same TDM
+ * frame; ESP-SR owns acoustic filtering. This emits intent, never captured PCM.
+ * All raw/AFE history stays behind the original lease and is cleared on a new
+ * turn. Defaults remain half-duplex until hardware validation enables opt-in. */
+static void consider_barge_in(bot_audio_t *a, const afe_fetch_result_t *result,
+                              uint32_t epoch, int64_t now)
+{
+#if CONFIG_BOT_AUDIO_AEC_BARGE_IN
+    LOCK(a);
+    uint32_t playback=a->status.playback_id;
+    bot_audio_token_t token=a->playback_token;
+    bool allowed=a->run && a->capture_good && a->status.afe_running && a->afe.reference_input &&
+        a->status.playback_reference_valid && a->reference_seen_us && now-a->reference_seen_us<=200000 &&
+        a->status.session_open && a->playback_requested && !a->playback_cancelled &&
+        a->status.playback_running && a->status.playback_source==BOT_AUDIO_PLAYBACK_SESSION &&
+        same_token(&a->session,&token) && epoch==a->gate_epoch && !a->status.rx_discard_frames &&
+        !output_muted_locked(a) && now-a->status.last_playback_us<250000 &&
+        a->afe_pending_samples<=a->afe.fetch_samples*2;
+    a->status.automatic_barge_in=allowed;
+    UNLOCK(a);
+    if (playback!=a->barge_playback_id) {
+        a->barge_playback_id=playback;a->barge_speech_samples=0;a->barge_reported=false;
+    }
+    size_t count=result->data_size>0 && result->data_size%sizeof(int16_t)==0 ?
+        (size_t)result->data_size/sizeof(int16_t):0;
+    if (!allowed || !result->data || count!=a->afe.fetch_samples ||
+        result->vad_state!=VAD_SPEECH || !bot_audio_pcm_speech_energy(result->data,count)) {
+        a->barge_speech_samples=0;
+        return;
+    }
+    if (a->barge_reported) return;
+    a->barge_speech_samples+=(uint32_t)count;
+    if (a->barge_speech_samples<BOT_AUDIO_SAMPLE_RATE/5) return;
+    LOCK(a);
+    allowed=a->playback_requested && !a->playback_cancelled && a->status.playback_id==playback &&
+        a->status.playback_reference_valid && a->status.session_open && same_token(&a->session,&token) &&
+        epoch==a->gate_epoch;
+    if (allowed) a->status.barge_in_detections++;
+    UNLOCK(a);
+    if (allowed) {
+        a->barge_reported=true;
+        emit(a,(bot_audio_event_t){.kind=BOT_AUDIO_EVENT_BARGE_IN,.token=token,
+            .observed_us=now,.playback_id=playback,.echo_safe=true});
+    }
+#else
+    (void)a;(void)result;(void)epoch;(void)now;
+#endif
+}
+
 static bool fetch_frame(bot_audio_t *a)
 {
     LOCK(a);
@@ -852,6 +949,7 @@ static bool fetch_frame(bot_audio_t *a)
     }
     a->afe_fetch_wait_since_us = 0;
     int64_t now = esp_timer_get_time();
+    consider_barge_in(a,result,epoch,now);
     LOCK(a);
     a->status.afe_frames++;
     a->status.last_afe_result_us = now;
@@ -986,10 +1084,10 @@ static bool fetch_frame(bot_audio_t *a)
 
 static esp_err_t output_silence(bot_audio_t *a, uint32_t frames)
 {
-    int16_t zeros[BOT_AUDIO_PLAYBACK_SAMPLES * 2] = {0};
+    int16_t zeros[BOT_AUDIO_PLAYBACK_SAMPLES * 4] = {0};
     while (frames) {
         uint32_t count = frames > BOT_AUDIO_PLAYBACK_SAMPLES ? BOT_AUDIO_PLAYBACK_SAMPLES : frames;
-        esp_err_t err = esp_codec_dev_write(a->codec, zeros, count * 2 * sizeof(int16_t));
+        esp_err_t err = esp_codec_dev_write(a->codec, zeros, count * a->codec_channels * sizeof(int16_t));
         if (err != ESP_OK) return err;
         frames -= count;
     }
@@ -1010,6 +1108,8 @@ static void finish_playback(bot_audio_t *a, uint32_t id, bot_audio_token_t token
     xQueueReset(a->output_queue);
     LOCK(a);
     bot_audio_playback_source_t source = a->status.playback_source;
+    bot_playback_purpose_t purpose = a->status.playback_purpose;
+    bool managed = a->status.presentation_managed;
     if (a->status.playback_id == id) {
         if (a->playback_cancelled && error == ESP_OK) kind = BOT_AUDIO_EVENT_PLAYBACK_CANCELLED;
         /* A failed purge must never be followed by unmuting another stream. */
@@ -1028,7 +1128,7 @@ static void finish_playback(bot_audio_t *a, uint32_t id, bot_audio_token_t token
     UNLOCK(a);
     xSemaphoreGive(a->command_lock);
     emit(a, (bot_audio_event_t){.kind = kind, .token = token, .playback_id = id,
-        .playback_source = source,
+        .playback_source = source, .playback_purpose = purpose, .presentation_managed = managed,
         .error = error, .reason = error == ESP_OK ? NULL : "Local playback or DMA drain failed"});
 }
 
@@ -1036,7 +1136,7 @@ static void playback_worker(void *context)
 {
     bot_audio_t *a = context;
     playback_frame_t frame;
-    int16_t stereo[BOT_AUDIO_PLAYBACK_SAMPLES * 2];
+    int16_t *stereo=a->output_pcm;
     int64_t last_progress_us = 0;
     int64_t last_stack_sample_us = 0;
     while (true) {
@@ -1052,6 +1152,8 @@ static void playback_worker(void *context)
         bool started = a->status.playback_running;
         uint32_t id = a->status.playback_id;
         bot_audio_playback_source_t source = a->status.playback_source;
+        bot_playback_purpose_t purpose = a->status.playback_purpose;
+        bool managed = a->status.presentation_managed;
         bot_audio_token_t token = a->playback_token;
         int64_t queued_at = a->last_queued_us;
         UNLOCK(a);
@@ -1109,10 +1211,11 @@ static void playback_worker(void *context)
             continue;
         }
         for (size_t i = 0; i < frame.count; ++i)
-            stereo[2 * i] = stereo[2 * i + 1] = muted ? 0 : frame.samples[i];
-        esp_err_t err = esp_codec_dev_write(a->codec, stereo, frame.count * 2 * sizeof(int16_t));
+            for (unsigned channel=0;channel<a->codec_channels;channel++)
+                stereo[i*a->codec_channels+channel]=muted?0:frame.samples[i];
+        esp_err_t err = esp_codec_dev_write(a->codec, stereo, frame.count * a->codec_channels * sizeof(int16_t));
         clear_audio(&frame, sizeof(frame));
-        clear_audio(stereo, sizeof(stereo));
+        clear_audio(stereo,BOT_AUDIO_PLAYBACK_SAMPLES*a->codec_channels*sizeof(int16_t));
         int64_t written_us = esp_timer_get_time();
         LOCK(a);
         current = a->run && a->playback_requested && !a->playback_cancelled && a->status.playback_id == id;
@@ -1127,16 +1230,18 @@ static void playback_worker(void *context)
             if (!started) {
                 last_progress_us = written_us;
                 emit(a, (bot_audio_event_t){.kind = BOT_AUDIO_EVENT_PLAYBACK_STARTED,
-                    .observed_us = written_us, .token = token, .playback_id = id, .playback_source = source});
+                    .observed_us = written_us, .token = token, .playback_id = id, .playback_source = source,
+                    .playback_purpose = purpose, .presentation_managed = managed});
             } else if (written_us - last_progress_us >= PLAYBACK_PROGRESS_US) {
                 last_progress_us = written_us;
                 emit(a, (bot_audio_event_t){.kind = BOT_AUDIO_EVENT_PLAYBACK_PROGRESS,
-                    .observed_us = written_us, .token = token, .playback_id = id, .playback_source = source});
+                    .observed_us = written_us, .token = token, .playback_id = id, .playback_source = source,
+                    .playback_purpose = purpose, .presentation_managed = managed});
             }
         }
     }
     clear_audio(&frame, sizeof(frame));
-    clear_audio(stereo, sizeof(stereo));
+    clear_audio(stereo,BOT_AUDIO_PLAYBACK_SAMPLES*a->codec_channels*sizeof(int16_t));
     (void)gpio_set_level(BSP_POWER_AMP_IO, 0);
     xEventGroupSetBits(a->exits, PLAYBACK_EXIT);
     vTaskDelete(NULL);
@@ -1214,7 +1319,15 @@ static void release_capture_buffers(bot_audio_t *a)
         clear_audio(a->mono_capture, a->capture_samples * sizeof(int16_t));
         free(a->mono_capture);
     }
-    a->stereo_capture = a->mono_capture = NULL;
+    if (a->reference_capture) {
+        clear_audio(a->reference_capture,a->capture_samples*4*sizeof(int16_t));
+        free(a->reference_capture);
+    }
+    if (a->output_pcm) {
+        clear_audio(a->output_pcm,BOT_AUDIO_PLAYBACK_SAMPLES*a->codec_channels*sizeof(int16_t));
+        free(a->output_pcm);
+    }
+    a->stereo_capture = a->mono_capture = a->reference_capture = a->output_pcm = NULL;
 }
 
 esp_err_t bot_audio_start(bot_audio_t *a)
@@ -1224,21 +1337,49 @@ esp_err_t bot_audio_start(bot_audio_t *a)
     bool started = a->status.started;
     UNLOCK(a);
     if (started) return ESP_ERR_INVALID_STATE;
-    esp_err_t afe_error = bot_audio_afe_open(&a->afe, a->partition_label, a->model_name);
+    bool reference=false;
+#if CONFIG_BOT_AUDIO_HARDWARE_REFERENCE_AEC
+    reference=heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)>=512*1024 &&
+              heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)>=96*1024;
+    if (!reference) ESP_LOGW(TAG,"Insufficient memory reserve for reference AEC; retaining half-duplex");
+#endif
+    esp_err_t afe_error = bot_audio_afe_open(&a->afe,a->partition_label,a->model_name,reference);
+    if (afe_error!=ESP_OK && reference) {
+        bot_audio_afe_close(&a->afe);
+        memset(&a->afe,0,sizeof(a->afe));
+        ESP_LOGW(TAG,"Reference AFE unavailable (%s); restoring mono half-duplex",esp_err_to_name(afe_error));
+        afe_error=bot_audio_afe_open(&a->afe,a->partition_label,a->model_name,false);
+    }
     if (afe_error != ESP_OK) {
         bot_audio_afe_close(&a->afe);
         a->afe.wake_status = BOT_AUDIO_WAKE_UNAVAILABLE;
         if (!a->afe.reason[0]) snprintf(a->afe.reason, sizeof(a->afe.reason), "%s", "Official AFE initialization unavailable");
     }
+    esp_err_t err;
+open_codec:
     /* Even a failed AFE leaves the official codec/manual-session path available. */
     a->capture_samples = a->afe.data ? a->afe.feed_samples : BOT_AUDIO_PLAYBACK_SAMPLES;
-    esp_err_t err = codec_open(a);
+    err = codec_open(a);
     /* Start/restart also purges TX DMA while the amplifier is muted. */
     if (err == ESP_OK) err = output_silence(a, a->dma_frames + BOT_AUDIO_PLAYBACK_SAMPLES);
     if (err == ESP_OK) {
         a->stereo_capture = calloc(a->capture_samples * 2, sizeof(int16_t));
         a->mono_capture = calloc(a->capture_samples, sizeof(int16_t));
-        if (!a->stereo_capture || !a->mono_capture) err = ESP_ERR_NO_MEM;
+        if (a->afe.reference_input) a->reference_capture=calloc(a->capture_samples*4,sizeof(int16_t));
+        a->output_pcm=calloc(BOT_AUDIO_PLAYBACK_SAMPLES*a->codec_channels,sizeof(int16_t));
+        if (!a->stereo_capture || !a->mono_capture || !a->output_pcm ||
+            (a->afe.reference_input && !a->reference_capture)) err = ESP_ERR_NO_MEM;
+    }
+    if (err!=ESP_OK && a->afe.reference_input) {
+        /* No worker is running yet: release this same owner's optional path,
+         * then restore the proven two-slot half-duplex configuration once. */
+        release_capture_buffers(a);
+        codec_cleanup(a);
+        bot_audio_afe_close(&a->afe);
+        afe_error=bot_audio_afe_open(&a->afe,a->partition_label,a->model_name,false);
+        if (afe_error!=ESP_OK) bot_audio_afe_close(&a->afe);
+        ESP_LOGW(TAG,"Four-slot AEC resources unavailable; falling back to half-duplex");
+        goto open_codec;
     }
     if (err == ESP_OK) {
         const esp_err_t buffered = bot_audio_start_buffer_open(&a->start_buffer, a->capture_samples,
@@ -1287,6 +1428,10 @@ esp_err_t bot_audio_start(bot_audio_t *a)
     a->status.started = true;
     a->status.start_buffer_available = a->start_buffer.capacity != 0;
     a->status.codec_available = true;
+    a->status.aec_available = a->afe.reference_input && a->afe.data && a->reference_capture;
+    a->reference_stable_us=a->reference_seen_us=0;
+    a->barge_playback_id=a->barge_speech_samples=0;
+    a->barge_reported=false;
     a->status.afe_running = a->afe.data != NULL;
     a->status.vad_available = false; /* a healthy microphone read is still required */
     a->status.direction_available = a->doa != NULL;
@@ -1449,7 +1594,8 @@ esp_err_t bot_audio_wait_for_followup(bot_audio_t *a, const bot_audio_token_t *t
 }
 
 static esp_err_t playback_begin(bot_audio_t *a, const bot_audio_token_t *token,
-                                 bot_audio_playback_source_t source, uint32_t *out_id)
+                                 bot_audio_playback_source_t source, bot_playback_purpose_t purpose,
+                                 bool presentation_managed, uint32_t *out_id)
 {
     if (!a || !token || !token->epoch || !out_id ||
         (source != BOT_AUDIO_PLAYBACK_PREVIEW && !token->session_id) ||
@@ -1467,6 +1613,11 @@ static esp_err_t playback_begin(bot_audio_t *a, const bot_audio_token_t *token,
         if (++a->next_playback_id == 0) ++a->next_playback_id;
         a->status.playback_id = a->next_playback_id;
         a->status.playback_source = source;
+        a->status.playback_purpose = purpose;
+        a->status.presentation_managed = presentation_managed;
+        a->reference_stable_us=a->reference_seen_us=0;
+        a->status.playback_reference_valid=false;
+        a->status.automatic_barge_in=false;
         a->playback_token = *token;
         a->playback_requested = true;
         a->playback_cancelled = false;
@@ -1489,18 +1640,26 @@ static esp_err_t playback_begin(bot_audio_t *a, const bot_audio_token_t *token,
 
 esp_err_t bot_audio_playback_begin(bot_audio_t *a, const bot_audio_token_t *token, uint32_t *out_id)
 {
-    return playback_begin(a, token, BOT_AUDIO_PLAYBACK_SESSION, out_id);
+    return playback_begin(a, token, BOT_AUDIO_PLAYBACK_SESSION, BOT_PLAYBACK_FINAL, false, out_id);
+}
+
+esp_err_t bot_audio_playback_begin_segment(bot_audio_t *a, const bot_audio_token_t *token,
+                                           bot_playback_purpose_t purpose, uint32_t *out_id)
+{
+    if (purpose != BOT_PLAYBACK_TASK_ACK && purpose != BOT_PLAYBACK_PROGRESS &&
+        purpose != BOT_PLAYBACK_CONTENT && purpose != BOT_PLAYBACK_FINAL) return ESP_ERR_INVALID_ARG;
+    return playback_begin(a, token, BOT_AUDIO_PLAYBACK_SESSION, purpose, true, out_id);
 }
 
 esp_err_t bot_audio_playback_begin_local(bot_audio_t *a, const bot_audio_token_t *token, uint32_t *out_id)
 {
-    return playback_begin(a, token, BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE, out_id);
+    return playback_begin(a, token, BOT_AUDIO_PLAYBACK_LOCAL_RESPONSE, BOT_PLAYBACK_WAKE_ACK, false, out_id);
 }
 
 esp_err_t bot_audio_playback_begin_preview(bot_audio_t *a, uint32_t epoch, uint32_t *out_id)
 {
     const bot_audio_token_t token = {.epoch = epoch};
-    return playback_begin(a, &token, BOT_AUDIO_PLAYBACK_PREVIEW, out_id);
+    return playback_begin(a, &token, BOT_AUDIO_PLAYBACK_PREVIEW, BOT_PLAYBACK_PREVIEW, false, out_id);
 }
 
 static esp_err_t enqueue_playback(bot_audio_t *a, const playback_frame_t *frame)
@@ -1633,6 +1792,10 @@ void bot_audio_get_status(bot_audio_t *a, bot_audio_status_t *out)
     LOCK(a);
     *out = a->status;
     out->capture_healthy = a->capture_good;
+    out->aec_available=out->aec_available && a->status.afe_running && a->capture_good;
+    out->automatic_barge_in=out->automatic_barge_in && out->aec_available &&
+        a->playback_requested && !a->playback_cancelled && a->reference_seen_us &&
+        esp_timer_get_time()-a->reference_seen_us<=200000;
     out->self_playback_blocked = echo_blocked_locked(a, esp_timer_get_time());
     if (out->self_playback_blocked) out->capture_ready = false;
     UNLOCK(a);
