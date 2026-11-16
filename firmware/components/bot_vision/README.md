@@ -88,8 +88,8 @@ if (err == ESP_OK) {
 ## 帧与模型结果的所有权
 
 1. 单个工作任务独占 V4L2 fd、队列、检测器和 `vatt_tracker_t`。
-2. `VIDIOC_REQBUFS` 的 `MMAP` 缓冲由 `esp_video` 分配；`mmap()` 给出的是
-   驱动拥有的内存视图。此组件不对这些指针调用 `free()` 或 `heap_caps_free()`。
+2. S31 DVP 后端有自己的 DMA 备用帧；本组件只申请一个 V4L2 采集槽。
+   `mmap()` 给出驱动拥有的内存视图，不对它调用 `free()` 或 `heap_caps_free()`。
 3. 每次成功 DQBUF 后，检查 buffer index、错误位、`bytesused` 和实际映射长度。
    有效画面按 `bytesperline` 拷入组件自己的紧凑 PSRAM 图像，必要时翻转 180°。
 4. 在推理前 QBUF 归还相机缓冲。暗光、预热和被丢弃的有效索引帧同样归还。

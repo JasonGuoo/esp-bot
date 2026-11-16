@@ -301,6 +301,15 @@ impl Playback {
     }
 }
 struct PlaybackReceipt {token:RuntimeToken,stream_id:u32,status:String}
+// A failed or just-started clip may have received only a prefix. Missing
+// counters from older clients stay unknown; the planned clip length is not evidence.
+fn device_audio_counts(payload:&Value, sent_frames:u32, sent_bytes:usize)->Result<(Option<u64>,Option<u64>),String> {
+    let count=|name:&str,max:u64| match payload.get(name) {
+        None|Some(Value::Null)=>Ok(None),
+        Some(n)=>n.as_u64().filter(|v|*v<=max).map(Some).ok_or_else(||"audio_playback_counts_invalid".to_owned()),
+    };
+    Ok((count("frames",sent_frames as u64)?,count("bytes",sent_bytes as u64)?))
+}
 struct ActivePeer {
     turn_id:String, request_id:String, token:RuntimeToken, task:TurnTask,
     progress_seq:u32, last_stage:Option<&'static str>, last_progress:Instant,
@@ -764,14 +773,14 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     }
                                     let clip=playback.as_mut().filter(|clip|clip.hardware_receipts && clip.current(token,stream))
                                         .ok_or("audio_playback_stale")?;
+                                    let (frames,bytes)=device_audio_counts(&frame.payload,clip.sequence,clip.offset)?;
                                     if status=="started" {
                                         if !clip.ready || clip.sequence==0 {return Err("audio_playback_not_sent".into());}
                                         if clip.hardware_started {return Ok(json!({"recorded":true,"duplicate":true}));}
                                         clip.hardware_started=true;
                                     } else if status=="finished" {
                                         if !clip.sent_complete || !clip.hardware_started ||
-                                            frame.payload["frames"].as_u64()!=Some(clip.sequence as u64) ||
-                                            frame.payload["bytes"].as_u64()!=Some(clip.pcm.len() as u64) {
+                                            frames!=Some(clip.sequence as u64) || bytes!=Some(clip.pcm.len() as u64) {
                                             return Err("audio_playback_incomplete".into());
                                         }
                                     }
@@ -779,12 +788,12 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         code.bytes().all(|byte|byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte==b'_'));
                                     brain.emit("device.audio",Some(&clip.turn_id),json!({"device_id":device_id,
                                         "stream_id":stream,"status":status,"code":code,"runtime":token,
-                                        "frames_sent":clip.sequence,"pcm_bytes":clip.pcm.len()}));
-                                    let _=brain.memory.journal_receipt(&clip.turn_id,"audio",json!({"stream_id":stream,"status":status,"frames":clip.sequence,"bytes":clip.pcm.len()}),
+                                        "frames_sent":clip.sequence,"pcm_bytes":clip.pcm.len(),"frames_reported":frames,"bytes_reported":bytes}));
+                                    let _=brain.memory.journal_receipt(&clip.turn_id,"audio",json!({"stream_id":stream,"status":status,"frames":frames,"bytes":bytes,"code":code}),
                                         &format!("audio-{}-{stream}-{status}",clip.turn_id));
                                     if let Some(state)=delivery.as_mut(){
                                         state.record_hardware(&brain,match status{"started"=>"audio_started","finished"=>"audio_completed","failed"=>"failed",_=>"cancelled"},
-                                            json!({"stream_id":stream,"frames":clip.sequence,"bytes":clip.pcm.len(),"code":code,"device_monotonic_ms":frame.payload["device_monotonic_ms"],"sample_position":frame.payload["sample_position"]}))?;
+                                            json!({"stream_id":stream,"frames":frames,"bytes":bytes,"code":code,"device_monotonic_ms":frame.payload["device_monotonic_ms"],"sample_position":frame.payload["sample_position"]}))?;
                                     }
                                     if status!="started" {
                                         playback_receipt=Some(PlaybackReceipt{token,stream_id:stream,status:status.to_owned()});
@@ -827,8 +836,10 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     let code=frame.payload["code"].as_str().filter(|code|status=="unavailable"
                                         && !code.is_empty() && code.len()<=64
                                         && code.bytes().all(|byte|byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte==b'_'));
-                                    let _=brain.memory.journal_receipt(&result.turn_id,"display",json!({"part":part,"status":status,"asset_id":frame.payload["asset_id"]}),&format!("display-{}",uuid::Uuid::new_v4().simple()));
-                                    if status=="rendered" {if let Some(state)=delivery.as_mut(){state.record_hardware(&brain,"displayed",json!({"part":part,"asset_id":frame.payload["asset_id"],"device_monotonic_ms":frame.payload["device_monotonic_ms"]}))?;}}
+                                    let _=brain.memory.journal_receipt(&result.turn_id,"display",json!({"part":part,"status":status,"asset_id":frame.payload["asset_id"],"code":code}),&format!("display-{}",uuid::Uuid::new_v4().simple()));
+                                    if let Some(state)=delivery.as_mut(){
+                                        state.record_display(&brain,part,status,json!({"part":part,"asset_id":frame.payload["asset_id"],"code":code,"device_monotonic_ms":frame.payload["device_monotonic_ms"]}))?;
+                                    }
                                     brain.emit("device.display",Some(&result.turn_id),json!({"device_id":device_id,"part":part,"status":status,"code":code,"runtime":token}));
                                     Ok(json!({"recorded":true}))
                                 },
@@ -939,6 +950,14 @@ async fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_receipts_distinguish_device_counts_from_transmitted_and_planned_audio() {
+        assert_eq!(device_audio_counts(&json!({"frames":0,"bytes":0}),0,0).unwrap(),(Some(0),Some(0)));
+        assert_eq!(device_audio_counts(&json!({"frames":1,"bytes":640}),4,2560).unwrap(),(Some(1),Some(640)));
+        assert_eq!(device_audio_counts(&json!({}),4,2560).unwrap(),(None,None));
+        assert!(device_audio_counts(&json!({"frames":1,"bytes":2562}),4,2560).is_err());
+    }
 
     #[test]
     fn empty_or_quiet_recordings_use_the_device_retry_prompt() {

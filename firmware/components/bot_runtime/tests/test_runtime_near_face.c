@@ -729,7 +729,7 @@ static void test_settings_close_commits_last_edit(void)
     bot_runtime_destroy(runtime);
 }
 
-static void test_managed_playback_does_not_arm_followup(void)
+static void test_managed_playback_does_not_arm_followup(bool completion_arrives_first)
 {
     bot_bus_t bus={0};bot_runtime_t *runtime=NULL;bot_runtime_snapshot_t state;
     assert(bot_runtime_create(&bus,NULL,NULL,NULL,1000,&runtime)==ESP_OK);
@@ -751,15 +751,24 @@ static void test_managed_playback_does_not_arm_followup(void)
         bus.has_command=true;bot_runtime_step(runtime,now);
         post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_PLAYBACK_STARTED,.source=BOT_SOURCE_AUDIO,
             .observed_ms=now+10,.token=token,.data.playback={.id=i+1,.purpose=purposes[i],.presentation_managed=true}});
+        if (i == 3 && completion_arrives_first) {
+            bus.command=(bot_command_t){.kind=BOT_COMMAND_PRESENTATION_DONE,.token=token,.received_ms=now+15};
+            bus.has_command=true;bot_runtime_step(runtime,now+15);
+            bot_runtime_get_snapshot(runtime,&state);
+            assert(!state.followup_armed && !state.audio_uplink_permitted && state.token.epoch==token.epoch);
+        }
         post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_PLAYBACK_DONE,.source=BOT_SOURCE_AUDIO,
             .observed_ms=now+20,.token=token,.data.playback={.id=i+1,.purpose=purposes[i],.presentation_managed=true}});
         bot_runtime_get_snapshot(runtime,&state);
+        if (i == 3 && completion_arrives_first) break;
         assert(!state.followup_armed && state.token.epoch==token.epoch &&
                state.conversation==BOT_CONVERSATION_THINKING && !state.audio_uplink_permitted);
     }
-    bus.command=(bot_command_t){.kind=BOT_COMMAND_PRESENTATION_DONE,.token=token,.received_ms=1600};
-    bus.has_command=true;bot_runtime_step(runtime,1600);
-    bot_runtime_get_snapshot(runtime,&state);
+    if (!completion_arrives_first) {
+        bus.command=(bot_command_t){.kind=BOT_COMMAND_PRESENTATION_DONE,.token=token,.received_ms=1600};
+        bus.has_command=true;bot_runtime_step(runtime,1600);
+        bot_runtime_get_snapshot(runtime,&state);
+    }
     assert(state.followup_armed && state.token.epoch!=token.epoch);
     bot_runtime_destroy(runtime);
 }
@@ -836,7 +845,8 @@ int main(void)
     assert(!state.near_face && !state.camera_requested && state.behavior == BOT_BEHAVIOR_NIGHT_DARK);
     bot_runtime_destroy(runtime);
     test_settings_close_commits_last_edit();
-    test_managed_playback_does_not_arm_followup();
+    test_managed_playback_does_not_arm_followup(false);
+    test_managed_playback_does_not_arm_followup(true);
     test_processing_requires_server_ack(false);
     test_processing_requires_server_ack(true);
     test_passive_sound_reactions();

@@ -20,8 +20,7 @@
 #include "freertos/task.h"
 
 namespace {
-constexpr size_t CAMERA_BYTES = 400 * 240 * 2;
-constexpr size_t SCREEN_BYTES = 400 * 240 * 2;
+constexpr size_t FRAME_BYTES = 400 * 240 * 2;
 constexpr size_t JPEG_BYTES = 96 * 1024;
 constexpr int64_t LEASE_US = 15000000;
 struct LogLine { char text[512]; };
@@ -32,7 +31,8 @@ const char *event_name(unsigned kind) {
         "playback.done", "playback.failed", "link.state", "audio.health", "camera.health",
         "display.health", "wake.status", "night.policy", "session.end", "fault", "sound.activity",
         "result.dismissed", "local.response.failed", "voice.settings", "sound.preview",
-        "capture.ready", "local.command", "capture.overflow", "playback.progress", "turn.submitted"};
+        "capture.ready", "local.command", "capture.overflow", "playback.progress", "turn.submitted",
+        "barge.in"};
     static_assert(sizeof(names) / sizeof(names[0]) == BOT_EVENT_COUNT);
     return kind < BOT_EVENT_COUNT ? names[kind] : "unknown";
 }
@@ -46,7 +46,9 @@ std::atomic<bool> ready{false};
 std::atomic<bool> screen_snapshot{false};
 std::atomic<uint32_t> camera_transforms{0}, camera_transform_total_us{0}, camera_transform_max_us{0};
 bot_platform_t *platform;
-uint8_t *camera_slot, *camera_work, *screen_work, *jpeg;
+// The producer fills camera_slot under camera_lock. Only the USB worker uses
+// frame_work, synchronously, for both 400x240 RGB565 sources.
+uint8_t *camera_slot, *frame_work, *jpeg;
 bool camera_pending;
 uint32_t camera_stamp;
 int64_t next_camera_us;
@@ -145,10 +147,9 @@ void worker(void *) {
                 screen_snapshot.store(false);
                 xSemaphoreTake(camera_lock, portMAX_DELAY);
                 camera_pending = false;
-                memset(camera_slot, 0, CAMERA_BYTES);
+                memset(camera_slot, 0, FRAME_BYTES);
                 xSemaphoreGive(camera_lock);
-                memset(camera_work, 0, CAMERA_BYTES);
-                memset(screen_work, 0, SCREEN_BYTES);
+                memset(frame_work, 0, FRAME_BYTES);
                 ESP_LOGI("bot_debug", "USB preview disabled or lease expired");
             }
             was_enabled = false;
@@ -204,10 +205,10 @@ void worker(void *) {
         if (now >= next_screen) {
             uint32_t stamp;
             const int64_t started = esp_timer_get_time();
-            const esp_err_t copy_result = bot_platform_copy_screen(platform, screen_work, SCREEN_BYTES, 400, 240, &stamp, screen_snapshot.load());
+            const esp_err_t copy_result = bot_platform_copy_screen(platform, frame_work, FRAME_BYTES, 400, 240, &stamp, screen_snapshot.load());
             const bool copied = copy_result == ESP_OK;
             screen_copy.record(esp_timer_get_time() - started, copied);
-            if (copied) image(encoder, 1, 400, 240, screen_work, SCREEN_BYTES, stamp, jpeg_encode, serial_send);
+            if (copied) image(encoder, 1, 400, 240, frame_work, FRAME_BYTES, stamp, jpeg_encode, serial_send);
             /* A busy display lock is transient. Retrying soon avoids keeping
              * a stale frame for another full two-second preview interval. */
             next_screen = esp_timer_get_time() + (copied ? 2000000 : copy_result == ESP_ERR_TIMEOUT ? 200000 : 1000000);
@@ -217,7 +218,11 @@ void worker(void *) {
         uint32_t stamp = 0;
         if (xSemaphoreTake(camera_lock, 0) == pdTRUE) {
             if (camera_pending) {
-                memcpy(camera_work, camera_slot, CAMERA_BYTES);
+                // Hand off the complete camera frame without copying or holding the
+                // producer lock during JPEG encoding and the serial write.
+                auto *previous_work = frame_work;
+                frame_work = camera_slot;
+                camera_slot = previous_work;
                 stamp = camera_stamp;
                 camera_pending = false;
                 have_camera = true;
@@ -225,7 +230,7 @@ void worker(void *) {
             xSemaphoreGive(camera_lock);
         }
         if (have_camera && enabled()) image(encoder, 2, 400, 240,
-                                           camera_work, CAMERA_BYTES, stamp, jpeg_encode, serial_send);
+                                           frame_work, FRAME_BYTES, stamp, jpeg_encode, serial_send);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -241,16 +246,15 @@ extern "C" esp_err_t bot_debug_start(bot_platform_t *p) {
     pending_logs = xQueueCreate(LOG_SLOTS, sizeof(uint8_t));
     events = xQueueCreate(8, sizeof(Event));
     camera_lock = xSemaphoreCreateMutex();
-    camera_slot = (uint8_t *)heap_caps_aligned_alloc(16, CAMERA_BYTES, MALLOC_CAP_SPIRAM);
-    camera_work = (uint8_t *)heap_caps_aligned_alloc(16, CAMERA_BYTES, MALLOC_CAP_SPIRAM);
-    screen_work = (uint8_t *)heap_caps_aligned_alloc(16, SCREEN_BYTES, MALLOC_CAP_SPIRAM);
+    camera_slot = (uint8_t *)heap_caps_aligned_alloc(16, FRAME_BYTES, MALLOC_CAP_SPIRAM);
+    frame_work = (uint8_t *)heap_caps_aligned_alloc(16, FRAME_BYTES, MALLOC_CAP_SPIRAM);
     jpeg = (uint8_t *)heap_caps_aligned_alloc(16, JPEG_BYTES, MALLOC_CAP_SPIRAM);
     auto fail = [](esp_err_t error) {
         if (encoder) jpeg_enc_close(encoder);
         encoder = nullptr;
-        heap_caps_free(camera_slot); heap_caps_free(camera_work);
-        heap_caps_free(screen_work); heap_caps_free(jpeg);
-        camera_slot = camera_work = screen_work = jpeg = nullptr;
+        heap_caps_free(camera_slot);
+        heap_caps_free(frame_work); heap_caps_free(jpeg);
+        camera_slot = frame_work = jpeg = nullptr;
         if (free_logs) vQueueDelete(free_logs);
         if (pending_logs) vQueueDelete(pending_logs);
         heap_caps_free(log_slots); log_slots = nullptr;
@@ -259,7 +263,7 @@ extern "C" esp_err_t bot_debug_start(bot_platform_t *p) {
         free_logs = pending_logs = events = nullptr; camera_lock = nullptr; platform = nullptr;
         return error;
     };
-    if (!log_slots || !free_logs || !pending_logs || !events || !camera_lock || !camera_slot || !camera_work || !screen_work || !jpeg)
+    if (!log_slots || !free_logs || !pending_logs || !events || !camera_lock || !camera_slot || !frame_work || !jpeg)
         return fail(ESP_ERR_NO_MEM);
     for (uint8_t i = 0; i < LOG_SLOTS; ++i) (void)xQueueSend(free_logs, &i, 0);
     jpeg_enc_config_t config = DEFAULT_JPEG_ENC_CONFIG();

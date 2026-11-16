@@ -5,15 +5,15 @@
 - Read [the household companion design](docs/specs/household-companion/README.md)
   and [HC-01–HC-15 implementation plan](docs/specs/household-companion/implementation-plan.md)
   before new architecture work. The [November 16 implementation record](docs/specs/household-companion/implementation-2026-11-16.md)
-  describes the completed source integration and remaining acceptance. **Source
-  development is complete; testing is pending.** No Rust/TypeScript/ESP-IDF build,
-  model call, Mac GUI run, printing or physical-board validation was performed for
-  this delivery. The accepted direction supersedes older person-isolated
+  describes the original source-only delivery. The subsequent [local and S31
+  acceptance](docs/review-household-acceptance-2026-11-16.md) records the builds,
+  actual model calls and physical runs, and distinguishes the remaining gaps.
+  The accepted direction supersedes older person-isolated
   conversation, device Cloud Direct and monolithic turn/task assumptions below.
 - The [second static review](docs/review-household-static-2026-11-16.md) records
   subsequent source fixes for speaker/private scope, activation forgetting,
   source cleanup, task cancellation, print reconciliation and segmented output.
-  It did not run builds, tests, SQL, models or hardware; acceptance remains pending.
+  The review itself did not run builds, tests, SQL, models or hardware; use the subsequent acceptance record for runtime evidence.
 - Keep Bot a responsive terminal connected to its paired Mac. Device owns
   complete local wake, one audio owner, local stop, bounded playback and runtime
   arbitration. Mac owns ASR/identity, OpenCode, household memory, presentation
@@ -39,8 +39,8 @@
   half-duplex fallback. Never treat source integration as acoustic validation.
 - Historical delivery notes below describe their original snapshots. Previous
   hardware/build evidence is in [2026-11-15 acceptance](docs/review-acceptance-2026-11-15.md)
-  and does not validate this revision. HC-01–HC-15 and the #7–#11 source fixes
-  remain pending acceptance. The no-CI and precise verification rules below
+  and does not validate this revision. Do not infer full HC-01–HC-15 or #7–#11
+  acceptance from the subset exercised on November 16. The no-CI and precise verification rules below
   remain unchanged; neither design nor source merge implies a new device pass.
 
 ## User's research and reuse priority

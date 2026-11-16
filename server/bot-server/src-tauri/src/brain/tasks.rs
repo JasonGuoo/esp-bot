@@ -725,3 +725,47 @@ fn semantic_content(plan:&PresentationPlan)->Result<Value,String>{
     let mut value=serde_json::to_value(plan).map_err(|e|e.to_string())?;if let Some(object)=value.as_object_mut(){object.remove("revision");}
     if let Some(segments)=value["segments"].as_array_mut(){for segment in segments{if let Some(object)=segment.as_object_mut(){object.remove("asset_ids");object.remove("speech_asset_id");}}}Ok(value)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_cancelled_running_task_cannot_finish_successfully_or_be_replayed() {
+        let dir = std::env::temp_dir().join(format!("xiaodai-task-{}", uuid::Uuid::new_v4()));
+        let service = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let entered = started.clone();
+        service.register_handler("agent.work", Arc::new(move |mut context| {
+            let entered = entered.clone();
+            Box::pin(async move {
+                entered.notify_one();
+                context.cancelled.changed().await.unwrap();
+                // A late upstream success must not overwrite the user's cancellation.
+                Ok(TaskResult::success("late result", vec![], json!({})))
+            })
+        })).unwrap();
+        service.start().await.unwrap();
+        let request = NewTask { household_id: "house".into(), daily_conversation_id: "day".into(),
+            conversation_turn_id: "turn".into(), capability: "agent.work".into(),
+            input: json!({}), intent_key: "intent".into() };
+        let id = service.submit(request.clone(), false).unwrap().task_id;
+        tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+        service.cancel(&id).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while service.attempts(&id).unwrap()[0]["ended_at_ms"].is_null() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(service.get(&id).unwrap().state, TaskState::Cancelled);
+        service.stop().await;
+        drop(service);
+        let reopened = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        let duplicate = reopened.submit(request, false).unwrap();
+        assert_eq!(duplicate.task_id, id);
+        assert_eq!(duplicate.state, TaskState::Cancelled);
+        assert_eq!(reopened.attempts(&id).unwrap().len(), 1);
+        drop(reopened);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

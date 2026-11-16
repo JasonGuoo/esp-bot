@@ -4,7 +4,7 @@
 
 小呆负责本地唤醒、及时应答、表情、采集与有界播放；Mac `bot-server` 负责声音理解、OpenCode、家庭记忆、图文音视频制作和打印等任务。日常对话按家庭每天一份记录组织，成员是参与者，后台持续整理可追溯的共同经历。本阶段不开发设备独立联网 Agent。
 
-**源码开发完成，待测试。** 本轮接入了家庭日记录与来源修订、并行 ASR/身份、OpenCode 日上下文及 compact、持久任务、分段图文语音与真实回执、家庭控制台、记忆/Graphiti 适配、媒体准备和打印；AEC 与语音打断保留默认关闭的真实参考路径。配置、依赖、缺口及逐项交付入口见 [2026-11-16 实施记录](docs/specs/household-companion/implementation-2026-11-16.md)。本轮没有编译 Rust/TypeScript/ESP-IDF，没有执行模型、打印、Mac GUI 或实板验证，没有 CI；已有旧版本验收不代表本轮通过。
+**11 月 16 日已完成首轮本机与实板验收。** Mac 签名发布包和 ESP32-S31 固件已构建，家庭记录、持久任务、真实本地 ASR 与 GLM 对话已测试。实板完成过两段图文语音的显示与硬件播放回执。修复、镜像、复现条件及未测范围见[本轮验收记录](docs/review-household-acceptance-2026-11-16.md)。设计、依赖及各模块入口见[实施记录](docs/specs/household-companion/implementation-2026-11-16.md)；Graphiti、实物打印和声学打断仍待验收。
 
 阅读 [家庭陪伴总设计](docs/specs/household-companion/README.md)、[15 项开发步骤与待执行验收](docs/specs/household-companion/implementation-plan.md) 和 [开源记忆研究](docs/research/household-memory-open-source-2026-11-16.md)。[HC-00 总跟踪 issue](https://github.com/JasonGuoo/esp-bot/issues/13) 汇总 #14～#28 和关联缺陷的实时状态，开发完成后仍保留待测试。以下带旧日期的段落是交付历史。
 
@@ -49,7 +49,7 @@ The **new physical target** is a good-looking enclosed **pan/tilt** head with in
 
 - **[Current system authority / behavior architecture](docs/architecture.md)**
 
-**Current boundary:** the November 16 household implementation is source-complete and pending testing. The November 15 build/device evidence applies to the previous version. BLE, physical calibration and motor assembly remain independent work.
+**Current boundary:** the November 16 [local and device acceptance](docs/review-household-acceptance-2026-11-16.md) covers selected household flows. The November 15 evidence applies to the previous version. BLE, physical calibration and motor assembly remain independent work.
 
 ## Identity and wake-word policy
 

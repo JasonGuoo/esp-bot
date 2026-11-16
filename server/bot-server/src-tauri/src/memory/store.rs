@@ -800,6 +800,50 @@ mod background_tests {
     use super::*;
 
     #[test]
+    fn forgetting_one_activation_preserves_another_after_reopen() {
+        use crate::memory::JournalInput;
+        let dir = std::env::temp_dir().join(format!("xiaodai-household-{}", Uuid::new_v4()));
+        let store = Store::open(dir.clone(), MemoryConfig::default()).unwrap();
+        let policy = store.update_household_settings(&json!({
+            "history_enabled": true, "timezone": "Australia/Perth"
+        })).unwrap();
+        let first = JournalInput {
+            turn_id: "turn-a".into(), activation_id: "visit-a".into(), utterance_id: None,
+            text: "first synthetic source".into(), occurred_at_ms: now_ms(), input_kind: "text".into(),
+            speaker_person_id: None, private_profile_id: None, allow_cloud: false,
+            metadata: json!({"time_basis": "server_received", "asr": {"quality": 0.9, "text": "discard"}}),
+        };
+        let other = JournalInput { turn_id: "turn-b".into(), activation_id: "visit-b".into(),
+            text: "second synthetic source".into(), ..first.clone() };
+        let a = store.journal_input(&first).unwrap();
+        let b = store.journal_input(&other).unwrap();
+        assert_eq!(a.policy_revision, policy["policy_revision"].as_u64().unwrap());
+        assert_eq!(a.daily_conversation_id, b.daily_conversation_id);
+        assert_ne!(a.episode_id, b.episode_id);
+        store.journal_finish("turn-b", "completed", Some("synthetic reply"), json!({"stage": "done"})).unwrap();
+        let receipt = json!({"shown": true});
+        for _ in 0..2 { store.journal_receipt("turn-b", "display", receipt.clone(), "screen-1").unwrap(); }
+        assert_eq!(store.journal_receipt("turn-b", "display", json!({"shown": false}), "screen-1").unwrap_err(),
+                   "receipt_idempotency_conflict");
+        let edit = json!({"conversation_turn_id": "turn-b", "text": "corrected source", "expected_revision": b.source_revision});
+        let changed = store.household_rpc("household.correct", &edit).unwrap().unwrap();
+        assert_eq!(changed["source_revision"], b.source_revision + 1);
+        assert_eq!(store.household_rpc("household.correct", &edit).unwrap_err(), "source_revision_conflict");
+        store.forget_conversation("visit-a").unwrap();
+        drop(store);
+        let store = Store::open(dir.clone(), MemoryConfig::default()).unwrap();
+        assert!(store.household_source("turn-a").is_err());
+        assert_eq!(store.journal_input(&first).unwrap_err(), "source_was_forgotten");
+        let source = store.household_source("turn-b").unwrap();
+        assert_eq!(source["text"], "corrected source");
+        assert_eq!(source["metadata"], json!({"time_basis": "server_received", "asr": {"quality": 0.9}, "stage": "done"}));
+        assert_eq!(source["receipts"].as_array().unwrap().len(), 1);
+        assert_eq!(store.household_timeline(&a.daily_conversation_id).unwrap()["turns"].as_array().unwrap().len(), 1);
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn grounded_memories_stay_unattributed_and_forgotten_jobs_cannot_return() {
         let dir=std::env::temp_dir().join(format!("xiaodai-memory-test-{}",Uuid::new_v4().simple()));
         let store=Store::open(dir.clone(),MemoryConfig::default()).unwrap();

@@ -1150,7 +1150,7 @@ static bool playback_event_poll(void) {
                     s.phase=managed?COMMITTED:WAIT_NEXT;
                 if (managed && s.presentation_valid && event.presentation_sequence==s.segment_generation) {
                     s.segment_audio_done=true;
-                    if (event.kind!=BOT_AUDIO_EVENT_PLAYBACK_DONE) {
+                    if (event.kind!=BOT_AUDIO_EVENT_PLAYBACK_DONE && !s.segment_failed) {
                         s.segment_failed=true;
                         snprintf(s.segment_code,sizeof(s.segment_code),"%s",*code?code:"playback_cancelled");
                     }

@@ -35,7 +35,7 @@ focus; ignore legacy `vatt_snapshot_t.primary_track_id` for actuation.
 After successful STREAMOFF/close and the paused/unavailable publication, vision
 destroys its temporary tracker and clears its publication timestamp anchor.
 Resume allocates a fresh tracker before opening the stream; an allocation failure
-reports unavailable and retries. The model stays loaded. This prevents a pause
+reports unavailable and retries. The model stays loaded. Clearing the timestamp anchor prevents a pause
 longer than the signed 32-bit clock comparison window (about 24.8 days) from
 permanently rejecting new frames as old. Track IDs can be reused after pause and
 must not imply continuity or identity. Runtime retires inactive bus snapshots
@@ -63,10 +63,11 @@ CONFIG_HUMAN_FACE_DETECT_MSRMNP_S8_V1=y
 CONFIG_HUMAN_FACE_DETECT_MODEL_IN_FLASH_RODATA=y
 ```
 
-PSRAM is required. The default 3 RGB565 capture buffers + one upright owned
-copy alone need 2,457,600 bytes, excluding driver backup buffers, model tensors,
-model loading, display/audio and stack. Model is flash-rodata: no additional
-`human_face_det` partition is required. App partition fit is not measured.
+PSRAM is required. At 640×480 with two bytes per pixel, one V4L2 capture
+buffer, one DVP backup and the owned packed copy need 1,843,200 bytes before
+model, display, audio and stack allocations. The model is in flash rodata:
+no additional `human_face_det` partition is required. See the
+[local and S31 acceptance record](../../../docs/review-household-acceptance-2026-11-16.md) for app partition fit.
 
 ## Freshness and capabilities
 

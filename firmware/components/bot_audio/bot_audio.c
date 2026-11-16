@@ -1084,10 +1084,13 @@ static bool fetch_frame(bot_audio_t *a)
 
 static esp_err_t output_silence(bot_audio_t *a, uint32_t frames)
 {
-    int16_t zeros[BOT_AUDIO_PLAYBACK_SAMPLES * 4] = {0};
+    /* Startup and the single playback worker own this buffer in turn. The
+     * four-slot block is too large for the worker stack during codec writes. */
     while (frames) {
         uint32_t count = frames > BOT_AUDIO_PLAYBACK_SAMPLES ? BOT_AUDIO_PLAYBACK_SAMPLES : frames;
-        esp_err_t err = esp_codec_dev_write(a->codec, zeros, count * a->codec_channels * sizeof(int16_t));
+        size_t bytes = count * a->codec_channels * sizeof(*a->output_pcm);
+        memset(a->output_pcm, 0, bytes);
+        esp_err_t err = esp_codec_dev_write(a->codec, a->output_pcm, bytes);
         if (err != ESP_OK) return err;
         frames -= count;
     }
@@ -1360,8 +1363,6 @@ open_codec:
     /* Even a failed AFE leaves the official codec/manual-session path available. */
     a->capture_samples = a->afe.data ? a->afe.feed_samples : BOT_AUDIO_PLAYBACK_SAMPLES;
     err = codec_open(a);
-    /* Start/restart also purges TX DMA while the amplifier is muted. */
-    if (err == ESP_OK) err = output_silence(a, a->dma_frames + BOT_AUDIO_PLAYBACK_SAMPLES);
     if (err == ESP_OK) {
         a->stereo_capture = calloc(a->capture_samples * 2, sizeof(int16_t));
         a->mono_capture = calloc(a->capture_samples, sizeof(int16_t));
@@ -1370,6 +1371,8 @@ open_codec:
         if (!a->stereo_capture || !a->mono_capture || !a->output_pcm ||
             (a->afe.reference_input && !a->reference_capture)) err = ESP_ERR_NO_MEM;
     }
+    /* Purge TX DMA while muted, before the worker takes ownership. */
+    if (err == ESP_OK) err = output_silence(a, a->dma_frames + BOT_AUDIO_PLAYBACK_SAMPLES);
     if (err!=ESP_OK && a->afe.reference_input) {
         /* No worker is running yet: release this same owner's optional path,
          * then restore the proven two-slot half-duplex configuration once. */

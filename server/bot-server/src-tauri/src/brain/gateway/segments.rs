@@ -63,6 +63,10 @@ impl Delivery {
     }
     /// Receipt sequence is independent of segment sequence: a segment can
     /// produce several genuine display/audio facts before aggregate completion.
+    pub fn record_display(&mut self,brain:&Brain,part:&str,status:&str,detail:Value)->Result<(),String>{
+        if status=="unavailable" && part=="image" {self.current_visual_unavailable=true;}
+        self.record_hardware(brain,if status=="rendered"{"displayed"}else{"failed"},detail)
+    }
     pub fn record_hardware(&mut self,brain:&Brain,state:&str,detail:Value)->Result<(),String>{
         let segment=self.current.clone().ok_or("presentation_not_waiting")?;
         self.receipt_sequence+=1;

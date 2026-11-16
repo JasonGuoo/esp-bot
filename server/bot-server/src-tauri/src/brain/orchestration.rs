@@ -394,3 +394,23 @@ fn source_dependencies(value:&Value)->Vec<String>{
     }
     let mut result=Vec::new();visit(value,&mut result,0);result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::explicit_print_request;
+
+    #[test]
+    fn a_printable_artifact_or_negated_quote_does_not_authorize_printing() {
+        for (said, quote, authorize) in [
+            ("请打印这份 PDF", "打印这份 PDF", true),
+            ("Please print this worksheet", "print this worksheet", true),
+            ("生成可打印的练习纸", "打印", false),
+            ("Make a printable worksheet", "printable worksheet", false),
+            ("不要把这张图打印出来", "打印出来", false),
+            ("Please do not immediately print this worksheet", "print this worksheet", false),
+            ("做一份练习纸", "请打印这份 PDF", false),
+        ] {
+            assert_eq!(explicit_print_request(said, quote), authorize, "{said}");
+        }
+    }
+}

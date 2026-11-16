@@ -46,10 +46,10 @@
 #endif
 
 static const char *TAG = "bot_vision";
-// Official V4L2 capture needs two queued DMA frames. Inference uses our owned
-// packed copy after requeueing, so a third 640x480 frame only consumes PSRAM
-// needed by the concurrently resident MultiNet model and DVP backup frame.
-static constexpr unsigned BUFFER_COUNT = 2;
+// On this DVP backend esp_video sets use_backup_element=false: IDF supplies
+// its own fallback DMA frame while the MMAP frame is dequeued. We need one
+// application-visible capture slot and return it before every inference.
+static constexpr unsigned BUFFER_COUNT = 1;
 static constexpr size_t DEVICE_PATH_CAP = 48;
 static std::atomic_flag s_claimed = ATOMIC_FLAG_INIT;
 
@@ -334,7 +334,7 @@ static esp_err_t open_stream(bot_vision_t *v)
     request.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     request.memory = V4L2_MEMORY_MMAP;
     if (ioctl(v->fd, VIDIOC_REQBUFS, &request) != 0) return io_error("REQBUFS");
-    if (request.count < 2 || request.count > BUFFER_COUNT) return ESP_ERR_INVALID_RESPONSE;
+    if (request.count != BUFFER_COUNT) return ESP_ERR_INVALID_RESPONSE;
     v->buffer_count = request.count;
     for (unsigned i = 0; i < v->buffer_count; ++i) {
         struct v4l2_buffer buffer{};
