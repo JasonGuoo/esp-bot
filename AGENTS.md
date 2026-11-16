@@ -10,6 +10,10 @@
   model call, Mac GUI run, printing or physical-board validation was performed for
   this delivery. The accepted direction supersedes older person-isolated
   conversation, device Cloud Direct and monolithic turn/task assumptions below.
+- The [second static review](docs/review-household-static-2026-11-16.md) records
+  subsequent source fixes for speaker/private scope, activation forgetting,
+  source cleanup, task cancellation, print reconciliation and segmented output.
+  It did not run builds, tests, SQL, models or hardware; acceptance remains pending.
 - Keep Bot a responsive terminal connected to its paired Mac. Device owns
   complete local wake, one audio owner, local stop, bounded playback and runtime
   arbitration. Mac owns ASR/identity, OpenCode, household memory, presentation

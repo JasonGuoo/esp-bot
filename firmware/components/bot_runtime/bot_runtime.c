@@ -19,7 +19,7 @@ struct bot_runtime {
     bool has_vision, has_published, has_wake, wake_barrier_valid;
     bool has_acoustic_wake, has_link_state;
     bool revoking, identity_exhausted, waiting_for_approval, manual_sleep;
-    bool reply_presented, remote_audio_done;
+    bool reply_presented, remote_audio_done, presentation_done_pending;
     bool overflow_fault, recovery_requested;
     bot_passive_cycle_t passive_cycle;
     bot_idle_expression_t idle_expression;
@@ -213,6 +213,7 @@ static void end_session(bot_runtime_t *runtime, uint32_t now_ms, session_end_rea
     runtime->waiting_for_approval = false;
     runtime->reply_presented = false;
     runtime->remote_audio_done = false;
+    runtime->presentation_done_pending = false;
     advance_epoch(runtime);
     runtime->state.token.session_id = 0;
     runtime->state.token.turn_id = 0;
@@ -244,6 +245,7 @@ static bool begin_turn(bot_runtime_t *runtime, uint32_t now_ms)
     runtime->waiting_for_approval = false;
     runtime->reply_presented = false;
     runtime->remote_audio_done = false;
+    runtime->presentation_done_pending = false;
     if (runtime->state.token.turn_id == UINT32_MAX || !advance_epoch(runtime)) {
         runtime->identity_exhausted = true;
         end_session(runtime, now_ms, SESSION_FAULT);
@@ -291,6 +293,7 @@ static bool arm_followup(bot_runtime_t *runtime, uint32_t now_ms)
     runtime->response = NULL;
     runtime->response_playback_done = false;
     runtime->reply_presented = runtime->remote_audio_done = false;
+    runtime->presentation_done_pending = false;
     runtime->waiting_for_approval = false;
     runtime->state.caption[0] = '\0';
     runtime->state.last_interaction_ms = now_ms;
@@ -307,6 +310,7 @@ static bool begin_session(bot_runtime_t *runtime, uint32_t now_ms)
     runtime->waiting_for_approval = false;
     runtime->reply_presented = false;
     runtime->remote_audio_done = false;
+    runtime->presentation_done_pending = false;
     if (runtime->next_session_id == UINT32_MAX || !advance_epoch(runtime)) {
         runtime->identity_exhausted = true;
         end_session(runtime, now_ms, SESSION_FAULT);
@@ -950,6 +954,11 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
              * presentation owner waits for actual audio AND display receipts. */
             state->conversation = BOT_CONVERSATION_THINKING;
             reset_expression(runtime);
+            if (runtime->presentation_done_pending) {
+                runtime->presentation_done_pending = false;
+                if (event->kind == BOT_EVENT_PLAYBACK_DONE)
+                    arm_followup(runtime, now_ms);
+            }
             break;
         }
         runtime->remote_audio_done = true;
@@ -1156,11 +1165,16 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
             state->conversation = BOT_CONVERSATION_THINKING;
         state->last_interaction_ms = now_ms;
         runtime->reply_presented = runtime->remote_audio_done = false;
+        runtime->presentation_done_pending = false;
         break;
     case BOT_COMMAND_PRESENTATION_DONE:
-        if (state->utterance_active || state->playback_id || state->followup_armed)
+        if (state->utterance_active || state->followup_armed)
             return BOT_COMMAND_REJECTED_INVALID;
-        arm_followup(runtime, now_ms);
+        /* The transport and runtime consume separate queues. Its genuine
+         * final receipt can arrive while our hardware DONE is still queued.
+         * Retain that intent instead of losing it or opening capture early. */
+        if (state->playback_id) runtime->presentation_done_pending = true;
+        else arm_followup(runtime, now_ms);
         break;
     case BOT_COMMAND_REPLY_PRESENT:
     case BOT_COMMAND_REPLY_DONE:

@@ -60,15 +60,23 @@ impl BrainHost {
                 brain.cancel_scoped(CancelScope::All,"memory_changed").await?;
                 let _gate=brain.turn_gate.write().await;
                 let sources=brain.memory.household_mutation_sources(method,&payload)?;
-                brain.invalidate_contexts_locked().await?;
+                let old_settings=if method=="household.settings.set"{Some(brain.memory.household_settings()?)}else{None};
+                // Validate and commit the source transaction before destructive
+                // cross-store work. Rejected settings or stale revisions must
+                // never erase/fence otherwise valid tasks and artifacts. The
+                // source transaction's durable outbox survives cleanup failure.
+                let result=brain.memory.household_rpc(method,&payload)?.ok_or("unsupported_household_method")?;
                 if method=="household.forget" {brain.tasks.forget_sources(&sources,false).await?;}
                 else if method!="household.memory.confirm" && !sources.is_empty(){brain.tasks.invalidate_sources(&sources,false).await?;}
-                if method=="household.settings.set" {
-                    let current=brain.memory.household_settings()?;
+                if let Some(current)=old_settings {
                     if current["history_enabled"]==true && payload["history_enabled"]==false {brain.tasks.forget_sources(&[],true).await?;}
                     else if current["allow_cloud"]==true && payload["allow_cloud"]==false {brain.tasks.invalidate_sources(&[],true).await?;}
                 }
-                return brain.memory.household_rpc(method,&payload)?.ok_or_else(||"unsupported_household_method".into());
+                brain.flush_source_cleanup().await?;
+                // Fence source-dependent work before waiting on native HTTP
+                // cleanup; it must not submit an effect during that wait.
+                brain.invalidate_contexts_locked().await?;
+                return Ok(result);
             }
             return brain.memory.household_rpc(method,&payload)?.ok_or_else(||"unsupported_household_method".into());
         }
@@ -168,6 +176,12 @@ impl BrainHost {
                 brain.cancel_scoped(CancelScope::All,"memory_changed").await?;
                 let _gate = brain.turn_gate.write().await;
                 let id = required(&payload,"conversation_id")?;
+                // The console sends an activation ID. Daily/private native
+                // contexts can contain several activations; retire those
+                // contexts, then erase only this activation's source turns.
+                for conversation in brain.memory.household_activation_conversations(id)? {
+                    brain.harness.forget_conversation(&conversation).await?;
+                }
                 brain.harness.forget_conversation(id).await?;
                 brain.memory.forget_conversation(id)?;
                 brain.flush_source_cleanup().await?;

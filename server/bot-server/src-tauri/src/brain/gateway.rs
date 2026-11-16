@@ -491,13 +491,14 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                 };
                 let conversation=engagement.as_ref().map(|session|session.conversation_id.as_str());
                 let close_session=cancellation.closes_session(conversation);
+                let cancel_delivery=delivery.as_ref().is_some_and(|d|cancellation.matches_turn(&d.turn_id,conversation));
                 let cancelled_token=audio.as_ref().map(|(_,token)|*token)
                     .or_else(||active.as_ref().map(|turn|turn.token))
                     .or_else(||playback.as_ref().map(|clip|clip.token))
                     .or_else(||engagement.as_ref().map(|session|session.token));
                 // Send the terminal reason before a cancelled reply can arm a
                 // prepared follow-up token and make that reason appear stale.
-                if close_session {
+                if close_session || cancel_delivery {
                     if let Some(token)=cancelled_token {
                         if send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.cancelled",
                             "runtime":token,"code":cancellation.reason}).to_string())).await.is_err(){break;}
@@ -512,12 +513,19 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                 if playback.as_ref().is_some_and(|clip|cancellation.matches_turn(&clip.turn_id,conversation)) {
                     if let Some(clip)=playback.take(){
                         let event=json!({"v":3,"type":"event","event":"audio.cancelled","stream_id":clip.stream_id,
-                            "runtime":clip.token,"code":cancellation.reason,"session_cancelled":close_session});
+                            "runtime":clip.token,"code":cancellation.reason,"session_cancelled":close_session || cancel_delivery});
                         if send(&mut socket,Message::Text(event.to_string())).await.is_err(){break;}
                     }
                 }
-                if delivery.as_ref().is_some_and(|d|cancellation.matches_turn(&d.turn_id,conversation)) {
-                    if let Some(d)=delivery.take(){let _=brain.tasks.revoke_outputs(Some(&d.activation_id));}
+                if cancel_delivery {
+                    if let Some(d)=delivery.take(){
+                        let _=brain.tasks.revoke_outputs(Some(&d.activation_id));
+                        // A completed foreground turn can still own a silent
+                        // image segment or wait for a durable task. There is no
+                        // active reply/audio event to stop that device lease;
+                        // the token-bound session event above does so explicitly.
+                        playback=None;plain=None;display_result=None;
+                    }
                 }
                 if close_session {
                     audio=None;plain=None;engagement=None;display_result=None;delivery=None;

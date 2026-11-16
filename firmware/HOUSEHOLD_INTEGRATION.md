@@ -80,8 +80,9 @@ player, not an MP4/H.264 decoder or an assertion of achieved frame rate. Mac mus
 prepare source videos/animations into supported frames or present other formats
 on its own richer viewer. No full clip is allocated on the device.
 
-Narration waits for the text/image LVGL flush, or an explicit image failure
-fallback, before `audio.playback.ready`. PCM remains on the current authenticated
+Narration waits for the text/image LVGL flush before `audio.playback.ready`.
+A failed required display produces a failed segment without starting its frozen
+narration. PCM remains on the current authenticated
 plain TCP/HMAC channel negotiated by `audio.begin`; do not close that channel at
 an intermediate segment's E frame or hardware terminal. Every audio segment has
 its own stream ID, sequence and existing ready/report handshake. The channel is
@@ -139,3 +140,24 @@ Real-board validation must cover near/far double-talk, self speech, volume/mute,
 clip/underrun, prolonged silence, repeated cancel, long-run drift, and capture-ready
 latency before either opt-in is enabled for normal use. Touch/Stop remains the
 available interruption path with the default build.
+
+## Follow-up static review — 2026-11-16
+
+Three source-level ordering/failure defects from the initial integration are
+corrected; these changes have not been built or exercised on hardware:
+
+- A turn-scoped cancellation after foreground generation now sends a matching
+  terminal event even when the device is showing a silent segment or waiting
+  for a durable task. Its output lease, audio transport and current image are
+  retired without cancelling the separately owned durable task.
+- A download, JPEG decode or display failure prevents unstarted narration from
+  referring to the missing picture. The device sends an audio-unavailable
+  terminal before its failed aggregate segment receipt.
+- The final presentation command may race the runtime's separate hardware
+  event queue. If the matching playback is still recorded as active, runtime
+  keeps the completion intent until its genuine hardware DONE arrives. A failed
+  playback, cancellation or new turn cannot reuse that pending intent.
+
+Pending manual checks: cancel a silent segment and a task-wait; reject an image
+after its descriptor while audio is ready; and check final completion when the
+presentation command is consumed before the matching hardware DONE event.

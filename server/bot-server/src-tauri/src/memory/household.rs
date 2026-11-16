@@ -41,12 +41,41 @@ pub(super) fn source_id(db:&Connection, external:&str) -> Result<String,String> 
         [external],|r|r.get(0)).optional().map_err(db_error)?.ok_or_else(||"source_not_found_or_forgotten".into())
 }
 
+fn invalidate_episode_derived(db:&Connection,episode:&str)->Result<(),String>{
+    // Expiry can leave an explicitly confirmed fact as an independent record.
+    // An unrelated live turn in the same episode may change later. Preserve
+    // that fact only while every remaining live source still has its cited
+    // revision and none of its sources was explicitly forgotten/suppressed.
+    db.execute(
+        "UPDATE household_derived SET valid=0 WHERE episode_id=?1 AND NOT(
+            kind='fact' AND confirmed=1
+            AND EXISTS(
+                SELECT 1 FROM household_derived_sources s
+                JOIN household_turns t ON t.id=s.turn_id
+                WHERE s.derived_id=household_derived.id
+                  AND t.source_expired=1 AND t.forgotten=0
+            )
+            AND NOT EXISTS(
+                SELECT 1 FROM household_derived_sources s
+                LEFT JOIN household_turns t ON t.id=s.turn_id
+                WHERE s.derived_id=household_derived.id AND (
+                    t.id IS NULL OR t.forgotten=1
+                    OR (t.source_expired=0 AND t.source_revision!=s.source_revision)
+                    OR EXISTS(SELECT 1 FROM household_tombstones x
+                              WHERE x.scope='derived_source' AND x.target_id=s.turn_id)
+                )
+            )
+        )", [episode],
+    ).map_err(db_error)?;
+    Ok(())
+}
+
 pub(super) fn revision_changed(db:&Connection, episode:&str, policy:bool) -> Result<(),String> {
     let already_recalled:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM household_derived WHERE episode_id=?1 AND valid=1)",[episode],|r|r.get(0)).map_err(db_error)?;
     db.execute("UPDATE household_episodes SET revision=revision+1 WHERE id=?1",[episode]).map_err(db_error)?;
     // An obsolete in-flight result is rejected at commit as well. Keep graph
     // deletion ahead of a new ingest so stale projection content cannot survive.
-    db.execute("UPDATE household_derived SET valid=0 WHERE episode_id=?1",[episode]).map_err(db_error)?;
+    invalidate_episode_derived(db,episode)?;
     db.execute("UPDATE household_jobs SET state='obsolete',lease=NULL,lease_until_ms=NULL WHERE episode_id=?1 AND kind!='graph_delete' AND state IN('queued','running','failed','blocked')",[episode]).map_err(db_error)?;
     super::household_jobs::queue_graph_delete(db,episode)?;
     // A later-day learning observation may cite this earlier raw source. The
@@ -54,9 +83,11 @@ pub(super) fn revision_changed(db:&Connection, episode:&str, policy:bool) -> Res
     let dependents={let mut q=db.prepare("SELECT DISTINCT d.episode_id FROM household_derived d JOIN household_derived_sources s ON s.derived_id=d.id JOIN household_turns t ON t.id=s.turn_id WHERE t.episode_id=?1 AND d.episode_id!=?1").map_err(db_error)?;let rows=q.query_map([episode],|r|r.get::<_,String>(0)).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?};
     for dependent in dependents{
         db.execute("UPDATE household_episodes SET revision=revision+1 WHERE id=?1",[&dependent]).map_err(db_error)?;
-        db.execute("UPDATE household_derived SET valid=0 WHERE episode_id=?1",[&dependent]).map_err(db_error)?;
-        db.execute("UPDATE household_jobs SET state='obsolete',lease=NULL,lease_until_ms=NULL,payload_json='{}' WHERE episode_id=?1 AND kind!='graph_delete' AND state IN('queued','running','failed','blocked')",[&dependent]).map_err(db_error)?;
+        invalidate_episode_derived(db,&dependent)?;
+        // Capture every pending remote UUID before clearing dependent jobs.
+        // A cancelled ingest may already have written to the graph backend.
         super::household_jobs::queue_graph_delete(db,&dependent)?;
+        db.execute("UPDATE household_jobs SET state='obsolete',lease=NULL,lease_until_ms=NULL,payload_json='{}' WHERE episode_id=?1 AND kind!='graph_delete' AND state IN('queued','running','failed','blocked')",[&dependent]).map_err(db_error)?;
         super::household_jobs::queue_organize(db,&dependent)?;
     }
     if policy||already_recalled {db.execute("UPDATE households SET policy_revision=policy_revision+1 WHERE singleton=1",[]).map_err(db_error)?;}
@@ -169,7 +200,10 @@ impl Store {
         let (retain,expired,episode):(bool,bool,String)=tx.query_row("SELECT h.history_enabled,t.source_expired,t.episode_id FROM households h CROSS JOIN household_turns t WHERE h.singleton=1 AND t.id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(db_error)?;
         if expired{return Err("source_expired".into());}
         let text=if retain{assistant_text.map(|s|s.chars().take(16_000).collect::<String>())}else{Some(String::new())};
-        tx.execute("UPDATE household_turns SET status=?1,assistant_text=COALESCE(?2,assistant_text),metadata_json=?3,updated_at_ms=?4 WHERE id=?5",params![status,text,meta,now_ms(),id]).map_err(db_error)?;
+        // Finish/status metadata augments the original capture/ASR evidence.
+        // Replacing it would erase time_basis, quality and sample alignment as
+        // soon as the turn enters the running state.
+        tx.execute("UPDATE household_turns SET status=?1,assistant_text=COALESCE(?2,assistant_text),metadata_json=json_patch(metadata_json,?3),updated_at_ms=?4 WHERE id=?5",params![status,text,meta,now_ms(),id]).map_err(db_error)?;
         if let Some(conversation)=metadata["model_conversation_id"].as_str(){
             validate_id(conversation)?;
             tx.execute("INSERT OR IGNORE INTO household_model_conversations(conversation_id,daily_id,private_profile_id) SELECT c.id,e.daily_id,t.private_profile_id FROM conversations c CROSS JOIN household_turns t JOIN household_episodes e ON e.id=t.episode_id WHERE c.id=?1 AND t.id=?2 AND c.profile_id IS t.private_profile_id",params![conversation,id]).map_err(db_error)?;
@@ -438,6 +472,17 @@ impl Store {
         tx.commit().map_err(db_error)
     }
 
+    /// A console conversation ID is an activation, while its OpenCode context
+    /// belongs to the family day (or an explicit private scope). Resolve the
+    /// affected native contexts before erasing only this activation's sources.
+    pub fn household_activation_conversations(&self,activation:&str)->Result<Vec<String>,String>{
+        validate_id(activation)?;
+        let db=self.connection()?;
+        let mut q=db.prepare("SELECT DISTINCT m.conversation_id FROM household_model_conversations m JOIN household_episodes e ON e.daily_id=m.daily_id JOIN household_turns t ON t.episode_id=e.id WHERE e.activation_id=?1 AND t.forgotten=0 AND t.private_profile_id IS m.private_profile_id ORDER BY m.conversation_id").map_err(db_error)?;
+        let rows=q.query_map([activation],|r|r.get::<_,String>(0)).map_err(db_error)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)
+    }
+
     pub fn complete_household_cleanup(&self,ids:&[String])->Result<(),String>{
         let mut db=self.connection()?;let tx=db.transaction().map_err(db_error)?;
         for id in ids{validate_id(id)?;tx.execute("UPDATE household_source_cleanup SET completed_at_ms=?1 WHERE turn_id=?2 AND completed_at_ms IS NULL",params![now_ms(),id]).map_err(db_error)?;}
@@ -588,8 +633,18 @@ pub(super) fn forget_profile_data(db:&Connection,profile:&str)->Result<(),String
 pub(super) fn forget_conversation_data(db:&Connection,conversation:&str)->Result<(),String>{
     let mapping:Option<(String,Option<String>)>=db.query_row("SELECT daily_id,private_profile_id FROM household_model_conversations WHERE conversation_id=?1",[conversation],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(db_error)?;
     let mapping=if mapping.is_some(){mapping}else{db.query_row("SELECT id,NULL FROM household_days WHERE id=?1",[conversation],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(db_error)?};
-    if let Some((day,owner))=mapping{
-        let ids={let mut q=db.prepare("SELECT t.id FROM household_turns t JOIN household_episodes e ON e.id=t.episode_id WHERE e.daily_id=?1 AND t.private_profile_id IS ?2 AND t.forgotten=0").map_err(db_error)?;let rows=q.query_map(params![day,owner],|r|r.get::<_,String>(0)).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?};
+    let ids=if let Some((day,owner))=mapping{
+        let mut q=db.prepare("SELECT t.id FROM household_turns t JOIN household_episodes e ON e.id=t.episode_id WHERE e.daily_id=?1 AND t.private_profile_id IS ?2 AND t.forgotten=0").map_err(db_error)?;
+        let rows=q.query_map(params![day,owner],|r|r.get::<_,String>(0)).map_err(db_error)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?
+    }else{
+        // The console sends its activation ID, not the day's model ID. Other
+        // activations on the same day retain their source records.
+        let mut q=db.prepare("SELECT t.id FROM household_turns t JOIN household_episodes e ON e.id=t.episode_id WHERE e.activation_id=?1 AND t.forgotten=0").map_err(db_error)?;
+        let rows=q.query_map([conversation],|r|r.get::<_,String>(0)).map_err(db_error)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?
+    };
+    if !ids.is_empty(){
         for id in ids{forget_one(db,&id,false)?;}
         db.execute("UPDATE households SET policy_revision=policy_revision+1 WHERE singleton=1",[]).map_err(db_error)?;
     }

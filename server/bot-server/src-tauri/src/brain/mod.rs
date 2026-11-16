@@ -273,9 +273,16 @@ impl Brain {
         };
         if matches!(cancellation.scope, CancelScope::All) {
             self.foreground_generation.send_modify(|value|*value=value.wrapping_add(1));
-            self.models.cancel_current();
+            // The Stop-interaction button does not cancel durable task TTS or
+            // media preparation sharing these lanes. Dropping the cancelled
+            // foreground future already kills only its own worker exchange.
+            if reason!="parent_stop"{self.models.cancel_current();}
             self.graphiti.stop().await;
-            if let Ok(mut jobs)=self.identity_jobs.lock(){for (_,job) in jobs.drain(){job.abort();}}
+            let jobs=self.identity_jobs.lock().map(|mut jobs|jobs.drain().map(|(_,job)|job).collect::<Vec<_>>()).unwrap_or_default();
+            for job in &jobs{job.abort();}
+            // Abort is cooperative. A source edit must not race a last
+            // synchronous identity write after its revision preflight.
+            for job in jobs{let _=job.await;}
             self.tasks.revoke_outputs(None)?;
         } else if let CancelScope::DeviceSession(id)=&cancellation.scope { self.tasks.revoke_outputs(Some(id))?; }
         for id in ids {
@@ -314,10 +321,18 @@ impl Brain {
         let started = Instant::now();
         self.emit("turn.started", Some(&input.turn_id), json!({"input":if input.text.is_some(){"text"}else{"audio"}}));
         let result = tokio::select! {
-            result = self.execute(&input, trusted_console) => result,
+            biased;
             _ = cancellation.changed() => Err("cancelled".into()),
+            result = self.execute(&input, trusted_console) => result,
         };
-        if let Ok(mut active) = self.active.lock() { active.remove(&input.turn_id); }
+        let result={
+            // cancel_scoped sends while holding this same membership lock.
+            // Checking and removing together chooses one completion boundary.
+            let mut active=self.active.lock().map_err(|_|"brain_state_poisoned")?;
+            let cancelled=*cancellation.borrow();
+            active.remove(&input.turn_id);
+            if cancelled{Err("cancelled".into())}else{result}
+        };
         if let Err(error)=&result {let _=self.memory.journal_finish(&input.turn_id,if error.contains("cancelled"){"cancelled"}else{"failed"},None,json!({"error":error.split(':').next()}));}
         lease.completed=true;
         self.emit(if result.is_ok(){"turn.completed"}else{"turn.failed"}, Some(&input.turn_id),

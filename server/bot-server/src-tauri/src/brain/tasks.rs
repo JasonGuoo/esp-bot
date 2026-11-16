@@ -135,15 +135,10 @@ impl TaskService{
             if !service.accepting.load(Ordering::Acquire){break;}
             if service.redacting.load(Ordering::Acquire){continue;}
             let _=service.purge_expired();
-            for state in ["unknown","partial","cancel_requested"]{
-                let Ok(records)=service.list(None,Some(state),32) else{continue};
-                for task in records{if task.capability!="print.submit"{continue;}
-                    // Retain the receipt indefinitely, but do not poll a purged
-                    // CUPS history forever. Manual reconciliation remains valid.
-                    if now().saturating_sub(task.created_at_ms)>7*24*60*60*1000{continue;}
-                    let active=service.active.lock().map(|a|a.contains_key(&task.task_id)).unwrap_or(true);if active{continue;}
-                    let _=super::capabilities::reconcile_print(&service,&task).await;
-                }
+            let Ok(records)=service.pending_prints() else{continue};
+            for task in records{
+                let active=service.active.lock().map(|a|a.contains_key(&task.task_id)).unwrap_or(true);if active{continue;}
+                let _=super::capabilities::reconcile_print(&service,&task).await;
             }
         }});
         *self.reconciler.lock().map_err(|_|"task_scheduler_lock")?=Some(reconciler);Ok(())
@@ -151,7 +146,10 @@ impl TaskService{
 
     pub async fn stop(&self){
         self.accepting.store(false,Ordering::Release);
-        if let Ok(mut scheduler)=self.scheduler.lock(){if let Some(h)=scheduler.take(){h.abort();}}
+        let scheduler=self.scheduler.lock().ok().and_then(|mut h|h.take());
+        // abort is cooperative: wait until the scheduler has really stopped
+        // registering runners before taking the runner collection below.
+        if let Some(handle)=scheduler{handle.abort();let _=handle.await;}
         let reconciler=self.reconciler.lock().ok().and_then(|mut h|h.take());if let Some(handle)=reconciler{handle.abort();let _=handle.await;}
         // Stopping the application revokes all output but is not proof that a
         // remote print was undone. Interrupted effect attempts recover unknown.
@@ -223,7 +221,7 @@ impl TaskService{
         let Some(id)=input["artifact_id"].as_str() else{return Ok(())};
         let asset=self.artifacts.verify(id)?;
         let mut sources=input["source_turn_ids"].as_array().cloned().unwrap_or_default();
-        if let Some(id)=asset.source["conversation_turn_id"].as_str(){sources.push(json!(id));}
+        if let Some(id)=asset.source["conversation_turn_id"].as_str().or_else(||asset.source.pointer("/context/conversation_turn_id").and_then(Value::as_str)){sources.push(json!(id));}
         if let Some(task_id)=asset.source["task_id"].as_str(){
             let origin=query_task(db,task_id)?;if source_invalidated(db,&origin.conversation_turn_id)?{return Err("artifact_source_invalidated".into());}
             sources.push(json!(origin.conversation_turn_id));if let Some(ids)=origin.input["source_turn_ids"].as_array(){sources.extend(ids.iter().cloned());}
@@ -255,6 +253,9 @@ impl TaskService{
         if stage.len()>80||serde_json::to_vec(&payload).map_err(|e|e.to_string())?.len()>65_536{return Err("task_progress_limit".into());}
         let mut db=self.db.lock().map_err(|_|"task_database_lock")?;let tx=db.transaction().map_err(db_error)?;
         let task=query_task(&tx,id)?;
+        // A slower concurrent CUPS query may still report queued/unknown after
+        // another query has persisted an authoritative terminal job receipt.
+        if confirmed_print_terminal(&task).is_some(){return Ok(());}
         let event=json!({"stage":stage,"evidence":if task.result["content_deleted"]==true{json!({})}else{payload}});
         let serialized=serde_json::to_string(&event).map_err(|e|e.to_string())?;
         let previous:Option<String>=tx.query_row("SELECT payload_json FROM task_events WHERE task_id=?1 AND kind='task.progress' ORDER BY sequence DESC LIMIT 1",[id],|r|r.get(0)).optional().map_err(db_error)?;
@@ -268,7 +269,10 @@ impl TaskService{
     pub fn checkpoint(&self,id:&str,data:Value)->Result<(),String>{
         if serde_json::to_vec(&data).map_err(|e|e.to_string())?.len()>131_072{return Err("task_result_limit".into());}
         let db=self.db.lock().map_err(|_|"task_database_lock")?;
-        let current=query_task(&db,id)?;let data=if current.result["content_deleted"]==true{effect_tombstone(&data)}else{data};
+        let current=query_task(&db,id)?;let mut data=data;
+        if confirmed_print_terminal(&current).is_some(){return Ok(());}
+        preserve_cancel_request(&current.result,&mut data);
+        let data=if current.result["content_deleted"]==true{effect_tombstone(&data)}else{data};
         db.execute("UPDATE tasks SET result_json=?2,updated_at_ms=?3 WHERE id=?1",params![id,serde_json::to_string(&data).map_err(|e|e.to_string())?,now()]).map_err(db_error)?;Ok(())
     }
     pub fn bind_sources(&self,id:&str,turn_ids:&[String])->Result<(),String>{
@@ -291,18 +295,33 @@ impl TaskService{
         self.emit(&task,"task.progress",json!({"stage":"submitting"}));Ok(())
     }
     pub async fn cancel(self:&Arc<Self>,id:&str)->Result<TaskRecord,String>{
-        let task=self.get(id)?;
+        valid_id(id)?;
         self.revoke_task_outputs(id)?;
-        if matches!(task.state,TaskState::Succeeded|TaskState::Failed|TaskState::Cancelled){return Ok(task);}
-        let running=self.active.lock().map_err(|_|"task_active_lock")?.get(id).cloned();
-        let mut cancellation=task.result.clone();if !cancellation.is_object(){cancellation=json!({});}cancellation["cancel_requested"]=json!(true);
-        if let Some(cancel)=running{self.set_state(id,TaskState::CancelRequested,"cancel_requested",Some(cancellation))?;cancel.send_replace(true);}
-        else if task.capability=="print.submit"&&(task.result.get("job_id").is_some()||task.result.pointer("/data/job_id").is_some()){
-            self.set_state(id,TaskState::CancelRequested,"cancel_requested",Some(cancellation))?;
-            super::capabilities::cancel_print(self,&task).await?;
-        }else if task.capability=="print.submit"&&matches!(task.state,TaskState::Unknown){
-            self.checkpoint(id,cancellation)?;self.progress(id,"cancel_unconfirmed",json!({"reason":"submission_result_unknown"}))?;
-        }else{self.set_state(id,TaskState::Cancelled,"cancelled",None)?;}
+        // The scheduler claims/registers work under active -> db. Use that same
+        // order so a queued task cannot cross its effect boundary between our
+        // running check and cancellation. Read the current result in the same
+        // transaction: a concurrent CUPS checkpoint may already contain a job ID.
+        let (task,running,external_started)={
+            let active=self.active.lock().map_err(|_|"task_active_lock")?;
+            let mut db=self.db.lock().map_err(|_|"task_database_lock")?;let tx=db.transaction().map_err(db_error)?;
+            let task=query_task(&tx,id)?;
+            if matches!(task.state,TaskState::Succeeded|TaskState::Failed|TaskState::Cancelled){return Ok(task);}
+            let running=active.get(id).cloned();
+            let external_started=task.capability=="print.submit"&&(task.result["submission_started"]==true
+                ||task.result.pointer("/data/submission_started").and_then(Value::as_bool)==Some(true)
+                ||task.result["job_id"].is_string()||task.result.pointer("/data/job_id").is_some_and(Value::is_string));
+            let state=if running.is_some()||external_started{TaskState::CancelRequested}else{TaskState::Cancelled};
+            let stage=if state==TaskState::CancelRequested{"cancel_requested"}else{"cancelled"};
+            let mut result=task.result.clone();if !result.is_object(){result=json!({});}result["cancel_requested"]=json!(true);
+            tx.execute("UPDATE tasks SET state=?2,stage=?3,result_json=?4,updated_at_ms=?5 WHERE id=?1",
+                params![id,state.as_str(),stage,serde_json::to_string(&result).map_err(|e|e.to_string())?,now()]).map_err(db_error)?;
+            append_event(&tx,id,"task.state",&json!({"state":state,"stage":stage}))?;
+            let task=query_task(&tx,id)?;tx.commit().map_err(db_error)?;
+            (task,running,external_started)
+        };
+        self.emit(&task,"task.state",json!({"state":task.state,"stage":task.stage}));
+        if let Some(cancel)=running{cancel.send_replace(true);}
+        else if external_started{super::capabilities::cancel_print(self,&task).await?;}
         self.get(id)
     }
     pub async fn cancel_all(self:&Arc<Self>)->Result<(),String>{
@@ -312,11 +331,26 @@ impl TaskService{
     pub async fn reconcile(self:&Arc<Self>,id:&str)->Result<TaskRecord,String>{
         let task=self.get(id)?;
         if task.capability!="print.submit"{return Err("task_reconcile_unsupported".into());}
+        if task.result["submission_started"]!=true&&task.result.pointer("/data/submission_started").and_then(Value::as_bool)!=Some(true){return Err("print_attempt_missing".into());}
+        if self.active.lock().map_err(|_|"task_active_lock")?.contains_key(id){return Err("print_reconciliation_already_running".into());}
         super::capabilities::reconcile_print(self,&task).await?;self.get(id)
     }
-    pub fn set_state(&self,id:&str,state:TaskState,stage:&str,result:Option<Value>)->Result<(),String>{
+    pub fn set_state(&self,id:&str,mut state:TaskState,stage:&str,result:Option<Value>)->Result<(),String>{
         let mut db=self.db.lock().map_err(|_|"task_database_lock")?;let tx=db.transaction().map_err(db_error)?;
-        let task=query_task(&tx,id)?;let result=result.unwrap_or_else(||task.result.clone());
+        let task=query_task(&tx,id)?;let mut result=result.unwrap_or_else(||task.result.clone());
+        if confirmed_print_terminal(&task).is_some_and(|confirmed|confirmed!=state){return Ok(());}
+        preserve_cancel_request(&task.result,&mut result);
+        // Completion can race an explicit stop after run_task's last snapshot.
+        // Make the final decision while holding the database transaction.
+        let effect_started=task.capability=="print.submit"&&(task.result["submission_started"]==true
+            ||task.result.pointer("/data/submission_started").and_then(Value::as_bool)==Some(true));
+        let stage=if !effect_started&&matches!(task.state,TaskState::CancelRequested|TaskState::Cancelled)
+            &&!matches!(state,TaskState::CancelRequested|TaskState::Cancelled){
+            state=TaskState::Cancelled;if !result.is_object(){result=json!({});}result["summary"]=json!("任务已取消。");"cancelled"
+        }else if effect_started&&result["cancel_requested"]==true
+            &&matches!(state,TaskState::Queued|TaskState::Running|TaskState::AwaitingInput|TaskState::Partial){
+            state=TaskState::CancelRequested;"awaiting_cancel_receipt"
+        }else{stage};
         let result=if task.result["content_deleted"]==true{effect_tombstone(&result)}else{result};
         let changed=task.state!=state||task.stage!=stage||task.result["summary"]!=result["summary"]||task.result["artifact_ids"]!=result["artifact_ids"];
         let data=serde_json::to_string(&result).map_err(|e|e.to_string())?;if data.len()>262_144{return Err("task_result_limit".into());}
@@ -335,6 +369,15 @@ impl TaskService{
         let db=self.db.lock().map_err(|_|"task_database_lock")?;let mut statement=db.prepare("SELECT id FROM tasks WHERE state='queued' ORDER BY created_at_ms,id LIMIT 32").map_err(db_error)?;
         let rows=statement.query_map([],|r|r.get::<_,String>(0)).map_err(db_error)?;let ids=rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
         ids.iter().map(|id|query_task(&db,id)).collect()
+    }
+    fn pending_prints(&self)->Result<Vec<TaskRecord>,String>{
+        let db=self.db.lock().map_err(|_|"task_database_lock")?;
+        // Filter before LIMIT: recent partial renders must not crowd an older
+        // unresolved print out of every pass. Oldest checked jobs rotate first.
+        // CUPS history older than seven days remains manually reconcilable.
+        let mut statement=db.prepare("SELECT id FROM tasks WHERE capability='print.submit' AND state IN ('unknown','partial','cancel_requested') AND created_at_ms>=?1 ORDER BY updated_at_ms,id LIMIT 32").map_err(db_error)?;
+        let rows=statement.query_map([now().saturating_sub(7*24*60*60*1000)],|r|r.get::<_,String>(0)).map_err(db_error)?;
+        let ids=rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;ids.iter().map(|id|query_task(&db,id)).collect()
     }
     pub fn attempts(&self,id:&str)->Result<Vec<Value>,String>{
         valid_id(id)?;let db=self.db.lock().map_err(|_|"task_database_lock")?;let mut statement=db.prepare("SELECT id,attempt,started_at_ms,ended_at_ms,state FROM task_attempts WHERE task_id=?1 ORDER BY attempt").map_err(db_error)?;
@@ -517,6 +560,19 @@ impl TaskService{
         if self.redacting.load(Ordering::Acquire)||source_invalidated(&tx,&plan.context.conversation_turn_id)?||presentation_sources_invalidated(&tx,id)?{return Err("presentation_source_invalidated".into());}
         let mut sources={let mut statement=tx.prepare("SELECT source_id FROM presentation_sources WHERE presentation_id=?1").map_err(db_error)?;
             let rows=statement.query_map([id],|r|r.get::<_,String>(0)).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?};
+        // A reused poster/image carries its own source closure, even when it
+        // came from another day and was not among this turn's recalled text.
+        // Bind it before copying bytes into a newly rendered presentation.
+        let mut assets=Vec::new();
+        for segment in &plan.segments{
+            assets.extend(segment.asset_ids.iter().cloned());assets.extend(segment.speech_asset_id.iter().cloned());
+            for field in ["artifact_id","poster_artifact_id"]{if let Some(asset)=segment.visual[field].as_str(){assets.push(asset.to_owned());}}
+        }
+        assets.sort();assets.dedup();
+        for asset in assets{
+            let mut input=json!({"artifact_id":asset});self.inherit_artifact_sources(&tx,&mut input)?;
+            if let Some(inherited)=input["source_turn_ids"].as_array(){sources.extend(inherited.iter().filter_map(Value::as_str).map(str::to_owned));}
+        }
         sources.extend(source_ids.iter().cloned());sources.push(plan.context.conversation_turn_id.clone());sources.sort();sources.dedup();
         if sources.len()>2049||raw.len()+serde_json::to_vec(&sources).map_err(|e|e.to_string())?.len()>262_144{return Err("presentation_source_limit".into());}
         for source in &sources{valid_id(source)?;if source_invalidated(&tx,source)?{return Err("presentation_source_invalidated".into());}
@@ -652,6 +708,18 @@ fn effect_tombstone(value:&Value)->Value{
     let mut tombstone=json!({"content_deleted":true});for field in ["job_id","printer","job_title","submission_started","cancel_requested","reconciled_at_ms"]{
         if let Some(value)=value.get(field).or_else(||value.get("data").and_then(|data|data.get(field))){tombstone[field]=value.clone();}}
     if let Some(state)=value.pointer("/cups_receipt/job-state").or_else(||value.get("cups_job_state")){tombstone["cups_job_state"]=state.clone();}tombstone
+}
+fn preserve_cancel_request(current:&Value,next:&mut Value){
+    if current["cancel_requested"]==true||current.pointer("/data/cancel_requested").and_then(Value::as_bool)==Some(true){
+        if !next.is_object(){*next=json!({});}next["cancel_requested"]=json!(true);
+    }
+}
+fn confirmed_print_terminal(task:&TaskRecord)->Option<TaskState>{
+    if task.capability!="print.submit"{return None;}
+    let code=task.result.pointer("/cups_receipt/job-state").or_else(||task.result.pointer("/data/cups_receipt/job-state"))
+        .or_else(||task.result.get("cups_job_state")).and_then(Value::as_i64)?;
+    let state=match code{7=>TaskState::Cancelled,8=>TaskState::Failed,9=>TaskState::Succeeded,_=>return None};
+    (task.state==state).then_some(state)
 }
 fn semantic_content(plan:&PresentationPlan)->Result<Value,String>{
     let mut value=serde_json::to_value(plan).map_err(|e|e.to_string())?;if let Some(object)=value.as_object_mut(){object.remove("revision");}

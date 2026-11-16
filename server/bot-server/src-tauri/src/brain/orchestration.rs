@@ -42,24 +42,35 @@ impl Brain {
                 let legacy=brain.memory.context(memory::ContextRequest{profile_id:profile.map(str::to_owned),profile_confirmed:profile.is_some(),
                     destination:memory::ContextDestination::Cloud,query:prompt.clone(),include_household:true})?;
                 context.progress("working",json!({"work_session":work_id}))?;
+                let mut response_schema=scene::device_schema();
+                if let Some(properties)=response_schema["properties"].as_object_mut(){properties.remove("tasks");}
+                let mut system_prompt=scene::system_prompt(&brain.config.conversation.language,&format!("{}\n{recall}",legacy.text));
+                system_prompt.push_str("\n当前已经在执行接纳后的后台任务。请使用可用工具完成这次工作并返回实际结果，不再提出 tasks 或把同一工作再次转交 agent.work。缺少必要信息时用 outcome=needs_input 并提出具体问题；未完成时用 partial，不能把接纳任务当作完成结果。");
                 let request = TurnRequest {turn_id:context.task.task_id.clone(),conversation_id:work_id,
-                    user_text:prompt.clone(),system_prompt:scene::system_prompt(&brain.config.conversation.language,&format!("{}\n{recall}",legacy.text)),
-                    response_schema:Some(scene::device_schema()),clarify_on_device:false,context_revision:Some(revision)};
+                    user_text:prompt.clone(),system_prompt,
+                    response_schema:Some(response_schema),clarify_on_device:false,context_revision:Some(revision)};
                 let mut cancellation = context.cancelled.clone();
                 let reply = tokio::select! {
                     reply=brain.harness.run(request)=>reply?,
                     _=cancellation.changed()=>{let _=brain.harness.cancel(&context.task.task_id).await;return Err("cancelled".into());}
                 };
                 context.check_cancelled()?;
-                let scene=scene::normalize(&reply.text,reply.structured.as_ref(),brain.config.conversation.max_reply_characters,&brain.config.conversation.media_hosts);
+                if !scene::task_proposals(reply.structured.as_ref())?.is_empty(){return Err("background_task_deferred_again".into());}
+                let mut scene=scene::normalize(&reply.text,reply.structured.as_ref(),brain.config.conversation.max_reply_characters,&brain.config.conversation.media_hosts);
+                let outcome=reply.structured.as_ref().and_then(|value|value["outcome"].as_str()).unwrap_or("answered");
+                let effect=reply.structured.as_ref().and_then(|value|value["effect"].as_str()).unwrap_or("none");
+                let effect_unconfirmed=outcome=="done"&&!display::confirmed_effect(effect,&reply.evidence);
+                if effect_unconfirmed{scene.speech="暂时无法确认这件事是否完成，请在 Mac 上检查任务记录。".into();scene.cards.clear();}
                 let plan_context=PlanContext {household_id:context.task.household_id.clone(),daily_conversation_id:context.task.daily_conversation_id.clone(),
                     conversation_turn_id:context.task.conversation_turn_id.clone(),task_id:Some(context.task.task_id.clone())};
                 context.progress("rendering",json!({}))?;
-                let (plan,_,warnings)=brain.prepare_presentation(plan_context,scene,reply.structured.as_ref(),&reply.evidence,&prompt,true,&context_sources).await?;
+                let (plan,_,warnings)=brain.prepare_presentation(plan_context,scene,if effect_unconfirmed{None}else{reply.structured.as_ref()},&reply.evidence,&prompt,true,&context_sources).await?;
                 context.check_cancelled()?;
                 let assets=plan.segments.iter().flat_map(|s|s.asset_ids.iter().cloned().chain(s.speech_asset_id.clone())).collect();
                 let speech=plan.segments.iter().map(|s|s.speech.as_str()).collect::<Vec<_>>().join(" ");
-                Ok(tasks::TaskResult{state:if warnings.is_empty(){tasks::TaskState::Succeeded}else{tasks::TaskState::Partial},summary:speech,artifact_ids:assets,
+                let state=if outcome=="needs_input"{tasks::TaskState::AwaitingInput}
+                    else if outcome=="partial"||effect_unconfirmed||!warnings.is_empty(){tasks::TaskState::Partial}else{tasks::TaskState::Succeeded};
+                Ok(tasks::TaskResult{state,summary:speech,artifact_ids:assets,
                     data:json!({"presentation_id":plan.presentation_id,"revision":plan.revision,"warnings":warnings,"session_id":reply.session_id})})
             })
         }))
@@ -143,7 +154,9 @@ impl Brain {
             response_schema:Some(scene::device_schema()),clarify_on_device:input.device_display,context_revision:Some(revision),
         })).await?;
         let mut warnings=Vec::new(); let mut task_ids=Vec::new();
-        let mut proposals=match scene::task_proposals(reply.structured.as_ref()){Ok(tasks)=>tasks,Err(error)=>{warnings.push(error);Vec::new()}};
+        let (mut proposals,invalid_proposals)=match scene::task_proposals(reply.structured.as_ref()){
+            Ok(tasks)=>(tasks,false),Err(error)=>{warnings.push(error);(Vec::new(),true)}
+        };
         if proposals.is_empty(){
             if let Some(visual)=reply.structured.as_ref().and_then(|value|value.get("visual")).filter(|visual|visual["kind"]=="stroke"){
                 // A single still poster cannot fulfil a stroke demonstration.
@@ -152,6 +165,7 @@ impl Brain {
                     source_quote:transcript.trim().chars().take(240).collect(),resume_task_id:None});
             }
         }
+        let proposed_task_count=proposals.len();
         for (index,mut proposal) in proposals.into_iter().enumerate() {
             let minimum=if proposal.capability=="print.submit" && proposal.resume_task_id.is_none(){2}else{1};
             if proposal.source_quote.trim().chars().count()<minimum || !transcript.contains(&proposal.source_quote) {warnings.push("task_source_quote_invalid".into());continue;}
@@ -185,17 +199,23 @@ impl Brain {
         }
         let mut scene=scene::normalize(&reply.text,reply.structured.as_ref(),self.config.conversation.max_reply_characters,&self.config.conversation.media_hosts);
         if scene.speech.trim().is_empty(){return Err("assistant_empty_reply".into());}
-        if !task_ids.is_empty(){scene.speech="好的，我接到这件事了，正在处理，有结果就告诉你。".into();}
         let mut outcome=reply.structured.as_ref().and_then(|v|v["outcome"].as_str()).unwrap_or("answered").to_owned();
+        let task_request_failed=invalid_proposals||task_ids.len()<proposed_task_count;
+        if task_request_failed{
+            outcome="partial".into();scene.cards.clear();
+            scene.speech=if task_ids.is_empty(){"这次任务没有启动。请在 Mac 上查看原因，补充信息后再试。"}
+                else{"有一部分任务已接下，另外的任务没有启动。请在 Mac 上查看各项状态。"}.into();
+        }else if !task_ids.is_empty(){outcome="answered".into();scene.speech="好的，我接到这件事了，正在处理，有结果就告诉你。".into();}
         let effect=reply.structured.as_ref().and_then(|v|v["effect"].as_str()).unwrap_or("none");
-        if outcome=="done" && !display::confirmed_effect(effect,&reply.evidence) {
-            outcome="partial".into(); scene.speech="暂时无法确认操作是否完成，请在 Mac 上检查。".into();
+        let effect_unconfirmed=outcome=="done"&&!display::confirmed_effect(effect,&reply.evidence);
+        if effect_unconfirmed {
+            outcome="partial".into(); scene.speech="暂时无法确认操作是否完成，请在 Mac 上检查。".into();scene.cards.clear();
         }
         let plan_context=PlanContext{household_id:journal.household_id.clone(),daily_conversation_id:journal.daily_conversation_id.clone(),
             conversation_turn_id:journal.conversation_turn_id.clone(),task_id:task_ids.first().cloned()};
         let speak=input.speak.unwrap_or(self.config.conversation.default_speak);
         if speak {self.emit("turn.synthesizing",Some(&input.turn_id),json!({"stage":"preparing_presentation"}));}
-        let (plan,prepared,mut preparation_warnings)=self.prepare_presentation(plan_context,scene,if task_ids.is_empty(){reply.structured.as_ref()}else{None},&reply.evidence,&transcript,
+        let (plan,prepared,mut preparation_warnings)=self.prepare_presentation(plan_context,scene,if task_ids.is_empty()&&!task_request_failed&&!effect_unconfirmed{reply.structured.as_ref()}else{None},&reply.evidence,&transcript,
             speak,&source_refs).await?;
         if !preparation_warnings.is_empty() && task_ids.is_empty(){outcome="partial".into();}
         warnings.append(&mut preparation_warnings);
@@ -334,10 +354,28 @@ impl Brain {
 
 fn explicit_print_request(transcript:&str,quote:&str)->bool{
     let text=transcript.to_lowercase();let quote=quote.to_lowercase();
-    if ["不要打印","不用打印","不必打印","别打印","不想打印","怎么打印","如何打印","don't print","do not print","without printing","how to print"].iter().any(|s|text.contains(s)){return false;}
-    let descriptive=["打印店","打印机","打印功能","打印是什么"].iter().any(|s|text.contains(s));
-    let imperative=["帮我打印","请打印","给我打印","我要打印","打印这","打印一","打印出来"].iter().any(|s|text.contains(s));
-    (!descriptive||imperative)&&(quote.contains("打印")||quote.contains("print"))&&text.contains(quote.as_str())
+    if !text.contains(quote.as_str()) || ["不要打印","不用打印","不必打印","别打印","不想打印","暂不打印","先不打印","取消打印","停止打印","怎么打印","如何打印",
+        "don't print","do not print","not to print","without printing","stop printing","cancel printing","how to print","how do i print","how can i print","what does print","meaning of print"].iter().any(|s|text.contains(s)){return false;}
+    // Negation can be separated from the verb by its object or an adverb:
+    // "不要把这张图打印出来" / "please do not immediately print this".
+    for clause in text.split(|c:char|matches!(c,'。'|'！'|'？'|'\n'|';'|'；'|'.'|'!'|'?')){
+        if let Some(at)=clause.rfind("打印"){
+            if ["不要","别","不用","不必","不想","不需要","不可以","不准","禁止","暂不","先不","取消","停止","如何","怎么"]
+                .iter().any(|word|clause[..at].contains(*word)){return false;}
+        }
+        if let Some(at)=clause.rfind("print"){
+            if clause[..at].split_whitespace().any(|word|matches!(word,"don't"|"don’t"|"not"|"never"|"without"|"stop"|"cancel"|"how")){return false;}
+        }
+    }
+    let descriptive=["打印店","打印机","打印功能","打印是什么","打印版","打印格式","打印稿","打印预览","打印设置"].iter().any(|s|text.contains(s));
+    let imperative=["帮我打印","帮忙打印","请打印","给我打印","我要打印","打印这","打印那","打印一","打印出来","打印到"].iter().any(|s|text.contains(s));
+    let chinese=quote.contains("打印")&&(imperative||(!descriptive&&text.trim_start().starts_with("打印")));
+    // "printable worksheet" and "fingerprint" describe content; neither is
+    // an instruction to consume paper. Require the standalone action word.
+    let english=quote.split(|c:char|!c.is_ascii_alphabetic()).any(|word|word=="print")
+        && (text.trim()=="print"||["please print","print this","print that","print it","print the ","print a ","print an ","print my ","print one ","print two "]
+            .iter().any(|phrase|text.contains(phrase)));
+    chinese||english
 }
 fn source_dependencies(value:&Value)->Vec<String>{
     fn visit(value:&Value,output:&mut Vec<String>,depth:usize){

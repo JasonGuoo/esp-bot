@@ -374,6 +374,7 @@ def render(request, output):
     draw = ImageDraw.Draw(canvas)
     metadata = {"width": WIDTH, "height": HEIGHT, "kind": kind, "visual_available": True}
     extra_files, stroke_frames = [], []
+    header_drawn = False
     draw.rounded_rectangle((10, 10, WIDTH - 10, HEIGHT - 10), radius=16, fill="white", outline="#d5e0e8")
     print_text = body
     if kind == "spelling":
@@ -470,6 +471,7 @@ def render(request, output):
         metadata.update(stroke_info)
         if stroke_poster is not None:
             canvas, draw = stroke_poster, ImageDraw.Draw(stroke_poster)
+            header_drawn = True
             print_text = explanation + ("\n" + body if body else "")
         else:
             # A font glyph is not stroke-order data. Never infer or invent
@@ -485,7 +487,8 @@ def render(request, output):
     else:
         title = title or "小呆的卡片"
         metadata["preview_truncated"] = draw_lines(draw, body, (26, 61, 454, 249), 22)
-    draw_lines(draw, title, (25, 20, 455, 53), 22, "#145f91")
+    if not header_drawn:
+        draw_lines(draw, title, (25, 20, 455, 53), 22, "#145f91")
     preview = output / "preview.jpg"
     save_jpeg(canvas, preview)
     files = [file_record(preview, "image/jpeg", title, "poster"), *extra_files]
