@@ -1170,10 +1170,21 @@ static bool playback_event_poll(void) {
     return true;
 }
 static void playback_prepare(const secure_state_t *state) {
-    /* Narration starts after the segment's actual display flush (or explicit
-     * image failure fallback), never while its illustration is downloading. */
+    /* Wait for the segment's display outcome; narration starts only after a
+     * successful flush, never while its illustration is downloading. */
     if (state->presentation_valid && state->segment_active &&
         (!state->segment_text_done || !state->segment_image_done)) return;
+    if (state->presentation_valid && state->segment_active && state->segment_failed) {
+        /* An actual download/decode/display failure invalidates the frozen
+         * segment too. Do not play narration referring to its missing image;
+         * report the unstarted audio failure before the aggregate receipt. */
+        const playback_event_t failed={.kind=BOT_AUDIO_EVENT_PLAYBACK_FAILED,
+            .token=state->remote,.stream=state->playback_stream,.error=ESP_ERR_INVALID_STATE,
+            .presentation_sequence=state->segment_generation};
+        if (xQueueSend(s_playback_events,&failed,0)!=pdTRUE)
+            fail_operation(state->remote,"Playback failure receipt queue full");
+        return;
+    }
     const bot_audio_token_t token={state->remote.epoch,state->remote.session_id,
         state->remote.turn_id,state->remote.focus_generation};
     uint32_t playback=0;

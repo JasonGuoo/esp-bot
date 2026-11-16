@@ -100,13 +100,19 @@ pub(super) fn queue_graph_delete(db:&Connection,episode:&str)->Result<(),String>
     // Its preallocated UUID is durable, so cleanup does not depend on a reply.
     let rows={let mut q=db.prepare("SELECT payload_json,input_version FROM household_jobs WHERE episode_id=?1 AND kind='graph_ingest' AND state IN('queued','running','failed','blocked','obsolete')").map_err(db_error)?;let rows=q.query_map([episode],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?};
     for (body,version) in rows {if let Some(uuid)=parse(body)["graph_uuid"].as_str(){queue_delete_uuid(db,episode,uuid,&version)?;}}
-    db.execute("UPDATE household_jobs SET state='obsolete',lease=NULL,lease_until_ms=NULL,payload_json='{}' WHERE episode_id=?1 AND kind='graph_ingest' AND state IN('queued','running','failed','blocked')",[episode]).map_err(db_error)?;
+    // revision_changed may already have marked the ingest obsolete before
+    // entering this function. Its UUID has now been durably copied to the
+    // delete outbox, so clear that obsolete payload as well.
+    db.execute("UPDATE household_jobs SET state='obsolete',lease=NULL,lease_until_ms=NULL,payload_json='{}' WHERE episode_id=?1 AND kind='graph_ingest' AND state IN('queued','running','failed','blocked','obsolete')",[episode]).map_err(db_error)?;
     Ok(())
 }
 
 fn queue_delete_uuid(db:&Connection,episode:&str,uuid:&str,version:&str)->Result<(),String>{
     let key=format!("{version}:{uuid}");
-    db.execute("INSERT INTO household_jobs(id,episode_id,kind,input_version,payload_json,state,available_at_ms,created_at_ms) VALUES(?1,?2,'graph_delete',?3,?4,'queued',?5,?5) ON CONFLICT(episode_id,kind,input_version) DO UPDATE SET state=CASE WHEN state='running' THEN state ELSE 'queued' END,available_at_ms=excluded.available_at_ms,last_error=NULL",params![uid("job"),episode,key,encoded(&json!({"graph_uuid":uuid}),1024)?,now_ms()]).map_err(db_error)?;
+    // Successful jobs intentionally erase their payload. Re-queueing the same
+    // UUID must restore it, otherwise deletion fails forever with uuid_missing
+    // and blocks every later ingest for the episode.
+    db.execute("INSERT INTO household_jobs(id,episode_id,kind,input_version,payload_json,state,available_at_ms,created_at_ms) VALUES(?1,?2,'graph_delete',?3,?4,'queued',?5,?5) ON CONFLICT(episode_id,kind,input_version) DO UPDATE SET state=CASE WHEN state='running' THEN state ELSE 'queued' END,payload_json=excluded.payload_json,available_at_ms=excluded.available_at_ms,last_error=NULL",params![uid("job"),episode,key,encoded(&json!({"graph_uuid":uuid}),1024)?,now_ms()]).map_err(db_error)?;
     Ok(())
 }
 
@@ -171,7 +177,7 @@ impl Store {
         let previous: BTreeMap<String,bool>={let mut q=tx.prepare("SELECT kind,content,subject_ids_json,sources_json,confirmed FROM household_derived WHERE episode_id=?1 AND valid=1").map_err(db_error)?;let rows=q.query_map([&job.episode_id],|r|Ok((digest(&json!([r.get::<_,String>(0)?,r.get::<_,String>(1)?,parse(r.get(2)?),parse(r.get(3)?)])),r.get::<_,bool>(4)?))).map_err(db_error)?;rows.collect::<rusqlite::Result<BTreeMap<_,_>>>().map_err(db_error)?};
         // Keep only independently confirmed facts whose original source has
         // expired; they cannot be regenerated from an absent transcript.
-        tx.execute("DELETE FROM household_derived WHERE episode_id=?1 AND NOT(kind='fact' AND confirmed=1 AND EXISTS(SELECT 1 FROM household_derived_sources s JOIN household_turns t ON t.id=s.turn_id WHERE s.derived_id=household_derived.id AND t.source_expired=1 AND t.forgotten=0))",[&job.episode_id]).map_err(db_error)?;
+        tx.execute("DELETE FROM household_derived WHERE episode_id=?1 AND NOT(valid=1 AND kind='fact' AND confirmed=1 AND EXISTS(SELECT 1 FROM household_derived_sources s JOIN household_turns t ON t.id=s.turn_id WHERE s.derived_id=household_derived.id AND t.source_expired=1 AND t.forgotten=0))",[&job.episode_id]).map_err(db_error)?;
         for item in result.items.iter().take(24) {
             if !["event","topic","learning","fact"].contains(&item.kind.as_str())||item.content.trim().is_empty()||item.content.chars().count()>1_000||item.sources.is_empty()||item.sources.len()>6 {continue;}
             if !item.sources.iter().any(|q|sources.get(&q.conversation_turn_id).is_some_and(|s|s["is_baseline"].as_bool()!=Some(true))){continue;}

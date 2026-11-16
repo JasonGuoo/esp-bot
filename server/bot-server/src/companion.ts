@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LocalCamera, PcmRecorder, base64ToBuffer, readImageFile, readWavFile, type CapturedWav } from "./capture";
 import { CONSOLE_PANELS, consoleTemplate, type ConsolePanel } from "./console-layout";
-import { mountHousehold } from "./household";
+import { mountHousehold, readArtifactContent } from "./household";
 import { deviceDeliveryText, deviceReplyMetrics, renderActivity, renderCapabilities, renderDeviceStatus, renderRuntimeMetrics, renderTurnTimings, turnStageMetric, harnessTimingMetric, type DeviceDisplayReport } from "./console-presenters";
 import "./companion.css";
 import "./console.css";
@@ -90,6 +90,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   };
   const input = $<HTMLTextAreaElement>("#cc-input");
   const profileSelect = $<HTMLSelectElement>("#cc-profile");
+  const privateScope = $<HTMLInputElement>("#cc-private-scope");
   const memoryOwner = $<HTMLSelectElement>("#cc-memory-owner");
   const identityKind = $<HTMLSelectElement>("#cc-identity-kind");
   const recognizeKind = $<HTMLSelectElement>("#cc-recognize-kind");
@@ -147,7 +148,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   let approvedMediaHosts = new Set<string>();
   let audio: HTMLAudioElement | null = null;
   let audioUrl: string | null = null;
-  const replayClips = new Map<string, { base64: string; control: HTMLButtonElement }>();
+  const replayClips = new Map<string, { base64: string; artifactIds: string[]; control: HTMLButtonElement }>();
   let unsubscribe: UnlistenFn | null = null;
   let credentialRoutes: JsonObject[] = [];
   let loadedConfiguration: JsonObject | null = null;
@@ -237,6 +238,8 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     $<HTMLButtonElement>("#cc-send").disabled = blocked || !serviceReady || recordPurpose !== null || (!wavDraft && !input.value.trim());
     input.disabled = turnBusy || wavDraft !== null;
     profileSelect.disabled = blocked || recordPurpose !== null;
+    privateScope.disabled = blocked || recordPurpose !== null || !selectedProfile;
+    if (!selectedProfile) privateScope.checked = false;
     $<HTMLButtonElement>("#cc-start").disabled = blocked || serviceReady;
     $<HTMLButtonElement>("#cc-service-stop").disabled = operationBusy || !serviceRunning;
     // Device turns may be waiting, presenting or listening after foreground
@@ -395,17 +398,46 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     if (url) article.append(element("span", "cc-source", new URL(url).hostname));
     return article;
   }
-  async function playReply(base64: string, host: HTMLElement, generation: number): Promise<void> {
+  async function playReply(base64: string, host: HTMLElement, generation: number, artifactIds: string[] = []): Promise<void> {
     if (disposed || !visible || generation !== turnGeneration) return;
     stopPlayback();
-    try {
-      const url = URL.createObjectURL(new Blob([base64ToBuffer(base64, 24 * 1024 * 1024)], { type: "audio/wav" }));
-      const player = element("audio", "cc-reply-audio"); player.controls = true; player.preload = "auto"; player.src = url;
-      audio = player; audioUrl = url; host.append(player); updateControls();
-      player.addEventListener("playing", () => { if (audio === player) phase("speaking"); });
-      player.addEventListener("ended", () => { if (audio === player) { stopPlayback(); if (!turnBusy) phase("idle", "还想接着聊哪一点？", "happy"); } });
-      await player.play();
-    } catch { notice("回复已经显示。浏览器没有自动播放声音时，可点击“播放回复”。"); }
+    const player = element("audio", "cc-reply-audio"); player.controls = true; player.preload = "auto";
+    const caption = element("p", "cc-caption"); host.replaceChildren(caption, player);
+    audio = player; updateControls();
+    const current = () => !disposed && visible && generation === turnGeneration && audio === player;
+    let index = 0, advancing = false;
+    const count = artifactIds.length || 1;
+    const advance = async (): Promise<void> => {
+      if (!current() || advancing) return;
+      advancing = true;
+      try {
+        caption.textContent = `正在准备第 ${index + 1} / ${count} 段语音…`;
+        let bytes: ArrayBuffer | null;
+        if (artifactIds.length) {
+          const asset = object(await request("artifact.get", { artifact_id: artifactIds[index] }));
+          if (!current()) return;
+          if (asset.artifact_id !== artifactIds[index] || asset.mime_type !== "audio/wav") throw new Error("本段语音素材与回复不一致。");
+          bytes = await readArtifactContent(request, asset, current, undefined, 24 * 1024 * 1024);
+        } else bytes = base64ToBuffer(base64, 24 * 1024 * 1024);
+        if (!bytes || !current()) return;
+        if (audioUrl) URL.revokeObjectURL(audioUrl);
+        audioUrl = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" })); player.src = audioUrl;
+        caption.textContent = `第 ${index + 1} / ${count} 段语音`;
+        try { await player.play(); }
+        catch { if (current()) notice("本段语音已准备好，点击播放器继续播放。"); }
+      } catch (error) {
+        if (current()) { stopPlayback(); caption.textContent = "语音播放已停止。"; notice(errorText(error), true); }
+      } finally { advancing = false; }
+    };
+    player.addEventListener("playing", () => { if (current()) phase("speaking"); });
+    player.addEventListener("error", () => { if (current()) { stopPlayback(); caption.textContent = "当前系统无法播放本段语音。"; notice(caption.textContent, true); } });
+    player.addEventListener("ended", () => {
+      if (!current()) return;
+      if (++index < count) { void advance(); return; }
+      stopPlayback(); caption.textContent = "本次回复的语音已播完。";
+      if (!turnBusy) phase("idle", "还想接着聊哪一点？", "happy");
+    });
+    await advance();
   }
   function appendHouseholdLinks(host: HTMLElement, value: unknown): void {
     const result = object(value);
@@ -440,7 +472,8 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     notice(""); phase("thinking", draft ? "先在 Mac 上听懂这句话…" : undefined);
     try {
       const result = await request<TurnResult>("assistant.turn", {
-        turn_id: turnId, conversation_id: currentConversation, profile_id: selectedProfile,
+        turn_id: turnId, conversation_id: currentConversation,
+        speaker_person_id: selectedProfile, profile_id: privateScope.checked ? selectedProfile : null,
         speak: $<HTMLInputElement>("#cc-speak").checked,
         ...(draft ? { wav_base64: draft.base64 } : { text }),
       });
@@ -455,13 +488,14 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       if (timingDetails) reply.row.append(timingDetails);
       appendHouseholdLinks(reply.row, result);
       const wav = string(object(result.audio).wav_base64);
-      if (wav) {
+      const audioAssets = list(object(result.presentation).segments).map(segment => string(object(segment).speech_asset_id)).filter(Boolean);
+      if (wav || audioAssets.length) {
         const audioHost = element("div", "cc-audio-host");
         const play = button("播放回复", async () => {
           const clip = replayClips.get(turnId);
-          if (clip) await playReply(clip.base64, audioHost, turnGeneration);
+          if (clip) await playReply(clip.base64, audioHost, turnGeneration, clip.artifactIds);
         });
-        replayClips.set(turnId, { base64: wav, control: play });
+        replayClips.set(turnId, { base64: wav, artifactIds: audioAssets, control: play });
         while (replayClips.size > 3) {
           const oldest = replayClips.keys().next().value as string | undefined;
           if (!oldest) break;
@@ -470,7 +504,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
           replayClips.delete(oldest);
         }
         reply.row.append(play, audioHost);
-        if ($<HTMLInputElement>("#cc-speak").checked && visible) void playReply(wav, audioHost, generation);
+        if ($<HTMLInputElement>("#cc-speak").checked && visible) void playReply(wav, audioHost, generation, audioAssets);
       }
       if (result.identity_candidate) renderIdentity(result.identity_candidate, true);
       if (result.warnings?.length) notice(result.warnings.map(errorText).join("\n"));
@@ -607,7 +641,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
 
   function renderProfiles(): void {
     const previousOwner = memoryOwner.value;
-    profileSelect.replaceChildren(new Option("未指定 · 只用共享记忆", ""));
+    profileSelect.replaceChildren(new Option("未指定 · 家庭共同对话", ""));
     memoryOwner.replaceChildren(new Option("请选择成员", ""));
     memberFocus.replaceChildren(new Option("未指定成员", ""));
     const host = $("#cc-profile-list"); host.replaceChildren();
@@ -664,10 +698,16 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   async function changeProfile(id: string | null): Promise<void> {
     if (id === selectedProfile) return;
     if (id && !profiles.some((profile) => profile.id === id && !profile.merged_into)) return;
+    const changedPrivateScope = privateScope.checked;
     await stopConsole(false);
-    selectedProfile = id; clearSamples(); resetMemoryForm(); resetConversationView(); renderProfiles(); renderEnrollments();
+    selectedProfile = id; clearSamples(); resetMemoryForm();
+    // A speaker label does not select private memory or split the family thread.
+    // Only an explicit private-scope change starts a separate visible exchange.
+    if (changedPrivateScope) resetConversationView();
+    renderProfiles(); renderEnrollments();
     $("#cc-identity-result").textContent = "本轮成员已改变，尚未重新请求识别。";
-    notice(id ? `已明确选择 ${profileName(id)}，开始一段新对话。` : "已切换为未指定成员，开始一段新对话。");
+    notice(privateScope.checked ? `已切换到 ${profileName(id)} 的个人范围。`
+      : id ? `本轮说话人标为 ${profileName(id)}，继续家庭共同对话。` : "本轮不指定说话人，继续家庭共同对话。");
   }
   function renderEnrollments(): void {
     const host = $("#cc-enrollment-list"); host.replaceChildren();
@@ -1261,9 +1301,13 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   input.addEventListener("input", updateControls);
   input.addEventListener("keydown", (event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void sendTurn(); } });
   profileSelect.addEventListener("change", () => { void changeProfile(profileSelect.value || null); });
+  privateScope.addEventListener("change", () => { void (async () => {
+    await stopConsole(false); resetConversationView();
+    notice(privateScope.checked ? `已明确开启 ${profileName(selectedProfile)} 的个人私密范围。` : "已回到家庭共同对话。");
+  })(); });
   on("#cc-new-conversation", async () => { await stopConsole(false); resetConversationView(); notice("已开始新对话。需要清理全部对话时，可前往“运行设置”。"); });
   on("#cc-forget-conversation", () => perform("正在忘记这段对话…", async () => {
-    if (!window.confirm("忘记当前这段对话及其 OpenCode 会话？单独保存的记忆会保留。")) { notice(""); return; }
+    if (!window.confirm("忘记当前这段互动的原话及依赖记忆，并清理含有它的模型上下文？当天其他互动的原始记录会保留。")) { notice(""); return; }
     const id = conversationId; await stopConsole(false); await request("conversation.forget", { conversation_id: id }); resetConversationView(); notice("这段对话已忘记。");
   }));
   on("#cc-forget-all", () => perform("正在忘记所有对话…", async () => {

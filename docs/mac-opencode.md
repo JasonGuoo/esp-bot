@@ -1,6 +1,6 @@
 # Mac OpenCode harness
 
-**2026-11-16 目标设计：** [家庭陪伴规格](specs/household-companion/README.md)要求家庭日会话、运行上下文 compact 与后台记忆分层。[HC-04](specs/household-companion/implementation-plan.md#hc-04)负责接入，当前实现没有因本文更新而获得这些能力。实际 V2 API/版本兼容须在开发时核对；不新增另一套 Agent 主控。
+**2026-11-16 源码更新：** 家庭日会话、按会话串行处理、原生 compact 与独立后台任务已接入，见[首次交付](specs/household-companion/implementation-2026-11-16.md)。[第二轮静态审查](review-household-static-2026-11-16.md)修正控制台范围/遗忘、后台任务结果和取消边界，并重新核对固定 V2 API 源码；没有运行 OpenCode 或模型，仍待实际验收。
 
 **2026-11-13 模型顺序更新：** 按用户选择，默认启用 **GLM Coding Plan → DeepSeek Flash**。Qwen Coding Plan 保留为默认停用的可选路线。这次仅修改源码与配置文档，没有运行测试、构建、模型请求或 CI；安装并重新打开更新后的 App 才会应用到运行实例。
 

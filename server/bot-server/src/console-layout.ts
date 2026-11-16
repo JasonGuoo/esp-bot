@@ -37,7 +37,7 @@ export const consoleTemplate = `
     <div class="cc-approval-banner" id="cc-approval-banner" hidden><span id="cc-approval-summary"></span><button type="button" class="cc-button" id="cc-review-permissions">查看待授权操作</button></div>
     <div class="cc-approval-banner" id="cc-question-banner" hidden><span>小呆有问题需要你的回答，任务正在等待。</span><button type="button" class="cc-button" id="cc-review-questions">查看问题</button></div>
       <section class="cc-panel cc-talk" id="cc-panel-talk" aria-labelledby="cc-page-title">
-<div class="cc-conversation-bar"><label for="cc-profile">本轮成员</label><select id="cc-profile"><option value="">未指定 · 只用共享记忆</option></select><button type="button" class="cc-button quiet" id="cc-new-conversation">新对话</button><button type="button" class="cc-button quiet" id="cc-forget-conversation">忘记这段</button></div>
+<div class="cc-conversation-bar"><label for="cc-profile">本轮说话人</label><select id="cc-profile"><option value="">未指定 · 家庭共同对话</option></select><label class="cc-check"><input type="checkbox" id="cc-private-scope" disabled>使用所选成员的个人私密范围</label><button type="button" class="cc-button quiet" id="cc-new-conversation">新对话</button><button type="button" class="cc-button quiet" id="cc-forget-conversation">忘记这段</button></div>
         <div id="cc-questions" class="cc-questions" hidden></div>
         <div class="cc-messages" id="cc-messages" role="log" aria-live="polite" aria-relevant="additions text"></div>
         <div class="cc-draft" id="cc-draft" hidden><span id="cc-draft-label"></span><button type="button" class="cc-button quiet" id="cc-draft-remove">移除</button></div>

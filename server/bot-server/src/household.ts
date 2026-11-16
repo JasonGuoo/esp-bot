@@ -43,6 +43,28 @@ function safeUrl(value: unknown): string | null {
   catch { return null; }
 }
 function sizeLabel(value: unknown): string { const bytes = num(value); return bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`; }
+/** Re-read source-authorized chunks for every playback, including old replies. */
+export async function readArtifactContent(request: Request, asset: RecordValue, current: () => boolean,
+  progress?: (percent: number) => void, maxBytes = 64 * 1024 * 1024): Promise<ArrayBuffer | null> {
+  const id = str(asset.artifact_id), total = num(asset.bytes), mime = str(asset.mime_type);
+  if (!id || !Number.isSafeInteger(total) || total <= 0 || total > maxBytes) throw new Error("作品大小超过本次读取上限。");
+  const buffer = new ArrayBuffer(total), content = new Uint8Array(buffer); let offset = 0;
+  while (offset < total) {
+    if (!current()) return null;
+    const chunk = obj(await request("artifact.read", { artifact_id: id, offset, length: Math.min(262144, total - offset) }));
+    if (!current()) return null;
+    if (chunk.artifact_id !== id || num(chunk.offset, -1) !== offset || str(chunk.mime_type) !== mime) throw new Error("作品分块与当前读取不一致，已停止播放。");
+    const binary = atob(str(chunk.data_base64)), count = binary.length;
+    if (!count || count !== num(chunk.bytes) || count > total - offset || chunk.eof !== (offset + count === total)) throw new Error("作品分块长度或结束标志不正确。");
+    for (let at = 0; at < count; at++) content[offset + at] = binary.charCodeAt(at);
+    offset += count; progress?.(Math.round(offset / total * 100));
+  }
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", buffer));
+  if (!current()) return null;
+  const hex = Array.from(digest, value => value.toString(16).padStart(2, "0")).join("");
+  if (hex !== str(asset.digest).toLowerCase()) throw new Error("作品完整性校验失败，已停止播放。");
+  return buffer;
+}
 function problem(error: unknown): string {
   const value = String(error);
   if (value.includes("source_revision_conflict")) return "这段来源刚有新的识别或修订。请重新打开来源，对照最新内容后再保存；当前修改未覆盖别人操作。";
@@ -408,21 +430,11 @@ export function mountHousehold(household: HTMLElement, tasks: HTMLElement, optio
     links(body, asset.source); const progress = node("p", "cc-caption", "正在读取本机内容…"); body.append(progress);
     const total = num(asset.bytes); const mime = str(asset.mime_type);
     if (!Number.isSafeInteger(total) || total <= 0 || total > 64 * 1024 * 1024) { progress.textContent = "这份作品超过本机预览的 64 MB 上限。请缩短媒体片段后重新生成。"; return; }
-    const content = new Uint8Array(total); let offset = 0;
-    while (offset < total) {
-      const chunk = obj(await request("artifact.read", { artifact_id: id, offset, length: Math.min(262144, total - offset) }));
-      if (disposed || version !== artifactGeneration || !artifactDialog.modal.open) return;
-      if (chunk.artifact_id !== id || num(chunk.offset, -1) !== offset || str(chunk.mime_type) !== mime) throw new Error("作品分块与当前读取不一致，已停止预览。");
-      const binary = atob(str(chunk.data_base64)); const count = binary.length;
-      if (!count || count !== num(chunk.bytes) || count > total - offset || chunk.eof !== (offset + count === total)) throw new Error("作品分块长度或结束标志不正确。");
-      for (let at = 0; at < count; at++) content[offset + at] = binary.charCodeAt(at);
-      offset += count; progress.textContent = `正在读取本机内容 · ${Math.round(offset / total * 100)}%`;
-    }
-    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", content.buffer));
-    if (disposed || version !== artifactGeneration) return;
-    const hex = Array.from(digest, value => value.toString(16).padStart(2, "0")).join("");
-    if (hex !== str(asset.digest).toLowerCase()) throw new Error("作品完整性校验失败，已停止预览。");
-    const url = URL.createObjectURL(new Blob([content.buffer], { type: mime })); blobUrls.add(url); progress.textContent = "本机内容已读取并校验；点击播放器开始回放。";
+    const content = await readArtifactContent(request, asset,
+      () => !disposed && version === artifactGeneration && artifactDialog.modal.open,
+      percent => { progress.textContent = `正在读取本机内容 · ${percent}%`; });
+    if (!content) return;
+    const url = URL.createObjectURL(new Blob([content], { type: mime })); blobUrls.add(url); progress.textContent = "本机内容已读取并校验；点击播放器开始回放。";
     if (["image/jpeg", "image/png"].includes(mime)) { const image = node("img", "hh-artifact-image"); image.alt = str(asset.title, "作品图片"); image.src = url; body.append(image); }
     else if (["audio/wav", "audio/mpeg", "video/mp4"].includes(mime)) {
       const media = mime.startsWith("audio/") ? node("audio", "hh-media") : node("video", "hh-media");
@@ -506,7 +518,8 @@ export function mountHousehold(household: HTMLElement, tasks: HTMLElement, optio
       if (task.capability === "print.submit" && !window.confirm("请求取消这次打印？已经出纸的部分无法撤回，取消结果需要打印队列确认。")) return;
       await request("tasks.cancel", { task_id: id }); await openTask(id); await loadTasks(); notice("已请求取消，最终结果请查看任务回执。");
     }, "cc-button danger"));
-    if (task.capability === "print.submit") actions.append(control("核对执行结果", async () => {
+    if (task.capability === "print.submit" && (result.submission_started === true || data.submission_started === true)
+      && !["queued", "running", "cancel_requested"].includes(str(task.state))) actions.append(control("核对执行结果", async () => {
       await request("tasks.reconcile", { task_id: id }); await openTask(id); await loadTasks(); notice("已核对已有任务；不会因此重新提交一份打印。");
     })); taskDetail.append(actions);
     const job = str(data.job_id, str(result.job_id));

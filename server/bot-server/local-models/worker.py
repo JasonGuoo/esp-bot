@@ -583,6 +583,7 @@ class Worker:
         self.speaker = None
         self.detector = None
         self.recognizer = None
+        self.diarization_pipeline = None
         if self.asr_loaded:
             import mlx.core as mx
             from mlx_whisper.transcribe import ModelHolder

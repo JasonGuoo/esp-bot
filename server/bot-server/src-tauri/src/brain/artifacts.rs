@@ -116,13 +116,16 @@ impl ArtifactStore {
     pub fn forget(&self,id:&str)->Result<(),String> {
         let asset=self.get_internal(id,true)?;
         let db=self.db.lock().map_err(|_|"artifact_lock")?;
-        db.execute("UPDATE artifacts SET removed=1,title='',source_json='null' WHERE id=?1",[id]).map_err(err)?;
-        let remaining:i64=db.query_row("SELECT count(*) FROM artifacts WHERE digest=?1 AND mime_type=?2 AND removed=0",params![asset.digest,asset.mime_type],|r|r.get(0)).map_err(err)?;
+        let remaining:i64=db.query_row("SELECT count(*) FROM artifacts WHERE digest=?1 AND mime_type=?2 AND removed=0 AND id<>?3",params![asset.digest,asset.mime_type,id],|r|r.get(0)).map_err(err)?;
         if remaining==0 {
             if let Some(ext)=extension(&asset.mime_type){let path=self.root.join(format!("{}.{}",asset.digest,ext));
                 if let Err(e)=fs::remove_file(path){if e.kind()!=std::io::ErrorKind::NotFound{return Err(err(e));}}
             }
         }
+        // Keep provenance discoverable if unlink fails. Otherwise the cleanup
+        // outbox's retry would skip removed=1 and falsely report erasure while
+        // the final private blob still existed on disk.
+        db.execute("UPDATE artifacts SET removed=1,title='',source_json='null' WHERE id=?1",[id]).map_err(err)?;
         Ok(())
     }
 
