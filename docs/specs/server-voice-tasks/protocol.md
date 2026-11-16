@@ -1,6 +1,18 @@
 # 接口规格｜语音命令、执行结果与设备显示
 
-本文是[开发计划](README.md)的实施契约。`display.reply.v1`、`turn.progress`、`display.asset.read`、`display.report` 已有源码；2026-11-13 再加入 `audio.reply.v1`、播放就绪/硬件回执、同 token 起音保留和追问预连接。**本次新增内容为源码实现，尚未进行 Cargo/S31 IDF 构建、模型调用或实板验收**。消息中的 ID、摘要、尺寸和时间均为示例值。基础 v3 请求、`turn.accepted`、会话令牌、取消和语音帧沿用[在用协议](../../../shared/mac-brain-v3.md)。
+本文记录[原开发计划](README.md)的语音与图文接口。`display.reply.v1`、`turn.progress`、`display.asset.read`、`display.report` 已有源码；2026-11-13 再加入 `audio.reply.v1`、播放就绪/硬件回执、同 token 起音保留和追问预连接。11 月 13 日交付时尚未完成本机和实板验收；后续各项结果见 [2026-11-15 验收记录](../../review-acceptance-2026-11-15.md)，不要把下文早期状态说明当作最新验收结论。消息中的 ID、摘要、尺寸和时间均为示例值。基础 v3 请求、`turn.accepted`、会话令牌、取消和语音帧沿用[在用协议](../../../shared/mac-brain-v3.md)。
+
+## 0. 2026-11-16 目标设计与兼容边界
+
+[家庭陪伴设计](../household-companion/README.md)已经确定新的服务端领域划分：家庭当天共同记录、ASR 与声纹并行、独立长任务、分阶段呈现。本文后续 JSON 是现有接口基线，**没有因此自动增加新字段或事件**。
+
+- `RuntimeToken` 继续负责设备实时仲裁；当天共同记录、OpenCode 会话、独立任务和输出许可使用不同标识。`session.open` 仍表示明确激活，不意味着全天收音。普通家庭成员变更只更新参与者标注，不分拆家庭记录。
+- 现有一次 commit / 一个终态的处理流程仍是兼容路径。新任务接纳、身份修订、呈现片段和多次播放必须先在 HC-01 中定义版本及能力协商；旧客户端继续得到自己支持的最终图文 / 音频结果，不被塞入无法处理的新事件。
+- 现有原始音频传输继续使用配对 Mac 的认证控制连接与用户已选择的局域网 TCP 完整性校验路径；本次设计不变更传输策略，也不新增设备直连云端。
+- 当前 ASR 和声纹顺序执行；并行需要分离 worker 槽，见 [HC-03 的设备与声音设计](../household-companion/device-and-audio.md)。声纹晚到仅修订来源，不能触发任务重放或补授执行权限。
+- 当前最终语音 DONE 会准备追问；新增 ACK / progress 不能复用该终态语义。必须明确播放用途与输出许可，见 [呈现与任务](../household-companion/presentation-and-tasks.md)。任务可跨日完成，旧输出许可到期后不能自动出声。
+
+开发任务与验收依赖统一见[实施计划](../household-companion/implementation-plan.md)。下文关于个人档案、单轮占用和现有消息预算的描述，是迁移前行为；家庭模型迁移仍须保留原有明确访问限制和遗忘处理。
 
 ## 1. 一句话对应哪个任务
 
@@ -44,13 +56,15 @@
 
 例如口述“读最新观察表，画出两盆的高度”，ASR 转写直接填入现有 `TurnRequest.user_text`。原有 `conversation_id`、Mac `turn_id`、`system_prompt` 和 `response_schema` 同次传入。OpenCode 在同一任务内查找并读取资料。“读取哪个表、比较哪两行、用什么单位”来自该次请求和工具读到的数据。无需给每一种中文说法写口令，也无需第二次模型调用把结论改成设备格式。
 
-同一次设备对话内保持输出 schema 稳定。现有 harness 在系统提示或 schema 指纹改变时会重建模型会话，即使设备 `conversation_id` 相同。实施 M1 时检查正常追问能沿用前文。因身份切换、遗忘或上下文撤销而重建时，清掉旧的待澄清参数，必要时请用户重新指明对象。验收同时检查正常的“那五盒呢”和重置后的歧义反馈。
+同一次设备对话内保持输出 schema 稳定。现有 harness 在系统提示或 schema 指纹改变时会重建模型会话，即使设备 `conversation_id` 相同。召回记忆重排也会错误触发重建，已记录为 [issue #9](https://github.com/JasonGuoo/esp-bot/issues/9)。新的 HC-04 要区分每轮相关资料与真正的访问限制 / 遗忘失效；普通家庭说话人变化不重建当天共同对话。真正需要失效旧上下文时，清掉不再合法的待澄清参数，必要时请用户重新指明对象。验收同时检查正常的“那五盒呢”和合法重置后的歧义反馈。
 
 Mac 场景使用 `speech / expression / cards`。协商图文能力的设备另用 `scene::device_schema()`，包含 `outcome`、`effect` 和 `visual`。OpenCode v2.2.5 以会话指令接收这份结构，模型也可能只返回普通文字。Rust 将来源或数值与同一轮真实工具结果匹配，校验后才交给设备。普通文字可以显示，但单凭模型的一句“已经完成”无法验证工具效果。[场景校验](../../../server/bot-server/src-tauri/src/brain/scene.rs) · [OpenCode 2.2.5 原生输入](https://github.com/anomalyco/opencode/blob/v2.2.5/packages/schema/src/prompt-input.ts)
 
 `visual.requested` 表示用户要求显示图像，包括对上一轮看图请求的明确选择。明确要求的图片缺失或准备失败时，已有文字仍可读，设备显示图片失败，Mac 标明部分完成。普通问答中模型额外建议的插图失败时，Mac 保留诊断原因，设备照常显示答案。对于有多个合理对象的指代，先按用户的原称呼提问；`needs_input` 回合不制图，补充后再取指定的资料。
 
 **可见进度。** 网关可把同轮本地事件投影为 `turn.progress`。事件携带 commit 请求 ID、完整令牌和同轮递增序号。允许的阶段为 `transcribing`、`understood`、`working`、`awaiting_parent`、`preparing_image`、`synthesizing`。`understood` 可带按 UTF-8 边界截取的转写预览，仅进入本轮显示。其余阶段使用固定提示。模型推理增量、工具原始参数、凭据和个人资料不进入设备诊断日志。
+
+当前已知缺口：`turn.synthesizing` 虽有生产端和网关映射，但中间转发名单遗漏，见 [issue #11](https://github.com/JasonGuoo/esp-bot/issues/11)。文档列出阶段不代表它已经端到端送达；该缺陷仍需在 HC-06 前修复。
 
 ```json
 {"v":3,"type":"event","event":"turn.progress","id":"r-commit-1","runtime":{"epoch":7,"session_id":12,"turn_id":1,"focus_generation":0},"payload":{"seq":2,"stage":"understood","preview":"读观察表，告诉我哪盆高，再画出来。"}}

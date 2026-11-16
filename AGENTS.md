@@ -1,5 +1,35 @@
 # esp-bot development instructions
 
+## Accepted design direction — 2026-11-16
+
+- Read [the household companion design](docs/specs/household-companion/README.md)
+  and [HC-01–HC-15 implementation plan](docs/specs/household-companion/implementation-plan.md)
+  before new architecture work. These are accepted targets, **not implemented
+  capabilities**. They supersede older person-isolated conversation, device
+  Cloud Direct and monolithic turn/task assumptions below.
+- Keep Bot a responsive terminal connected to its paired Mac. Device owns
+  complete local wake, one audio owner, local stop, bounded playback and runtime
+  arbitration. Mac owns ASR/identity, OpenCode, household memory, presentation
+  preparation and persistent tasks. No standalone device Internet Agent in this scope.
+- After authorized wake, run ASR and speaker recognition in independent managed
+  lanes. Identity may arrive late; ordinary responses must not wait for it.
+  Speaker labels never grant permissions or cause tool replay.
+- Use one household daily record in the household timezone, with people as
+  participants/entities. Separate archive, OpenCode context/compaction,
+  background memory, device activation, task and output-lease lifecycles.
+  Preserve original sources, corrections, deletion and existing private scopes.
+- SQLite remains authoritative; evaluate Graphiti as a rebuildable derived
+  index. Reuse upstream implementations rather than adding a competing agent
+  runtime or a new memory framework.
+- Treat presentation as a first-class server responsibility: frozen semantic
+  segments, immutable assets, synchronized bounded playback and actual receipts.
+  ACK/progress completion must not end the task; report real task stages.
+  Printing requires an explicit intent and traceable, idempotent effect receipts.
+- Historical delivery notes below describe their original snapshots. Current
+  hardware/build evidence is in [2026-11-15 acceptance](docs/review-acceptance-2026-11-15.md).
+  The no-CI and precise verification rules remain unchanged. Design merges do
+  not close existing implementation bugs or imply a new device validation.
+
 ## User's research and reuse priority
 
 - Before implementing or debugging a feature, first inspect applicable official

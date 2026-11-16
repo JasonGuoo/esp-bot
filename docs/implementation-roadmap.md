@@ -1,117 +1,62 @@
-# Engineering roadmap and honest implementation inventory — esp-bot
+# 工程路线与真实实现清单
 
-**Latest source/verification status:** [2026-11-15 local and S31 acceptance](review-acceptance-2026-11-15.md), following the [review corrections](review-fixes-2026-11-14.md). The November 6 inventory below records that delivery; current builds, device results and outstanding limits are recorded separately.
+**当前路线：2026-11-16；源码基线 `90972a37530b68b8c8c9729960ac15e901c9d946`。** 用户选择 Bot 作为轻量交互终端、Mac 作为完整家庭后端。详细范围、依赖和逐步开发清单集中在 [家庭陪伴实施计划](specs/household-companion/implementation-plan.md)，避免在多个旧路线图分别维护进度。
 
-**Scope:** implementation sequencing for passive desktop robot 小呆 on ESP32-S31-Korvo-1 V1.1. This is a plan, NOT a claim that unintegrated modules already work. The user specifically requires **NO CI**; when hardware/model/build environment is absent, deliver modular code and mark unverified behavior instead of adding testing pipelines.
+本次仅更新设计与计划。最近的构建/实板记录是 [2026-11-15 验收](review-acceptance-2026-11-15.md)；原 11 月 6 日 source-only 交付见 [local-runtime.md](local-runtime.md) 与 [board-bringup-2026-11-06.md](board-bringup-2026-11-06.md)，不能再将“硬件未到 / 固件没有 WSS”作为当前判断。
 
-## New reuse-first integration priority (2026-10-30)
+## 1. 已有基础与本次缺口
 
-**Strategic revision:** [Local-First Hybrid Brain](local-first-hybrid-brain.md) and [upstream reuse catalog](upstream-reuse-catalog.md) take precedence for *how* speech, media, pairing and hardware are implemented. **Mac M4 Pro 48 GB + Rust/Tauri bot-server is the preferred AI execution host**. Reuse XiaoZhi's existing exact S31-Korvo board support, ESP-SR/GMF and HF Speech-to-Speech on MLX before writing equivalents. BLE pairing/Wi-Fi onboarding + degraded control is required. **Mechanical target** is now an attractive off-the-shelf enclosed 2-axis head with speakers; currently no motors are installed. Do not confuse proposed devices with hardware validation.
+| 领域 | 当前可复用基础 | 后续工作 / 验收限制 |
+| --- | --- | --- |
+| 唤醒与本地反馈 | MultiNet7 完整“小呆小呆”、104 本地语音、运行时选择与表情 | 专用 WakeNet、稳定识别统计和更多家庭声学条件；任务中 ACK 完成语义需改造 |
+| 实时协调 | runtime/bus、单音频 owner、token/fence、触摸停止、设置持久化 | 输入、后台任务和输出许可解耦；已有 #7/#10 缺陷 |
+| 摄像与眼睛 | SC101IOT 采集、ESP-DL 适配、focus/attention/Face、静止 head adapter | 真实人物跟随/目光未由桌面采集证明；无电机/IMU；复杂身份留在 Mac |
+| 连接 | 已配对 WSS v3、mDNS、逐轮 LAN PCM 及硬件播放回执 | BLE、媒体保密升级与其他传输各自独立；当前用户选用 LAN 明文音频 |
+| 语音与模型 | Mac ASR → OpenCode GLM → TTS → 设备流程及受控追问记录 | ASR/声纹并行尚未实现；当前半双工，AEC/播放中语音打断待开发；#8/#11 |
+| 成员与记忆 | SQLite profiles/记忆、ECAPA 与人脸模板代码、手动管理 | 最近 Mac 检查仍缺身份依赖；没有家庭日来源模型/Graphiti/多人分段；#9 |
+| 呈现 | 有界卡片/JPEG/语音通路及实际回执基础 | 独立呈现计划、不可变素材、分段音画同步、音视频处理与回访 |
+| 做事情 | OpenCode 工具权限/事件和取消 | 独立持久任务、打印 job 证据与幂等；通用 shell 成功不能证明物理完成 |
+| 夜间与外壳 | 黑色覆盖层、相机暂停/唤醒保持、现有板级接口 | 关灯自动黑屏最近实测未通过；机械、电源、背光等继续按独立硬件记录 |
 
-Before adding custom audio/motor/transport code: identify upstream equivalent, document its license/version and integrate via adapter when possible. Preserve single ownership of mic, Face, attention and runtime. No CI.
+“源码存在”“构建通过”“设备链路回执”“真实声学/光学效果”分别表述，不合并成一个已完成标签。
 
-## 1. Product constraints locked
+## 2. 当前开发阶段
 
-1. Passive/quiet by default: occasional blink → bored → drowsy → sleeping; at night attempt fully dark LCD; **no unsolicited greeting**.
-2. Device-local full-phrase wake **小呆小呆** only. Bare 小呆 and incidental faces/sounds do NOT wake or initiate conversation.
-3. Initial V1 target **fixed, non-actuated** head/camera that can be lifted, rotated or tilted by a human; **no IMU**, no compass or room coordinate map.
-4. V1 vision-first rendering: track a chosen person's **eye midpoint**, keep bot's rendered eyes jointly aimed while target remains visible. **Cannot physically turn camera** in V1.
-5. Vision tracks multiple faces independently; actual conversation target selection belongs to attention_manager. Actual human look-at-Bot inference is distinct from "eyes are located at x/y".
-6. Future head pan/tilt and optional IMU must plug into the same attention controller, rather than owning a second target selector.
-7. **Mac M4 Pro / 48 GB Rust/Tauri Bot Server**, with **reused local AI sidecars**, is the prioritized ASR/LLM/TTS/tool provider; secure BLE provisioning/backup comes before cloud dependency. Local wake/gaze must survive offline.
-8. Audio before wake remains local and transient; no default uploads. No CI.
+| 阶段 | 范围 | 工作编号 |
+| --- | --- | --- |
+| A | 明确 ID/状态/兼容与权威原始记录 | HC-01、HC-02 |
+| B | 并行声音理解、OpenCode 日会话/compact、持续任务、先应答和真实进度 | HC-03～HC-06 |
+| C | 呈现规划、素材/实际回执、先静态图文语音后动画/视频 | HC-07、HC-08 |
+| D | Graphiti 候选适配、异步记忆、家庭时间轴和声纹标注 | HC-09～HC-11 |
+| E | 打印作为首个完整有外部效果的能力 | HC-12 |
+| F | 多人重叠分段与播放中 AEC 打断 | HC-13、HC-14 |
+| G | 贯穿各阶段的家庭场景与资源记录 | HC-15 |
 
-See [architecture.md](architecture.md) for canonical module ownership, [module-contracts.md](module-contracts.md) for events, [behavior-lifecycle.md](behavior-lifecycle.md), [wake-word.md](wake-word.md), [eye-contact.md](eye-contact.md) and [audio-direction.md](audio-direction.md).
+[每项开发步骤与验收条件](specs/household-companion/implementation-plan.md)包括代码入口、依赖、迁移/失败边界。GitHub [HC-00 总跟踪项](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-00%22)是动态状态入口。设计合并后再创建对应 issues；不能因文档合并关闭任何实现任务。
 
-## 2. Implementation inventory (as of 2026-11-06)
+现有 [#7](https://github.com/JasonGuoo/esp-bot/issues/7)、[#8](https://github.com/JasonGuoo/esp-bot/issues/8)、[#9](https://github.com/JasonGuoo/esp-bot/issues/9)、[#10](https://github.com/JasonGuoo/esp-bot/issues/10)、[#11](https://github.com/JasonGuoo/esp-bot/issues/11)仍单独跟踪。优先修复影响停止、连续追问和真实进度的路径，不为同一缺陷重复建单。
 
-Hardware is awaiting delivery. This local-runtime source delivery was **not compiled, tested, flashed or run**. Detailed startup/model/dependency instructions: [local-runtime.md](local-runtime.md).
+## 3. 关键约束
 
-The subsequent **Mac server source delivery** adds OpenCode 2.2.5 with the user's
-configurable model routes, local MLX ASR/system TTS, enrolled speaker/face
-identity, SQLite memory, a Chinese parent console and Mac WSS v3. It likewise
-was **not compiled, tested, installed or run**, and has no CI. See
-[mac-bot-server.md](mac-bot-server.md) for exact integration and remaining gates.
+1. 本地完整唤醒、触摸停止与表情响应不依赖 Mac RTT；只有显式互动才允许音频上传。
+2. Bot 不新增独立云 Agent；Mac 复用当前 OpenCode、模型和工具，不重复实现推理/记忆框架。
+3. 家庭记录共享，成员是参与者与实体；日记录、OpenCode 上下文、长期记忆、激活、任务与输出权各自独立。
+4. 原始来源先保存，自动推断/实际呈现/外部动作分开记；纠错、删除和权限收紧能传播到派生物。
+5. 单一硬件 owner、唯一 runtime 权威和明确时钟/来源/有效期继续适用；未知不伪装成确定。
+6. 视频/AEC/身份门槛需要实际 Mac 与设备条件；没有条件时写源码并标明未验收，不要求虚假的绿灯。
+7. 保留既有私有范围、留存偏好与凭据；新增迁移要有回滚说明，不能偷偷开放历史个人资料。
 
-**2026-11-13 routing update:** active defaults are **GLM Coding Plan → DeepSeek Flash**; Qwen is retained but disabled by default. The change is source-only and requires the updated App; no tests, builds, model calls or CI were run. Existing-default upgrade behavior is documented in [mac-opencode.md](mac-opencode.md#旧配置的模型顺序升级).
+## 4. 继续保留的独立路线
 
-| Area | Source now present and integrated | Still missing |
-|---|---|---|
-| Face/appearance | LVGL renderers/themes, touch wake, stop/settings intent, passive expressions, main runtime rendering | Device tuning and UI hardware validation |
-| Geometry attention | Selected focus → current camera-relative stationary gaze; no fake measured pose or mechanical recenter | Real camera/screen geometry and future motor feedback |
-| Multi-face vision | Official BSP + esp_video 2.4.1 V4L2 + ESP-DL human_face_detect adapter feeding existing tracker | Physical orientation/latency checks, calibrated human gaze/iris and family identity |
-| On-device wake/audio | Single codec owner, official ESP-SR AFE/WakeNet/VAD, PCM queue/playback/cancel, runtime token gates | **Dedicated 小呆小呆 model unprovisioned**; true AEC, voice identity, hardware validation |
-| DOA | Official Espressif example catalogued | Dual-mic synchronized direction adapter and calibration |
-| Local coordinator/bus | bot_runtime, bot_bus, attention_manager, epoch fences, overflow/stop handling and resource requests | Future additional semantic/media actions |
-| Display/night | Logical black overlay preserving touch, camera STREAMOFF/inference pause, audio kept running | BSP backlight control unsupported; actual full blackout/rail power-off not provided |
-| Motion/IMU | Stationary head_motion capability adapter, unsupported motion requests, invalid pose feedback | Motors, IMU and real actuator driver |
-| Connectivity | Main brain_link uses existing Wi-Fi/mDNS/WS; AUTH_REQUIRED receipts; Mac has separate TLS v3 gateway and device credential registry | Firmware WSS client, secure credential provisioning/BLE, actual private-media interoperability |
-| Mac harness/tools | Official OpenCode v2 process/API, GLM → DeepSeek active routes with optional disabled Qwen, MCP inheritance, quota handling and parent permissions | Actual account/tool installation and end-to-end execution |
-| Mac local models | MLX Whisper ASR, SpeechBrain ECAPA, OpenCV YuNet/SFace, system TTS adapters and explicit model provisioner | Model installation, Mac execution/performance and household threshold calibration |
-| Mac memory/console | SQLite scopes/confirmation/cloud flags/deletion; face/speaker enrollment; Chinese capture/scene/parent UI | Real Mac permissions/UI execution; parent PIN/profile isolation remains future work |
-| Legacy transport | Python server and HTTP client source retained | HTTP client is already excluded from firmware main; legacy server remains independent |
+BLE 安全配网与降级控制、DOA、专用 WakeNet、相机/屏幕几何、关灯黑屏、电源与现成云台/IMU 接入仍按原规格推进，不作为家庭软件主线全部完成的前置条件。固定相机只能在当前视野内做眼睛跟随；任何新硬件适配器都必须报告真实能力和反馈。
 
-Existing Rust/Tauri legacy text providers, command console and soft pairing are retained independently of the new Mac Brain. No live hardware wake, camera gaze, DOA, physical blackout, mechanical tracking or new Mac feature is claimed verified.
+原有相关设计入口：[部署与复用](local-first-hybrid-brain.md)、[模块契约](module-contracts.md)、[行为生命周期](behavior-lifecycle.md)、[眼睛/头部](eye-contact.md)、[DOA](audio-direction.md)、[关灯记录](night-light-check-2026-11-15.md)。
 
-## 3. Delivery sequence, with clear gates
+## 5. 每次实现交付必须说明
 
-### P0 — central ownership and contracts (source delivered)
-- Write **bot_bus** (events, commands, latest snapshots, bounded queue rules).
-- Write **bot_runtime** (one behavior authority, passive lifecycle, wake event, session/turn generations, preferences and capability/health flags).
-- Write **attention_manager** (one official current focus; candidate/confirmed/temporarily-lost/reacquisition).
-- Write **head_motion** stationary adapter reporting no motors rather than fabricated joint feedback.
-- app_main is the composition root. Existing Face remains; legacy HTTP polling is excluded from main to preserve single authority.
-- Confirm interface discipline: never allow server or renderer to steal live gaze.
+- 变化对应的用户行为、源码入口、调用接线与版本化接口。
+- 迁移、旧端兼容、配置/模型依赖、异常/取消/重试和回滚边界。
+- 实际完成的源码、构建、本机运行、模型与设备检查，未做的明确保留。
+- 仍需开发或实际硬件支持的能力，以及关联 issue 的剩余验收条件。
 
-### P1 — local name-based wake (adapter delivered, acoustic model pending)
-- Introduce unified **audio** input owner, two-channel capture and local on-device WakeNet adapter.
-- Provision and package real recognition resources for the **entire phrase 小呆小呆**; bare 小呆 stays negative.
-- Emit one WAKE_DETECTED event with capture time; no pre-wake voice upload; wake remains alive with LCD/camera stopped and network offline.
-- Implement waking Face animation and interactive session start; no promise of physical head lift.
-- If model is missing: report WAKE_MODEL_MISSING, never a fake wake success. Development stock models are bring-up aids ONLY, not production aliases.
-
-### P2 — camera-driven rendered-eye gaze (adapter/selection/gaze source delivered)
-- Use official S31 BSP + esp_video frame acquisition with single capture owner and timestamp/rotation normalization.
-- Add ESP-DL MSR/MNP multi-face/5-landmark adapter, use high-resolution eye ROIs for separate pupil/gaze stage; preserve UNKNOWN when evidence insufficient.
-- Connect perception → focus manager → calibrated camera-relative eye target → stationary attention gaze planner → Face LVGL.
-- Handle 0,1,2+ faces, target switch hysteresis and short visual loss. Distinguish human eye location, human looking-at-Bot and Bot's ability to aim eyes.
-- When robot is rotated manually: remeasure and adjust rendered eyes **if target still in FOV**, otherwise mark localization lost without pretending the camera rotated back.
-
-### P3 — conversation and lifecycle integration (local policy delivered; secure Mac media pending)
-- Connect audio session (after wake) to Rust/Tauri Brain gateway with explicit session/turn IDs and command arbitration.
-- Implement listening/thinking/speaking expressions without overriding gaze, stop/interrupt handling, caption lifetime.
-- Implement configurable IDLE/BORED/DROWSY/SLEEPING/NIGHT_DARK and camera/LCD sleep request, wake/resume.
-- Verify later on real hardware whether LCD panel sleep physically produces a fully dark screen; never assume from API alone.
-
-### P4 — optional DOA and richer conversation
-- Integrate esp_apa_doa-style dual-mic angle + quality with same audio owner. Sound direction is a search hint, not a person ID and not an extra wake method.
-- Optionally correlate speaking face with sound when reliable; preserve ambiguity for multiple speakers and linear-array front/back uncertainty.
-- Add better per-person calibrated eye gaze and interaction UX after real-world dataset evidence.
-
-### P5 — targeted off-the-shelf actuated pan/tilt and optional IMU (not yet installed)
-- Replace stationary adapter with actual feedback/limit-aware servo driver.
-- Extend attention from relative camera error to full coordinated eye–head plans: eyes lead, head follows, eyes recenter **only when physical head aligns**.
-- Compensate head's own camera motion using measured joint pose. If IMU is added, enhance short-term disturbance rejection, but visual feedback remains corrective and authoritative.
-- Large base tilt/handheld motion is bounded by 2-axis mechanical reach; safe held-by-hand mode before any autonomous corrective motor movement.
-
-## 4. Engineering invariants for every iteration
-
-- Priority: **wake and local behavior responsiveness** independent of network. No model-generated per-frame servo or pupil commands.
-- One owner per hardware device, one official focus, one gaze controller, one runtime behavior authority.
-- Never equate gaze inference UNKNOWN with NOT_LOOKING; never infer person identity from ephemeral track ID.
-- Event timestamp and actual capture age must be preserved across queues. New measurements replace stale camera positions.
-- Human gaze at Bot cannot, by itself, trigger wake.
-- A valid full-name wake is required before any background ambient audio is routed to Brain.
-- Fixed camera cannot be re-aimed. Pure visual compensation only functions while an appropriate visual target is observed.
-- No CI workflows. If no execution/test conditions, write code and clearly state "not built / not run / not hardware verified".
-
-## 5. Handoff criteria (specification, not CI gates)
-
-For each future implementation, provide:
-1. Source paths, module public API and ownership boundaries.
-2. Required firmware dependencies/models, asset/provisioning details and optional flags.
-3. What is actually implemented vs hardware-dependent or conceptual.
-4. Relevant integration call sites (or explicit notice when main integration has **not** been performed).
-5. Hardware limitations and observable failure states rather than fake successes.
-
-A hardware demonstration may be done manually when the user chooses; no request to create CI or automatically perform an unavailable board test.
+**No CI。** 不创建 GitHub Actions，不把 CI 作为本项目合并前提；只针对实际风险使用已有本地/手动验证，不为文档变动安装模型、运行推理或刷机。

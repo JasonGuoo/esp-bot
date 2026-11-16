@@ -1,5 +1,7 @@
 # Mac OpenCode harness
 
+**2026-11-16 目标设计：** [家庭陪伴规格](specs/household-companion/README.md)要求家庭日会话、运行上下文 compact 与后台记忆分层。[HC-04](specs/household-companion/implementation-plan.md#hc-04)负责接入，当前实现没有因本文更新而获得这些能力。实际 V2 API/版本兼容须在开发时核对；不新增另一套 Agent 主控。
+
 **2026-11-13 模型顺序更新：** 按用户选择，默认启用 **GLM Coding Plan → DeepSeek Flash**。Qwen Coding Plan 保留为默认停用的可选路线。这次仅修改源码与配置文档，没有运行测试、构建、模型请求或 CI；安装并重新打开更新后的 App 才会应用到运行实例。
 
 > 2026-11-06 后续本机状态：Rust release 与 Mac App 打包通过，官方 v2.2.5 已校验安装并从真实控制台完成启动、健康检查和停止。控制台已接入 macOS 钥匙串。没有请求真实模型或进行硬件联调，也未使用 CI。
@@ -322,13 +324,17 @@ Chrome 页面或验证 Search / Fetch 真实 API 响应，本次没有运行真�
 
 返回给宿主的是 `text`、可选 `structured`、实际 provider / model / session 标识。宿主负责验证 speech 长度、表情枚举、卡片和媒体 URL，决定 TTS 与屏幕输出；harness 不执行模型给出的 HTML、网页脚本或舵机动作。SSE 文字增量仅用于控制台进度，不直接驱动设备说话。
 
-### 上下文变化不保留过期记忆
+### 当前上下文失效机制与已知连续性缺陷
 
 OpenCode 的 instruction entry 会替换当前值，但历史指令更新也可能保留在会话记录里。因此仅覆盖最新 system prompt 不足以保证已经过期或撤销的记忆从旧上下文消失。
 
 本实现保存 `system_prompt + response_schema` 的 SHA-256 指纹。指纹变化时，先用官方 DELETE 删除已跟踪的旧根会话及其 fork 子会话，再创建新会话。相同指纹才沿用历史。家长编辑记忆、改变允许外发的记忆集合、不同人物上下文或 TTL 到期导致宿主注入内容变化时，旧内容不会继续通过原会话历史带入下一轮。
 
-这个选择会牺牲一部分多轮连续性：若宿主按问题检索出的记忆集合每轮不同，就会重新建立模型会话。长期记忆仍由宿主的明确授权记录负责，不能让模型转录历史替代可撤销的记忆库。
+这一实现存在已确认的 [#9 缺陷](https://github.com/JasonGuoo/esp-bot/issues/9)：即使集合/权限未变化，只是动态召回顺序变化，也可能删除会话、打断追问。它是待修复问题，不是新家庭设计接受的行为。长期记忆仍由宿主可撤销的记录负责，不能通过取消删除/权限检查来维持上下文。
+
+目标实现把稳定人格与权限版本、当前轮检索材料、家庭日会话映射和 compact 摘要分开。同日换说话人不自动换会话；同一 OpenCode 前台会话按序投递，长任务使用受管理的独立作业。compact 仅管理有限推理上下文，原文先进入 SQLite，后台事件/学习整理另行执行。撤销记忆时清理受影响上下文并从仍合法的来源重建，而非继续使用含已删内容的历史。
+
+接入前核对实际安装版本的 [compact](https://opencode.ai/docs/compaction/)、[server hooks](https://opencode.ai/docs/build/plugins/server/) 和 [API](https://opencode.ai/docs/api)。当前网站列出的能力不能直接推定项目适配基线 2.2.5 全部具备；事件流断连后须从历史/ledger 恢复，不能依赖 live SSE 重播漏失事件。详细开发与验收见 [HC-04](specs/household-companion/implementation-plan.md#hc-04)。
 
 ### 取消、超时与调用方丢弃 future
 

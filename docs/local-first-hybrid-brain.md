@@ -1,141 +1,66 @@
-# Local-First Hybrid Brain — product architecture decision (2026-10-30)
+# Mac 为主的家庭后端：部署与复用决策
 
-**Current model selection, 2026-11-13:** Active defaults are **GLM Coding Plan → DeepSeek Flash** through the existing OpenCode harness. Qwen is retained but disabled by default. This source update requires the updated App and has not been built or run; see [configuration upgrade behavior](mac-opencode.md#旧配置的模型顺序升级).
+**当前选择：2026-11-16。** 用户已明确当前依赖 Mac，Bot 只连接配对的本地后端，不在本阶段开发独立联网 Agent。本页保留 Local-First 的设备离线互动和本机数据边界，更新原 2026-10-30 路线。总体权威见 [architecture.md](architecture.md)，详细设计和步骤见 [家庭陪伴规格](specs/household-companion/README.md)。
 
-**Current status, 2026-11-08:** The firmware and Mac app are built and the real board has authenticated over Wi-Fi. The user chose plaintext LAN audio with integrity checks; control remains WSS. End-to-end speech, BLE, the dedicated wake model, and a physical speaker remain unverified or pending. See [integration results](server-integration-2026-11-08.md); earlier delivery status below is historical.
+本次是设计修订。当前源码及真实运行范围见 [11 月 15 日验收](review-acceptance-2026-11-15.md)；[独立 ESP32 Agent 可行性研究](research/esp32-s31-standalone-agent-feasibility-2026-11-13.md)保留为研究，不再列为当前产品配置或开发门槛。
 
-**Status: NEW SELECTED DESIGN, not implemented end-to-end. Supersedes older assumptions that Mac/Linux is only a generic optional HTTP Brain and that every new capability gets its own route.**
+## 1. 当前部署分层
 
-**2026-11-06 integration:** the user's explicit LLM choice is **OpenCode v2**,
-with configurable cloud routes (current defaults above), inheriting
-`browser` and `deepseek-search`. That replaces the earlier local LLM / S2S
-orchestration preference below. ASR, TTS, embeddings and personal memory stay
-local. [Mac implementation](mac-bot-server.md) now has source-integrated
-Rust/Tauri coordination, official local model adapters, SQLite identity/memory,
-the parent console and a Mac WSS v3 endpoint. Firmware WSS, BLE and actual
-Mac/hardware execution remain pending; no tests/builds were run.
+| 层 | 职责与采用方式 |
+| --- | --- |
+| ESP32-S31 Bot | ESP-IDF/BSP、单音频 owner、完整词本地唤醒、runtime、Face/attention、轻量媒体播放器及连接适配 |
+| Mac Rust/Tauri core | 配对网关、输入来源、家庭日记录、权限、任务调度、呈现编排、状态与控制台 |
+| OpenCode harness | 沿用官方 V2 的进程/API/会话/工具适配；当前活跃路线 GLM Coding Plan → DeepSeek Flash，Qwen 默认停用 |
+| 本地模型通道 | 复用当前 ASR、ECAPA、YuNet/SFace、系统 TTS 适配；拆分 ASR 与身份执行槽，控制热模型与内存预算 |
+| 数据与记忆 | SQLite 权威记录；后台增量整理；Graphiti v0.31.2 作为待评估的可重建图/检索侧进程 |
+| 媒体和动作 | FFmpeg、确定性排版/绘图、既有授权搜索/媒体来源；AppKit/CUPS 等真实能力适配器 |
 
-## 1. Locked product requirements
+只有 Mac 负责互联网搜索、云模型调用和长任务。ASR/TTS/身份与存储优先本机，但“本地图索引”并不证明其 LLM/embedding 也离线，必须显式配置模型与外发范围。当前不用 HF Speech-to-Speech 或 Letta 替换已选择的 OpenCode 主引擎；它们的适配/后台整理经验可以复用。
 
-- Device remains **小呆**, ESP32-S31-Korvo-1 V1.1 development board (16 MB flash, 16 MB PSRAM, 800×480 touch LCD, camera, twin mics, integrated ES8389 and **two NS4150B 3 W speaker power amps**, outputs to **4 Ω / 3 W speakers via 2.00 mm pitch ports**; physical speaker units are separate). No replacement base board until proof of concept.
-- **Primary Brain:** user's **Apple Silicon M4 Pro Mac, 48 GB unified memory**, running **Rust/Tauri bot-server**. Optimize for **near-zero cloud AI spend when local resources suffice**, **low time-to-first-audio** and privacy; model processes may be separate local sidecars, notably MLX/Speech-to-Speech.
-- Prefer **existing successful software/hardware modules**: see [upstream-reuse-catalog.md](upstream-reuse-catalog.md). New code should be glue, permissions, session ownership or uniquely 小呆 logic, not a fresh speech framework.
-- **Wi-Fi LAN first**, automatic mDNS discovery of **previously paired** bot-server, never trust raw mDNS UUID as authentication.
-- **Bluetooth required for Mac pairing/provisioning and degraded communication if Wi-Fi is unavailable**. BLE is guaranteed target for control/bootstrap; experimental compressed speech over BLE is **conditional on measured throughput/latency**. Not promise full speech/video when Wi-Fi fails. Bluetooth radio presence does not prove availability of the desired HFP/A2DP/LE Audio software/profile combination.
-- Robot must maintain its **full four-syllable local name-wake 小呆小呆**, passive behavior and optional local eye gaze without Mac, Wi-Fi or cloud. The wake model is **not yet created**. Never upload ambient pre-wake audio.
-- **Target physical product now includes attractive enclosed head, audible external speakers and optional 2-axis pan/tilt using pre-made parts**. Existing V1 motorless/fixed-head documentation describes the *currently installed* hardware only, not a permanent product decision. Hardware/mechanics are not yet selected or assembled.
-- Allow explicit remote/cloud policy as an opt-in fallback; local service available/healthy wins, but never use a bad/incomplete local answer as if it is fresh internet data.
+## 2. 单一行为权威与离线能力
 
-## 2. Exactly one local decision authority
+`bot_runtime` 控制激活、采集、输出许可、停止和行为优先级；`bot_bus` 运输事件/快照；`attention_manager` 选视觉焦点；`attention` 做空间规划；`face` 渲染；`head_motion` 只报告真实已安装能力。Mac 不能绕过 runtime 逐帧驱动眼睛或电机。
 
-bot_runtime owns wake, active conversation, connection preferences, failover permissions and behavior priority. bot_bus carries typed events/latest snapshots, not AI actions or audio data. attention_manager owns tracked human focus. vision_attention/attention/face/head_motion retain their existing single ownership and safety contracts. bot_platform/audio owns one microphone/codec. The server may request a **high-level** action with expiry/permission but cannot steer servo or screen pupil on each frame.
+无 Mac 时，完整“小呆小呆”唤醒、已有本地应答、表情与触摸控制继续工作。默认使用 MultiNet7 完整四音节命令，专用 WakeNet 模型仍是后续可选工作。缺少相应模型须明确报告，不用字符串配置冒充识别器。未唤醒的环境音不保存或上传；已唤醒也只在有效输入许可内采集。
 
-### Architecture layers
+复杂人脸/家庭身份与声纹在 Mac 处理。设备原有轻量视觉位置/眼睛跟随在预算内保留，音频和显示响应优先；无视觉证据时保持 unknown，不猜测固定头部已经转向某人。
 
-1. **ESP device**: ESP-IDF official BSP + compatible XiaoZhi board port → mic/wake/audio render → bot_runtime + Face/attention + device UI → brain_link.
-2. **Transport selector** beneath brain_link: Wi-Fi LAN WS (primary), Bluetooth local link (bootstrap/backup), device-local skills (last resort). No automatic cloud voice upload without explicit policy.
-3. **Mac bot-server (Rust core + Tauri console)**: pairing registry, capability advertisement, session/routing, access policy, local model health metrics, tools, media catalog, telemetry.
-4. **Local inference sidecars**: existing HF Speech-to-Speech process on localhost (STT+LLM+TTS), optionally MLX/llama.cpp/Whisper/Piper/Wyoming services; Rust adapters, not rebuilt inference.
-5. **Optional cloud providers/search**: may be invoked by Mac for tasks whose abilities truly need them (fresh data or heavier reasoning); no cloud model call if policy disallows. The device Cloud Direct mode is a future separately authorized product feature, not included in present code.
+## 3. 局域网与能力选择
 
-## 3. Local-first selection policy (explicit and measurable)
+1. Bot 发现之前配对的 Mac，验证已有信任材料后连接；mDNS 名称/UUID 不作为认证。
+2. 当前 WSS v3 负责控制、文字与凭据；用户选择的逐轮 LAN PCM TCP 带完整性校验但不保密。新设计不改变既有音频传输选择。
+3. Mac 根据已配置 provider、能力与权限选择模型/工具；保持现有 GLM → DeepSeek 路线及已输出/已执行工具后禁止重放规则，不把任意本地模型当作已集成替代。
+4. 每个能力分别声明可用、预热、版本、超时和并发预算。ASR/身份并行，前台输入优先；后台任务可以继续，但未持有当前输出许可时只归档结果。
+5. Mac 不可用或断线时及时退回本地交互；不把旧音频自动上传给另一个端点，不重放打印等物理动作。
 
-**Route each capability individually** (STT, LLM, TTS, web search, vision), not a monolithic "local versus cloud" switch. Default profile: **Auto — prefer local bot-server**.
+只有 MAC 侧已配置的云策略参与模型路由。旧文档的设备 **Cloud Direct profile 从当前路线移除**；以后重新引入需要单独产品设计，不是本计划的隐含依赖。
 
-1. Boot: always launch local wake, face and passive policy. If Wi-Fi has usable IP, discover via mDNS then validate **stored paired server public key**; connect and negotiate protocol and capabilities. Existing LAN v1 has an ephemeral server UUID, **NOT** stable trust; must be upgraded before private audio/tools.
-2. On Mac, read each local provider's availability, warm status, language/task support, measured p95 first-response and queue depth. A healthy local provider within configured latency/quality budget wins.
-3. When local model is missing, overloaded or unsupported, choose approved **Mac-mediated cloud provider** only after cost/privacy policy check. A search request may require internet **data retrieval** while its speech, summary and TTS remain entirely local.
-4. Wi-Fi unavailable: try BLE to previously paired Mac; support device status, pairing, Wi-Fi credentials and low-bandwidth commands. Start a **separate measured BLE speech proof-of-concept** with short compressed frames (Opus/ADPCM) and explicit congestion control if practical; if not, gracefully degrade to offline commands and local screen UI. No claim that a Bluetooth speaker HFP profile automatically carries the app's bidirectional RPC.
-5. If Mac absent: remain locally functional; Cloud Direct only if enabled and credentials are safely provisioned. Never fail open by sending sensitive speech to cloud.
-6. Reconnect with jitter/backoff; avoid path flapping (hysteresis); preserve conversation/session semantics, cancel partial streams on transport switch, do not duplicate physical actions or automatically replay private audio.
+## 4. BLE 与硬件是独立的后续工作
 
-**Profiles:** Auto local-first (default), Local Only, Cloud Direct (explicit). Separate toggles: cloud model escalation on Mac, direct cloud when Mac absent, usage caps, and whether BLE degraded speech is enabled after hardware verification.
+BLE 仍用于 Mac 配对、Wi-Fi 安全配置与低带宽控制的后续目标。优先复用 Espressif `network_provisioning` / protocomm 与 Mac CoreBluetooth，验证 proof-of-possession、凭据轮换和实际角色支持。它与已有局域网会话协议分层，不把配网安全机制误当业务 RPC。
 
-## 4. BLE vs Wi-Fi: make two independent features
+压缩语音经 BLE 是测量后的可选研究，视频不作为 BLE 默认能力。芯片支持 Bluetooth 不证明 Mac 和固定 ESP-IDF 版本已经实现目标 HFP/A2DP/LE Audio profile。不要用未测的全双工蓝牙链路阻止当前 Wi-Fi 家庭主线。
 
-**A. BLE onboarding (required):** Use Espressif maintained **network_provisioning** / supported protocomm BLE transport and proper mutual proof-of-possession with authenticated encryption, instead of inventing credential serialization. Mac CoreBluetooth is the central/controller; Bot peripheral advertises a narrowly-scoped provision service. Flow:
+硬件仍是 S31-Korvo-1 V1.1、实际 SC101IOT 相机、16 MB Flash / PSRAM，没有已安装的电机或 IMU。现成双轴机构、外壳、扬声器与电源走 [硬件采购/复用](off-the-shelf-hardware.md) 的独立流程；不得用软件生成假反馈。
 
-    No Wi-Fi / first boot → Bot BLE advertises provisioning
-    → Mac bot-server detects "小呆", user approves/pairs on console
-    → provision Wi-Fi credentials over protected handshake
-    → Bot joins Wi-Fi → mDNS discovers same trusted Mac
-    → Wi-Fi WS stream becomes primary, BLE remains on-demand fallback
+## 5. 协议与媒体复用
 
-For S31 the chip has Classic BT and BLE 5.4 at hardware level; **macOS Bluetooth role/profile support and installed ESP-IDF stacks must be checked for actual software support**. For a normal macOS app, BLE GATT via CoreBluetooth is a safer universal starting point than assuming HFP/LE Audio can form a private, bidirectional application data channel.
+继续使用现有 [WSS v3](../shared/mac-brain-v3.md) 和 [语音任务协议](specs/server-voice-tasks/protocol.md)，新增家庭、任务、素材和呈现契约先版本协商与旧端降级，避免每个能力新增一套通信栈。会话、激活、任务、播放和输出许可的独立标识见 [模块契约](module-contracts.md)。
 
-**B. BLE app channel (required control, exploratory speech):** Reuse same high-level message envelope but a **BLE framing adapter** with MTU-aware chunking, sequence/ack, congestion, bounded queues, encryption, pause/resume, close/timeouts and session binding. Provisioning may reuse ESP-IDF components; app data protocol is distinct from provision security. BLE does not carry JPEG/video by default. Audio on BLE is not committed until full-duplex audio+mic speaker+A​EC coexistence and actual Mac–S31 throughput tests pass. Do not silently send uncompressed 16k/16-bit PCM over a small GATT characteristic.
+音频使用有界帧、来源/序号、明确的采样范围和取消；不能把处理完成时间冒充硬件采样时间。媒体由 Mac 排版/缩放/转码，设备协商实际格式、尺寸、队列和同步能力。优先评估 Espressif ESP-GMF `esp_player` / `esp_video_render`，复用当前 LVGL 与 codec owner；上游可播放不等于本板在同时唤醒/相机运行时已达到某个 FPS。
 
-**Security:** persistent device + server key/identity; user approval on first bond, host authorization, pair rotation/revocation, BLE Secure Connections where supported, channel binding/anti-replay, proof-of-possession in provisioning; protect NVS credentials. Neither BLE discovery nor mDNS name/UUID is an identity check.
+## 6. 研发次序
 
-**Source references:** [ESP-S31 BLE stack](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32s31/api-guides/ble/overview.html), [new S31 network provisioning recommendation](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s31/api-guides/ble/blufi.html), [ESP-IDF provisioning](https://github.com/espressif/esp-idf/blob/master/docs/en/api-reference/provisioning/provisioning.rst), [ESP Bluetooth Audio overview](https://docs.espressif.com/projects/esp-adf/en/latest/solution-center/bluetooth-audio.html).
+新主线为：共同契约与家庭原始记录 → 并行理解和连续上下文 → 独立任务与真实应答进度 → 分段图文语音 → 后台记忆/家庭控制台 → 打印等动作。多人重叠、AEC 和高级视频单独验收，接口稳定后可并行开发。[HC-01～HC-15](specs/household-companion/implementation-plan.md)给出具体步骤与依赖。
 
-## 5. Do not explode the API
+当前原语音链路、104 本地语音、完整词模型和设备 WSS 均已有源码及不同范围的验收记录；新日会话/任务/呈现/图索引仍未实现。家长/成员模板代码存在也不表示当前环境已装齐识别依赖或通过家庭声纹测试。
 
-**One versioned request/event/control envelope**, not a new REST endpoint for each ability. Proposed evolution from current LAN v1 hello/event:
+## 7. 官方与成熟实现入口
 
-    { "v": 2, "type": "request", "id": "r123", "method": "assistant.turn.start",
-      "session_id": "s456", "payload": {"input":"audio","stream_id":7} }
+- [XiaoZhi 的同款 S31-Korvo-1 板型](https://github.com/78/xiaozhi-esp32/blob/main/main/boards/espressif/esp32-s31-korvo-1/README.md)、[官方 S31 板说明](https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s31/esp32-s31-korvo-1/user_guide.html)。
+- [ESP-SR](https://github.com/espressif/esp-sr)、[ESP-GMF](https://github.com/espressif/esp-gmf)、[官方 esp_player](https://github.com/espressif/esp-gmf/blob/main/packages/esp_player/README.md)。
+- [S31 BLE 文档](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32s31/api-guides/ble/overview.html)、[官方 provisioning](https://github.com/espressif/esp-idf/blob/master/docs/en/api-reference/provisioning/provisioning.rst)。
+- [OpenCode compact](https://opencode.ai/docs/compaction/)；项目仍须按实际 V2 API 验证兼容。
+- [开源记忆比较与固定版本](research/household-memory-open-source-2026-11-16.md)、[项目复用目录](upstream-reuse-catalog.md)。
 
-Standard types: hello, welcome, request, response, event, error, cancel. Standard fields: protocol version, message id, session id, turn id, deadline, content, trace id, idempotency key (for non-repeatable actions), error codes. Capabilities are negotiated; unsupported methods result in explicit errors. Use WebSocket ping/pong for Wi-Fi heartbeat; BLE transport has its own connection supervision; don't introduce high-rate JSON heartbeat.
-
-For sound, use **binary frames with stream_id, format, sequence, timestamp**, bounded buffers, backpressure and cancellation. For images/video, use server-side image processing/transcoding and explicit media descriptors, then separate authenticated HTTP-range/streaming path if Wi-Fi. Video playback is optional and requires board codec profiling; prefer official ESP-GMF render over custom decoder. BLE accepts metadata/very small previews only where budget allows, never assumes full video.
-
-## 6. Mac-first audio pipeline — prioritize feel over absolute model size
-
-After device-local wake, the **Mac** receives the explicit user session's audio. Prefer [HF Speech-to-Speech](https://github.com/huggingface/speech-to-speech) running **locally** as a sidecar; on Apple Silicon it exposes MLX models and a Realtime-compatible WS endpoint. Rust bot-server bridges proprietary device codec/framing to it.
-
-    ESP mic → local AFE/wake → Wi-Fi audio frames
-      → Rust bot-server authenticated session
-      → local speech service VAD/STT
-      → local MLX LLM (with permissioned Mac search/tools if needed)
-      → streaming local TTS
-      → Rust audio packets → ESP codec speaker(s)
-
-Keep each service replacable through adapter capabilities (`stt.transcribe`, `llm.respond`, `tts.synthesize`, `web.search`). Use VAD and TTS chunks for early playback, cancellation/barge-in, AEC while speaker is active, warm-start policy and latency instrumentation (capture→STT, first LLM token, first TTS packet, first speaker audio). No promise of particular delay until instrumented on **this** Mac.
-
-Text-only queries should not require audio models; on-device offline commands should not wait for Mac. Startup should not pre-load every model merely because 48 GB exists; keep a configurable active set and enforce memory pressure.
-
-## 7. What exists vs. work still required
-
-**Latest server inventory:** use [mac-bot-server.md](mac-bot-server.md),
-[mac-opencode.md](mac-opencode.md), [mac-local-models.md](mac-local-models.md),
-[mac-memory.md](mac-memory.md) and [mac-gateway.md](mac-gateway.md).
-
-**Written in the current source:** Rust/Tauri Mac Brain, OpenCode v2 managed/attach
-harness, GLM → DeepSeek routing with optional disabled Qwen, inherited browser/search MCP, local MLX
-Whisper, ECAPA speaker and YuNet/SFace face embeddings, macOS TTS, SQLite memory,
-explicit parent enrollment and a Chinese companion console. A separate TLS WSS
-v3 server provides bounded PCM framing, device credentials, runtime tokens and
-cancellation. The original mDNS/soft-pairing LAN transport and older provider
-adapters remain diagnostic/legacy paths.
-
-**Still required:** the firmware WSS v3 client and device trust provisioning,
-BLE provisioning/bridge, streaming speech/AEC integration, a complete four-syllable
-wake acoustic model, identity threshold calibration and physical motor hardware.
-The firmware already has local runtime/audio/vision source; see
-[local-runtime.md](local-runtime.md). It rejects unauthenticated plaintext commands
-and does not upload private audio. The new Mac implementation has not been built,
-tested, installed with models or exercised with a device. Historical prototype
-checks do not validate this delivery.
-
-### Recommended next development gates
-
-1. Prepare the Mac's explicit provider credentials, OpenCode v2, local model environment and model receipts; resolve dependencies when a real build is authorized.
-2. Connect the S31 runtime to the documented WSS v3 contract, including certificate trust, per-device credential, PCM framing and playback stop.
-3. Integrate the complete 小呆小呆 acoustic model and calibrate microphone/camera behavior on the actual board.
-4. Add BLE secure provisioning and app-control fallback; measure compressed BLE speech before promising it.
-5. Extend speech to streaming output and add image/animation scene players behind device capabilities.
-6. Fit the enclosure, speakers and eventual two-axis head hardware; validate power, limits and physical feedback before actuation.
-
-## 8. Sources / decisions to preserve
-
-- [XiaoZhi on exact board](https://github.com/78/xiaozhi-esp32/blob/main/main/boards/espressif/esp32-s31-korvo-1/README.md)
-- [Official board audio amp and speaker connectors](https://docs.espressif.com/projects/esp-dev-kits/en/latest/esp32s31/esp32-s31-korvo-1/user_guide.html)
-- [HF Mac local end-to-end speech reference](https://huggingface.co/blog/local-reachy-mini-conversation)
-- [HF Speech-to-Speech source and adapters](https://github.com/huggingface/speech-to-speech)
-- [ESP-SR wake and AFE supported targets](https://github.com/espressif/esp-sr)
-- [ESP-GMF media/audio example catalog](https://github.com/espressif/esp-gmf/blob/main/gmf_examples/README.md)
-- [Home Assistant Wyoming architecture](https://www.home-assistant.io/integrations/wyoming)
-- [S31 Classic/LE Audio software documentation](https://docs.espressif.com/projects/esp-adf/en/latest/solution-center/bluetooth-audio.html)
-
-**No CI. No claims of board build or Mac voice performance testing.**
+复用之前核查对应版本、许可证与模型/资产条款。**不新增 CI，不把设计、模型下载或编译成功写成实板功能验收。**
