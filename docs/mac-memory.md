@@ -1,6 +1,25 @@
 # Mac 本地记忆与家庭成员识别
 
-**状态：源码实现；本轮没有编译、测试、执行模型或在 Mac / ESP32-S31 实机运行。**
+**当前 API 说明与后续设计分开记录。** 下方第 1–7 节描述现有 profile/household
+记忆模块及其原交付边界；2026-11-16 确定的目标见
+[家庭会话与可追溯记忆设计](specs/household-companion/household-memory.md)。
+目标尚未实现，实际构建/运行证据以
+[2026-11-15 验收记录](review-acceptance-2026-11-15.md) 等对应日期记录为准。
+
+## 0. 2026-11-16 更新：家庭共享记录是下一阶段主模型
+
+家庭每天一个用户可见对话记录，人物是参与者、来源标注与被谈论的实体；
+不再以“换人就新建个人对话”作为下一阶段的产品模型。内部保留片段、逐句来源、
+跨日话题和独立任务。声纹与 ASR 在 Mac 并行处理，身份结果可稍后标注，普通回答不等待它。
+
+SQLite 保留原始来源、版本和后台作业；优先评估 Graphiti 作为可重建的时序检索图。
+日记、话题、学习观察和长期事实后台增量整理，附原文引用；compact 只管理 OpenCode
+工作上下文。旧个人资料的可见性/云端使用限制必须迁移保留，不能直接共享化。
+
+对应工作：HC-02 家庭档案与迁移、HC-04 长对话、HC-09 Graphiti 适配、
+HC-10 后台整理、HC-11 检查/标注界面，见[实施计划](specs/household-companion/implementation-plan.md)。
+此处没有改变数据库、历史留存默认值或现有 API；下面的旧 conversation 归属和级联删除
+语义不能直接套用于未来家庭日记录。
 
 这一层位于 `server/bot-server/src-tauri/src/memory/`，由 Rust/Tauri
 `bot-server` 管理。它保存经过确认的记忆、家庭成员档案，以及明确登记的
@@ -83,7 +102,7 @@ DeepSeek，并不代表所有本地记忆自动允许上传。
 识别返回一个**候选**。它不能解锁个人记忆、批准工具、批准配对或代替家长确认。
 返回值始终包含 `authorizes_profile_memory: false`。
 
-本轮使用谁的个人记忆，须来自本地控制台明确选择。换人时应建立新的 conversation，
+在当前 API 中，使用谁的个人记忆须来自本地控制台明确选择。换人时应建立新的 conversation，
 而不是把旧 conversation 改绑到另一人。`register_conversation()` 对以下三种变化
 都会拒绝：甲到乙、匿名到某人、某人到匿名。调用者须生成新的 conversation ID。
 
@@ -178,7 +197,9 @@ OpenCode conversation，并在忘记此人时一并清理。元数据有总量�
 | `forget_all_conversations()` | 全部 conversation 元数据、文本及后台提取任务 | 取消所有相关轮次并删除其 OpenCode sessions |
 | `delete_profile(id)` | 档案、该档案记忆、两个模态的模板与样本、所属 conversation、文本及后台提取任务 | 删除前先清理已注入旧内容的 OpenCode sessions，以及界面当前身份和待登记样本 |
 
-以上关联删除使用 SQLite 的 `FOREIGN KEY ... ON DELETE CASCADE`，每次连接显式
+以上是当前个人归属模型的关联删除；未来家庭模型的逐来源删除见
+[新规范第 9 节](specs/household-companion/household-memory.md#9-更正删除与迁移)。
+现有实现使用 SQLite 的 `FOREIGN KEY ... ON DELETE CASCADE`，每次连接显式
 启用外键。[SQLite 官方外键说明](https://www.sqlite.org/foreignkeys.html)
 
 家庭记忆中任意手写的自由文本，不能凭姓名自动推断属于哪个人；删档案不会尝试猜测

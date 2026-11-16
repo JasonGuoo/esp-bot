@@ -1,8 +1,30 @@
-# Reuse-first upstream catalog — 小呆 (2026-10-30)
+# Reuse-first upstream catalog — 小呆 (updated 2026-11-16)
 
 > Decision: **stop reinventing existing hardware/software subsystems**. Default to a proven upstream driver, protocol, media engine, voice pipeline, or complete product mechanism before writing a new implementation. This is the permanent upstream research register: preserve links, what to borrow, integration boundaries and license caveats. **Listing is not a claim that the dependency has been integrated or tested on our board.**
 
 Canonical system decision: [local-first-hybrid-brain.md](local-first-hybrid-brain.md). Hardware target: ESP32-S31-Korvo-1 **V1.1**, not S3; primary AI computer: user's **Mac M4 Pro / 48 GB unified memory** with Rust/Tauri **bot-server** as product entry point.
+
+**Current design precedence:** [Household companion design](specs/household-companion/README.md)
+defines the 2026-11-16 thin-device / Mac-backend architecture and the
+[development plan](specs/household-companion/implementation-plan.md). Dated source-delivery
+sections below are historical snapshots, not current acceptance claims. Earlier local-LLM
+experiments do not replace the selected OpenCode harness, and upstream capability does not
+prove it works in our current board image.
+
+## 2026-11-16 memory selection
+
+| Upstream | Reuse boundary | Decision and evidence |
+| --- | --- | --- |
+| [Graphiti v0.31.2](https://github.com/getzep/graphiti/releases/tag/v0.31.2) | Temporal entities/relations, episodes, household namespace, Saga summaries and retrieval; SQLite remains the source and job authority | HC-09 preferred candidate, not integrated. Apache-2.0 for this code version; databases/models retain separate licenses. Mac packaging, Chinese embeddings and actual model compatibility remain open implementation work. |
+| [Letta Code](https://github.com/letta-ai/letta-code) | Background reflection input snapshots, source IDs, successful-commit watermarks and isolated memory edits | Reference, not a second agent runtime. Keep OpenCode; [MemFS](https://docs.letta.com/concepts/memfs) has no semantic index by default. Record any copied component's pinned license before implementation. |
+| [Mem0 OSS](https://docs.mem0.ai/platform/platform-vs-oss) | Optional simpler fact retrieval if the graph candidate does not fit deployment needs | Alternative, not an added parallel dependency. Current OSS graph/temporal/Dream capabilities differ from platform and older tutorials. |
+
+See the [dated source comparison](research/household-memory-open-source-2026-11-16.md)
+and [family memory contract](specs/household-companion/household-memory.md).
+Graphiti's default Saga summary is a short durable-knowledge brief, not a family diary or
+learning-evidence report. Its reference MCP service is not our durable worker queue.
+Self-hosted storage does not imply offline inference: model routes, source permissions,
+Chinese language support and deletion propagation must be explicit in the adapter.
 
 ## 0. Discovery that changes implementation priority
 
@@ -22,7 +44,7 @@ Canonical system decision: [local-first-hybrid-brain.md](local-first-hybrid-brai
 | --- | --- | --- | --- |
 | [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) | ESP32 voice robot; Opus/WS or MQTT+UDP, MCP commands; **exact S31 Korvo board adaptation** | Reuse/audit board audio/display/camera/network drivers, stream lifecycle and tool patterns; keep custom UI/runtime | **P0** source/adaptation candidate. MIT source license; any included third-party components/assets have separate terms. Do not wholesale fork whole product. |
 | [xinnan-tech/xiaozhi-esp32-server](https://github.com/xinnan-tech/xiaozhi-esp32-server) | Self-hosted XiaoZhi backend; WS, MQTT+UDP, LLM, knowledge/MCP | Learn how the protocol routes media and tools; borrow reusable pieces where sensible | **P1** interoperability/reference, **not** replacement for Rust/Tauri bot-server. MIT ([license](https://github.com/xinnan-tech/xiaozhi-esp32-server/blob/main/LICENSE)). |
-| [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech) | VAD→STT→LLM→TTS and real-time WS; MLX LLM + MLX audio paths on Apple Silicon; local/cloud backend adapters | **Preferred initial Mac speech service** run as a replaceable local process, not hand-reimplement VAD/STT/TTS | **P0** Mac integration candidate. Apache-2.0 code license ([LICENSE](https://github.com/huggingface/speech-to-speech/blob/main/LICENSE)); each model/voice/weights has its own license. |
+| [huggingface/speech-to-speech](https://github.com/huggingface/speech-to-speech) | VAD→STT→LLM→TTS and real-time WS; MLX LLM + MLX audio paths on Apple Silicon; local/cloud backend adapters | Historical initial speech-service candidate; compare reusable adapters without replacing the currently integrated OpenCode and local workers | Reference. Apache-2.0 code license ([LICENSE](https://github.com/huggingface/speech-to-speech/blob/main/LICENSE)); each model/voice/weights has its own license. |
 | [Hugging Face Reachy Mini local conversation](https://huggingface.co/blog/local-reachy-mini-conversation) | Runs voice intelligence on nearby laptop; realtime-compatible socket independent of robot client | Copy **architectural pattern**: robot thin client, local MLX brain, switchable provider | **P0** reference. [Reachy Mini SDK](https://github.com/pollen-robotics/reachy_mini) Apache-2.0; **its hardware design assets are CC BY-SA-NC** — not suitable to casually copy for a commercial physical shell. |
 | [Home Assistant Assist + Wyoming](https://www.home-assistant.io/integrations/wyoming) / [OHF-Voice/wyoming](https://github.com/OHF-Voice/wyoming) | Local modular speech-to-phrase, Whisper, Piper, wake and binary-audio events | Optional **adapter** for local ASR/TTS processes; inspect event+binary framing, health/service discovery | **P1** adapter/reference. Wyoming on trusted LAN has no built-in auth/encryption; do not expose untrusted. Validate exact versions and licenses. |
 | [OpenVoiceOS message bus](https://github.com/OpenVoiceOS/ovos-messagebus) | WS publish/subscribe skill components and service separation | Message-envelope design and command/topic naming patterns | **P2** architecture reference; do not add an extra device broker or duplicate bot_bus. Apache-2.0 for messagebus. |
@@ -38,7 +60,8 @@ Canonical system decision: [local-first-hybrid-brain.md](local-first-hybrid-brai
 
 **Selected product host: Rust + Tauri bot-server**. It owns discovery, pairing, device/session registry, permissioned tools, service health, local-first provider routing, media control, Mac UI and logs. A proven Python or other process may provide STT/LLM/TTS behind loopback HTTP/WS; **Rust does not need to reimplement inference engines or model decoders**.
 
-**Initial experiment, no final model lock-in:**
+**Historical October 30 experiment list, not the current model selection:** the selected
+OpenCode and local adapters are recorded in section 6; the following remains comparison material.
 
 - Speech pipeline: HF Speech-to-Speech, preferably MLX on Apple Silicon; compare warm-idle latency and real streaming/barge-in. See [Mac/local instructions](https://github.com/huggingface/speech-to-speech).
 - STT: project's supported Parakeet/Whisper-MLX/Qwen3-ASR adapters, or independently hosted Wyoming Whisper; test actual Chinese wake-free dialogue and languages on M4 Pro.

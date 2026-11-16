@@ -1,5 +1,7 @@
 # Module contracts and local event bus — esp-bot V1
 
+**2026-11-16 target extension:** [Household companion design](specs/household-companion/README.md) separates household records, activation, persistent tasks and presentation. Section 9 below describes the proposed server/domain contracts; new fields are **not yet implemented wire fields**. Existing firmware ownership, `RuntimeToken` and versioned WSS behavior remain authoritative until a compatible implementation lands.
+
 **Current source status:** [2026-11-14 review corrections](review-fixes-2026-11-14.md) records the source changes; [2026-11-15 acceptance](review-acceptance-2026-11-15.md) records subsequent local builds and device checks. Older dated transport inventories below are historical; firmware WSS v3 now exists. This revision adds a token-bound `TURN_SUBMITTED` edge and a non-capturing `SUBMITTED` conversation stage; runtime remains the behavior authority.
 
 **Status (2026-11-06):** the typed bus/runtime/focus contracts are now source-implemented and wired in app_main, without compilation or device execution. The conceptual event examples below describe the wider architecture; actual implemented fields are in component headers and [local-runtime.md](local-runtime.md). **Authority:** [architecture.md](architecture.md) for ownership, [behavior-lifecycle.md](behavior-lifecycle.md) for policy, [eye-contact.md](eye-contact.md) for gaze geometry. The names below denote logical modules, not a promise of one RTOS task per component.
@@ -19,7 +21,7 @@
 | Actual head hardware | **head_motion** | Current: stationary adapter. Future: actuation, limits and joint feedback | Inventing measured pose or selecting people |
 | Remote connection | **brain_link** | Session/link lifecycle, authenticated commands, media routing | Direct live pupil/servo control from the server |
 
-Transport note: existing **lan_link** is an implementation below brain_link, NOT a second app controller. Existing **brain_client** and Python Brain are legacy prototypes. Rust/Tauri now composes the Mac Brain and a separate [WSS v3 server](../shared/mac-brain-v3.md). Firmware main still uses brain_link/lan_link only as an untrusted diagnostic boundary; its WSS client is not implemented, and the HTTP prototype is excluded. Current firmware sends no private media.
+Transport note: existing **lan_link** is an implementation below brain_link, NOT a second app controller. Existing **brain_client** and Python Brain are legacy prototypes. Rust/Tauri composes the Mac Brain and [WSS v3 gateway](../shared/mac-brain-v3.md); firmware now connects to the paired Mac and sends only authorized session media. LAN v1 remains diagnostic and the HTTP prototype is excluded. Current per-turn LAN PCM is plaintext with integrity checks at the user's choice; control/text are WSS. See [current acceptance](review-acceptance-2026-11-15.md).
 
 **Source authority:** Face theme/appearance behavior remains in [face-design.md](face-design.md) and shared appearance packs. Person tracking remains in [visual-attention.md](visual-attention.md), voice name in [wake-word.md](wake-word.md).
 
@@ -84,7 +86,7 @@ Invariants:
 ## 5. Authority and arbitration
 
 - Seeing a face, prolonged gaze at Bot, audio energy or room chatter MUST NOT automatically change from passive mode to ENGAGED.
-- Valid full phrase 小呆小呆 (exact local wake engine) or explicit touch/manual user interaction may initiate ENGAGED. Current wake model is not installed; do not synthesize fake WAKE_DETECTED events.
+- Valid full phrase 小呆小呆 (exact local wake engine) or explicit touch/manual user interaction may initiate ENGAGED. The current MultiNet7 full-phrase model is installed on the recorded board; dedicated WakeNet remains unprovisioned. Do not synthesize fake WAKE_DETECTED events or generalize observed matches into calibrated accuracy.
 - **bot_runtime** owns behavior modes and permissions. **attention_manager** owns actual target under those permissions. **attention** owns target-to-gaze math. **face** draws results. **head_motion** owns actuator safety even if runtime asks otherwise.
 - Runtime may refuse an expression suggestion from server, or allow expression but not gaze override. Remote legacy face.set gaze is for development/manual renderer preview and must not race with live tracking.
 - Settings mode owns UI focus but doesn't silently change wake phrase or bypass hardware capabilities.
@@ -105,8 +107,41 @@ Implementation choice: a thin FreeRTOS event + latest snapshot abstraction (or E
 
 ## 7. Local versus server contract
 
-Device must continue wake listening, passive behavior and any local gaze tracking when Mac is offline. Rust/Tauri bot-server now contains local ASR/TTS/identity, OpenCode/tools and memory in source; firmware integration through the authenticated gateway is still pending. The server must not own a low-latency eye or motor loop. LAN discovery is described in [lan-discovery.md](lan-discovery.md); discovery is not authentication or device pairing.
+Device must continue wake listening, passive behavior and any budgeted local gaze tracking when Mac is offline. Rust/Tauri bot-server contains ASR/TTS/identity adapters, OpenCode/tools and memory; existing authenticated firmware integration and its validation limits are recorded separately. The server must not own a low-latency eye or motor loop. LAN discovery is described in [lan-discovery.md](lan-discovery.md); discovery is not authentication or device pairing. The next server model uses parallel ASR/identity and family records; see [device/audio](specs/household-companion/device-and-audio.md).
 
 ## 8. Delivery rule
 
 Write modular code directly; **no CI workflows or CI merge gate** (see AGENTS.md). State clearly when firmware, real camera gaze, microphone DOA, sleep/blackout and other features are only interfaces and have not been run on a board.
+
+## 9. Household domain and task contracts — target, 2026-11-16
+
+These are HC-01 design contracts. They do not change today's JSON schema or grant new device capabilities. Canonical IDs are defined in the [household design](specs/household-companion/README.md#3-必须分开的生命周期).
+
+| Concern | Owner | Required invariant |
+| --- | --- | --- |
+| Household/daily source archive | Mac journal / SQLite | One daily record per household/date in its configured timezone; people are participants, not conversation owners |
+| Input authorization | Device runtime + authenticated gateway | `activation_id` and existing `RuntimeToken` restrict capture; daily records never keep the microphone open |
+| ASR / speaker evidence | Independent managed local lanes | Share `utterance_id` and sample ranges; late identity revises sources, not authority or task execution |
+| Foreground context | Mac conversation coordinator + OpenCode | Ordered inputs to one foreground session; dynamic retrieval does not rotate daily history; compact is separate from archival memory |
+| Background memory | Persistent SQLite jobs / controlled index adapter | Original source revisions first, commit before advancing watermark; graph indexes rebuild from legal sources |
+| Long-running task | Mac task service | Task may outlive activation; persisted attempts/cancellation and real effect receipts prevent duplicate actions |
+| Semantic presentation | Mac PresentationPlanner | Freeze segment/version before concurrent asset preparation; retain immutable assets and source references |
+| Actual playback / output | Device runtime, audio and renderer owners | Output requires a current `output_lease_id`; planned/dispatched is not displayed or played |
+
+### IDs and event evidence
+
+- Use `household_id`, `daily_conversation_id`, `episode_id`, `conversation_turn_id`, `utterance_id`, `speaker_segment_id` for the journal. Existing server string `turn_id` and firmware numeric `RuntimeToken.turn_id` keep explicit mappings; do not rename a field silently across layers.
+- Use `task_id`, `presentation_id`, `playback_id` and `output_lease_id` for work and delivery. Each asset and plan has an immutable revision/digest; retries are attempts under one intent, not a new user request.
+- Persist events with unique `event_id`, schema/version, producer sequence, occurrence and recording time, causation/correlation and source revision. Display/audio receipts reference the exact attempt, segment and lease.
+- Audio sample indices and device playback clocks establish relative timing. `observed_us` read completion is not a hardware capture timestamp. Mac wall-clock schedules, device uptime and family-day boundaries are different domains.
+- Explicitly distinguish `unknown`, `insufficient`, `overlap`, automatic candidate and human annotation; scores retain their model/threshold meaning and are not automatically probabilities.
+
+### Completion, cancellation and compatibility
+
+Task ACK/progress playback completion returns to the same task; it does not trigger the final-answer follow-up transition. Wake ACK returns to capture readiness within the same activation, before a user task exists. Preview playback keeps its existing settings-only scope. A final content segment may complete playback while its independent Mac task is still working on another requested artifact; both states remain visible.
+
+Stopping playback, ending capture, cancelling generation, cancelling a task and deleting a conversation have different effects. Cancellation invalidates old output permissions immediately, and cannot retroactively undo a print job already accepted by an external queue. Tasks completing after disconnect are stored without automatically acquiring a new output lease.
+
+Schema migrations preserve legacy private scopes and retention choices. Source corrections/deletions propagate through summaries, graph projections and affected OpenCode context; a background retry must not resurrect removed data. Graph `group_id` is a namespace, not an ACL.
+
+Capability negotiation must state supported formats, dimensions, resource limits, sync and cancellation semantics. Unsupported required presentation segments yield an explicit partial/failure or authorized fallback. No arbitrary remote HTML/scripts or per-frame pupil/motor control are added. See [implementation steps](specs/household-companion/implementation-plan.md) and [presentation/tasks](specs/household-companion/presentation-and-tasks.md).

@@ -1,7 +1,9 @@
 # Mac 安全设备网关：配置、凭据与固件接线
 
+**2026-11-16 目标边界：** 下一阶段将[家庭日记录、设备激活、Mac 任务和输出许可分开](specs/household-companion/README.md#3-必须分开的生命周期)，并在 Mac 并行 ASR 与声纹。下文描述当前可用 v3 入口；新增 ID/能力/状态尚未作为线协议实现，必须先完成 HC-01 的版本协商和旧端兼容。日会话存续不延长录音权限，后台任务完成不自动重新取得设备输出许可。详见 [设备与音频](specs/household-companion/device-and-audio.md)及[呈现与任务](specs/household-companion/presentation-and-tasks.md)。
+
 数据目录为 `~/小呆 Server`；Mac 和 ESP32-S31 固件均已接入 v3。设备联网、
-无线握手及完整语音对话的实际验证状态以 [本次整合记录](server-integration-2026-11-08.md)
+无线握手及完整语音对话的实际验证状态以 [最近验收记录](review-acceptance-2026-11-15.md)
 为准。字段、帧布局和错误规则详见 [mac-brain-v3.md](../shared/mac-brain-v3.md)。
 
 ## 1. 四条边界先分清
@@ -167,6 +169,8 @@ HTTPS URL 和解释文字，不是可执行 HTML；只有家长批准的 `conver
 会保留远程媒体 URL。默认空名单会让这些卡片降级为文字。
 
 ## 6. 打断、停止、失效与删除是不同操作
+
+本表描述现有 API。HC-05 将进一步分离当前播放、生成、具体后台任务和全局停止；新设计不会把现有 `session.close` 自动解释为删除一天家庭记录，也不默认取消所有已提交外部任务。
 
 | 操作 | 实际影响 | 不代表什么 |
 | --- | --- | --- |
