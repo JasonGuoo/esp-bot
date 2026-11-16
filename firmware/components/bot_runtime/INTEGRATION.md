@@ -1,5 +1,13 @@
 # Integration contract (API defined before main wiring)
 
+## Household additions, 2026-11-16
+
+See [household firmware integration](../../HOUSEHOLD_INTEGRATION.md) for settings
+page leases, playback purposes, bounded presentation receipts and the optional
+real ES8389 MRMN reference/AEC path. The following November 13 notes describe
+the legacy single-reply path, which remains compatible.
+
+
 ## Voice additions, 2026-11-13
 
 Load persisted `bot_voice_settings_t` into `config.voice_settings` before runtime creation. UI submits `BOT_EVENT_VOICE_SETTINGS` or `BOT_EVENT_SOUND_PREVIEW`; it does not call playback directly. `play_wake_response` and `play_sound_preview` receive an explicit relative PCM gain. A preview token has a nonzero epoch and zero session/turn, uses the PREVIEW audio source, and grants no capture permission. Closing settings or Stop cancels it.
@@ -46,7 +54,7 @@ LAN ingress stamps `command.received_ms` locally and queues `bot_command_t`. Lin
 
 Critical queue overflow latches a separate fault signal. Runtime invalidates the session, revokes uplink and stops output. A subsequent explicit local recovery is required; old queued wake/commands do not restart it.
 
-`runtime.token.focus_generation` stays zero because audio/session authority is independent of visual focus. Focus-bound commands use `runtime.focus.generation` explicitly. Barge-in is off by default; the current audio adapter reports echo_safe=false. The next turn is prepared before WAITING; VAD_STARTED must already belong to this new token and is never relabelled. Only a matching END may complete it. Explicit wake/barge-in cancellation still establishes a fresh DMA/AFE fence.
+`runtime.token.focus_generation` stays zero because audio/session authority is independent of visual focus. Focus-bound commands use `runtime.focus.generation` explicitly. Barge-in is off by default; ordinary VAD reports echo_safe=false. The optional hardware-reference path emits a separate token/id-bound BARGE_IN event only after its live reference gates. The next turn is prepared before WAITING; VAD_STARTED must already belong to this new token and is never relabelled. Only a matching END may complete it. Explicit wake/barge-in cancellation still establishes a fresh DMA/AFE fence.
 
 
 ## Source-level integration follow-up

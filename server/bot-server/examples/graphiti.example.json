@@ -1,0 +1,19 @@
+{
+  "backend": {
+    "kind": "falkordb",
+    "host": "127.0.0.1",
+    "port": 6379,
+    "database": "espbot_household"
+  },
+  "llm": {
+    "base_url": "http://127.0.0.1:8000/v1",
+    "model": "REPLACE_WITH_INSTALLED_LOCAL_MODEL",
+    "structured_output_mode": "json_schema"
+  },
+  "embedding": {
+    "base_url": "http://127.0.0.1:8001/v1",
+    "model": "REPLACE_WITH_INSTALLED_EMBEDDING_MODEL",
+    "dimension": 1024
+  },
+  "allow_cloud": false
+}

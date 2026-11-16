@@ -5,7 +5,7 @@ use rusqlite::{params, OptionalExtension, Row};
 use uuid::Uuid;
 
 use super::{
-    store::{bump_revision, clean_text, db_error, enum_column, now_ms, profile_exists, validate_id},
+    store::{bump_revision, clean_text, db_error, enum_column, now_ms, validate_id},
     types::*,
     Store,
 };
@@ -59,7 +59,7 @@ impl Store {
 
         let mut db = self.connection()?;
         let tx = db.transaction().map_err(db_error)?;
-        profile_exists(&tx, &request.profile_id)?;
+        super::profile_merge::active_profile(&tx, &request.profile_id)?;
         let existing: Option<String> = tx.query_row(
             "SELECT id FROM enrollments WHERE profile_id = ?1 AND kind = ?2",
             params![request.profile_id, request.kind.as_str()], |r| r.get(0),
@@ -69,7 +69,7 @@ impl Store {
         }
         let previous = {
             let mut statement = tx.prepare(
-                "SELECT profile_id, dimension, centroid FROM enrollments WHERE kind = ?1 AND model_id = ?2",
+                "SELECT profile_id, dimension, centroid FROM active_enrollments WHERE kind = ?1 AND model_id = ?2",
             ).map_err(db_error)?;
             let rows = statement.query_map(params![request.kind.as_str(), model_id], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Vec<u8>>(2)?))
@@ -122,7 +122,7 @@ impl Store {
         let db = self.connection()?;
         let mut statement = db.prepare(
             "SELECT id, profile_id, kind, model_id, dimension, sample_count, consent_at_ms, created_at_ms\n\
-             FROM enrollments WHERE (?1 IS NULL OR profile_id = ?1) ORDER BY profile_id, kind",
+             FROM active_enrollments WHERE (?1 IS NULL OR profile_id = ?1) ORDER BY profile_id, kind",
         ).map_err(db_error)?;
         let rows = statement.query_map(params![profile_id], enrollment_row).map_err(db_error)?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)
@@ -132,7 +132,7 @@ impl Store {
     /// queries metadata only; it neither exposes templates nor selects a person.
     pub fn has_enrollment(&self, kind: IdentityKind) -> Result<bool, String> {
         self.connection()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM enrollments WHERE kind = ?1)",
+            "SELECT EXISTS(SELECT 1 FROM active_enrollments WHERE kind = ?1)",
             [kind.as_str()], |row| row.get(0),
         ).map_err(db_error)
     }
@@ -142,7 +142,7 @@ impl Store {
         let mut db = self.connection()?;
         let tx = db.transaction().map_err(db_error)?;
         // The foreign key cascade removes individual samples in the same commit.
-        tx.execute("DELETE FROM enrollments WHERE profile_id = ?1 AND kind = ?2",
+        tx.execute("DELETE FROM enrollments WHERE (profile_id = ?1 OR profile_id IN(SELECT source_profile_id FROM profile_aliases WHERE target_profile_id=?1)) AND kind = ?2",
             params![profile_id, kind.as_str()]).map_err(db_error)?;
         bump_revision(&tx)?;
         tx.commit().map_err(db_error)
@@ -169,7 +169,7 @@ impl Store {
         let entries = {
             let db = self.connection()?;
             let mut statement = db.prepare(
-                "SELECT profile_id, dimension, centroid FROM enrollments\n\
+                "SELECT profile_id, dimension, centroid FROM active_enrollments\n\
                  WHERE kind = ?1 AND model_id = ?2 AND sample_count >= ?3",
             ).map_err(db_error)?;
             let rows = statement.query_map(params![request.kind.as_str(), model_id,

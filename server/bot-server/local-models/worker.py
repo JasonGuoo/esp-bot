@@ -118,10 +118,13 @@ def finite_number(value: Any) -> float | None:
 class Worker:
     def __init__(self, model_dir: Path, default_voice: str, tts_rate: int,
                  asr_backend: str = "whisper", rma_python: str | None = None,
-                 rma_worker: str | None = None, rma_model: str | None = None):
+                 rma_worker: str | None = None, rma_model: str | None = None,
+                 diarization_model: str | None = None):
         self.store = ModelStore(model_dir)
         self.default_voice = default_voice
         self.tts_rate = tts_rate
+        self.diarization_model = Path(diarization_model).expanduser() if diarization_model else None
+        self.diarization_pipeline = None
         self.rma_asr = None
         if asr_backend == "rma_qwen":
             from rma_qwen import RmaQwen
@@ -164,6 +167,7 @@ class Worker:
             "voice_count": len(self.voice_inventory) if self.voice_inventory is not None else None,
             "loaded": False,
         }
+        models["diarization"] = {"backend": "pyannote_community_1", "available": bool(self.diarization_model and (self.diarization_model / "config.yaml").is_file() and installed("pyannote.audio")), "loaded": self.diarization_pipeline is not None, "downloaded_by_worker": False}
         return {
             "protocol_version": PROTOCOL_VERSION,
             "worker_version": "0.1.0",
@@ -342,6 +346,11 @@ class Worker:
             "modality": "speaker",
             "identity_claim": False,
         }
+
+    def diarize(self, payload: dict) -> dict:
+        fields(payload, {"wav_base64"})
+        from diarization import diarize_local
+        return diarize_local(self, payload)
 
     def face_embed(self, payload: dict) -> dict:
         fields(payload, {"image_base64"})
@@ -660,6 +669,7 @@ class Worker:
             "display_image": self.display_image,
             "transcribe": self.transcribe,
             "speaker_embed": self.speaker_embed,
+            "diarize": self.diarize,
             "face_embed": self.face_embed,
             "tts": self.tts,
             "voices": lambda _: self.voices(),
@@ -684,6 +694,7 @@ def main() -> int:
     parser.add_argument("--rma-qwen-python")
     parser.add_argument("--rma-qwen-worker")
     parser.add_argument("--rma-qwen-model")
+    parser.add_argument("--diarization-model")
     args = parser.parse_args()
     if not 100 <= args.tts_rate <= 260:
         parser.error("--tts-rate must be between 100 and 260")
@@ -711,7 +722,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, interrupted)
     try:
         worker = Worker(args.model_dir, args.tts_voice, args.tts_rate, args.asr_backend,
-                        args.rma_qwen_python, args.rma_qwen_worker, args.rma_qwen_model)
+                        args.rma_qwen_python, args.rma_qwen_worker, args.rma_qwen_model, args.diarization_model)
     except Exception as exc:
         diagnostics.write(f"local-models startup_failed type={type(exc).__name__}\n")
         return 1

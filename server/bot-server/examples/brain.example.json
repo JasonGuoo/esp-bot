@@ -18,7 +18,9 @@
         "api_key_env": "GLM_CODING_PLAN_API_KEY",
         "context_tokens": 131072,
         "body": {
-          "thinking": { "type": "enabled" },
+          "thinking": {
+            "type": "enabled"
+          },
           "reasoning_effort": "low"
         }
       },
@@ -42,21 +44,35 @@
         "api_key_env": "QWEN_CODING_PLAN_API_KEY"
       }
     ],
-    "required_mcp": ["browser", "deepseek-search"]
+    "required_mcp": [
+      "browser",
+      "deepseek-search"
+    ]
   },
   "models": {
     "python": "/absolute/path/esp-bot/server/bot-server/local-models/.venv/bin/python",
     "script": "/absolute/path/esp-bot/server/bot-server/local-models/worker.py",
     "model_dir": "/Users/YOUR_USER/小呆 Server/models/local",
     "request_timeout_seconds": 120,
-    "voice": "Tingting"
+    "voice": "Tingting",
+    "diarization_model": null
   },
   "memory": {
     "history_enabled": false,
     "min_enrollment_samples": 3,
     "face_threshold": 0.5,
     "speaker_threshold": 0.7,
-    "match_margin": 0.08
+    "match_margin": 0.08,
+    "household_timezone": "Asia/Shanghai",
+    "household_history_enabled": false,
+    "household_retention_secs": 2592000,
+    "graphiti": {
+      "enabled": false,
+      "python": null,
+      "script": null,
+      "config_file": null,
+      "allow_cloud": false
+    }
   },
   "gateway": {
     "enabled": false,
@@ -71,5 +87,24 @@
     "max_reply_characters": 1200,
     "idle_session_seconds": 300,
     "media_hosts": []
+  },
+  "tasks": {
+    "max_concurrent": 2,
+    "max_tasks": 10000,
+    "max_asset_bytes": 67108864,
+    "timeout_seconds": 300,
+    "python": "/absolute/path/esp-bot/server/bot-server/local-models/.venv/bin/python",
+    "media_script": "/absolute/path/esp-bot/server/bot-server/local-models/media_prepare.py",
+    "ffmpeg": "/opt/homebrew/bin/ffmpeg",
+    "ffprobe": "/opt/homebrew/bin/ffprobe",
+    "allowed_media_hosts": [],
+    "default_printer": null,
+    "print_monitor_seconds": 120,
+    "stroke_data_path": null
+  },
+  "presentation": {
+    "max_segments": 16,
+    "max_segment_chars": 200,
+    "reading_dwell_ms": 2500
   }
 }

@@ -535,6 +535,16 @@ void face_set_result_text(face_view_t *f, const char *text) {
     visible(f->result_panel, true);
 }
 
+void face_set_result_segment(face_view_t *f, const char *text) {
+    if (!f) return;
+    face_set_result_text(f,text);
+    if (!text || !*text) {
+        lv_label_set_text(f->result_text,"");
+        visible(f->result_panel,true);
+        lv_obj_scroll_to_y(f->result_body,0,LV_ANIM_OFF);
+    }
+}
+
 static bool set_result_status_label(lv_obj_t *label, char *value, size_t capacity, const char *text) {
     if (!text) text = "";
     if (!strcmp(value, text)) return false;

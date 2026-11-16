@@ -67,18 +67,19 @@ pub async fn start(local:IpAddr, peer:IpAddr)->Result<PlainAudio,String> {
         };
         let writer=async move {
             while let Some(output)=output_rx.recv().await {
-                let (kind,payload,done)=match output {
-                    Output::Frame(data)=>(b'O',data,false),
+                let (kind,payload)=match output {
+                    Output::Frame(data)=>(b'O',data),
                     Output::Finish{stream,frames}=>{
                         let mut data=Vec::with_capacity(8);
                         data.extend_from_slice(&stream.to_le_bytes());
                         data.extend_from_slice(&frames.to_le_bytes());
-                        (b'E',data,true)
+                        (b'E',data)
                     }
                 };
                 let bytes=frame(&key,kind,&payload);
                 if timeout(Duration::from_secs(2),write.write_all(&bytes)).await.ok().and_then(Result::ok).is_none(){break;}
-                if done {let _=write.shutdown().await;break;}
+                // E terminates one stream, not this activation transport.
+                // The owner drops PlainAudio after the final segment or cancellation.
             }
         };
         // Both halves live inside this one task. Dropping the WSS session

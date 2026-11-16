@@ -442,7 +442,7 @@ static void test_wake_response_ownership(void)
     post_event(&bus, runtime, done);
     bot_runtime_get_snapshot(runtime, &state);
     assert(state.local_response_active && state.token.epoch == second.epoch);
-    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_SETTINGS_OPEN,
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_SETTINGS_OPEN, .settings_lease=1,
         .source = BOT_SOURCE_LOCAL_UI, .observed_ms = 4040});
     done.observed_ms = 4060;
     done.token = second;
@@ -450,7 +450,7 @@ static void test_wake_response_ownership(void)
     bot_runtime_get_snapshot(runtime, &state);
     assert(state.settings_open && !state.local_response_active && !state.audio_session_requested);
     assert(state.token.session_id == 0 && probe.cancelled > 0);
-    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_SETTINGS_CLOSE,
+    post_event(&bus, runtime, (bot_event_t){.kind = BOT_EVENT_SETTINGS_CLOSE, .settings_lease=1,
         .source = BOT_SOURCE_LOCAL_UI, .observed_ms = 4080});
 
     /* A lost output callback has a finite recovery bound. */
@@ -494,24 +494,24 @@ static void test_sound_preview_and_offline_commands(void)
     post_event(&bus, runtime, local);
     bot_runtime_get_snapshot(runtime, &state);
     assert(state.voice_settings.volume_percent == 30 && !state.token.session_id);
-    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_SOUND_PREVIEW, .source=BOT_SOURCE_LOCAL_UI,
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_SOUND_PREVIEW, .settings_lease=1, .source=BOT_SOURCE_LOCAL_UI,
         .observed_ms=1030});
     assert(probe.previews == 0); /* explicit audition is still settings-only */
-    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_SETTINGS_OPEN, .source=BOT_SOURCE_LOCAL_UI,
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_SETTINGS_OPEN, .settings_lease=1, .source=BOT_SOURCE_LOCAL_UI,
         .observed_ms=1040});
     bot_voice_settings_t settings = bot_voice_default_settings();
     settings.volume_percent = 40;
     settings.spoken_answers = true;
-    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_VOICE_SETTINGS, .source=BOT_SOURCE_LOCAL_UI,
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_VOICE_SETTINGS, .settings_lease=1, .settings_revision=1, .source=BOT_SOURCE_LOCAL_UI,
         .observed_ms=1050, .data.voice_settings=settings});
-    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_SOUND_PREVIEW, .source=BOT_SOURCE_LOCAL_UI,
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_SOUND_PREVIEW, .settings_lease=1, .source=BOT_SOURCE_LOCAL_UI,
         .observed_ms=1060});
     bot_runtime_get_snapshot(runtime, &state);
     assert(probe.previews == 1 && state.sound_preview_active && !state.token.session_id);
     const bot_session_token_t preview = state.token;
     post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_PLAYBACK_STARTED, .source=BOT_SOURCE_AUDIO,
         .observed_ms=1070, .token=preview, .data.playback={.id=42,.preview=true}});
-    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_SETTINGS_CLOSE, .source=BOT_SOURCE_LOCAL_UI,
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_SETTINGS_CLOSE, .settings_lease=1, .source=BOT_SOURCE_LOCAL_UI,
         .observed_ms=1080});
     post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_PLAYBACK_DONE, .source=BOT_SOURCE_AUDIO,
         .observed_ms=1090, .token=preview, .data.playback={.id=42,.preview=true}});
@@ -700,6 +700,70 @@ static void test_overflow_recovery_does_not_restore_authority(void)
     bot_runtime_destroy(runtime);
 }
 
+static void test_settings_close_commits_last_edit(void)
+{
+    bot_bus_t bus={0};bot_runtime_t *runtime=NULL;bot_runtime_snapshot_t state;
+    assert(bot_runtime_create(&bus,NULL,NULL,NULL,1000,&runtime)==ESP_OK);
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_SETTINGS_OPEN,.source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1010,.settings_lease=1});
+    bot_voice_settings_t edited=bot_voice_default_settings();edited.volume_percent=47;
+    /* CLOSE may be dequeued before the normal-queue edit. Its last accepted
+     * snapshot is authoritative within that page lease. */
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_SETTINGS_CLOSE,.source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1030,.settings_lease=1,.settings_revision=2,.settings_has_value=true,
+        .data.voice_settings=edited});
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(!state.settings_open && state.voice_settings.volume_percent==47);
+    edited.volume_percent=12;
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_VOICE_SETTINGS,.source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1040,.settings_lease=1,.settings_revision=1,.data.voice_settings=edited});
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_SETTINGS_OPEN,.source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1050,.settings_lease=2});
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_VOICE_SETTINGS,.source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1060,.settings_lease=1,.settings_revision=3,.data.voice_settings=edited});
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_SETTINGS_CLOSE,.source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1070,.settings_lease=1,.settings_revision=3,.settings_has_value=true,
+        .data.voice_settings=edited});
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(state.settings_open && state.settings_lease==2 && state.voice_settings.volume_percent==47);
+    bot_runtime_destroy(runtime);
+}
+
+static void test_managed_playback_does_not_arm_followup(void)
+{
+    bot_bus_t bus={0};bot_runtime_t *runtime=NULL;bot_runtime_snapshot_t state;
+    assert(bot_runtime_create(&bus,NULL,NULL,NULL,1000,&runtime)==ESP_OK);
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_AUDIO_HEALTH,.source=BOT_SOURCE_AUDIO,
+        .observed_ms=1010,.data.health={.available=true}});
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_LINK_STATE,.source=BOT_SOURCE_LINK,
+        .observed_ms=1020,.data.link={.connected=true,.authenticated=true,.encrypted=true}});
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,.source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1030,.data.touch={.intentional=true}});
+    bot_runtime_get_snapshot(runtime,&state);bot_session_token_t token=state.token;
+    bus.command=(bot_command_t){.kind=BOT_COMMAND_THINKING,.token=token,.received_ms=1040};
+    bus.has_command=true;bot_runtime_step(runtime,1040);
+    const bot_playback_purpose_t purposes[]={BOT_PLAYBACK_TASK_ACK,BOT_PLAYBACK_PROGRESS,
+        BOT_PLAYBACK_CONTENT,BOT_PLAYBACK_FINAL};
+    for (unsigned i=0;i<4;i++) {
+        uint32_t now=1100+i*100;
+        bus.command=(bot_command_t){.kind=BOT_COMMAND_PRESENTATION_SEGMENT,.token=token,
+            .received_ms=now,.presentation_sequence=i+1,.data.caption="正在展示"};
+        bus.has_command=true;bot_runtime_step(runtime,now);
+        post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_PLAYBACK_STARTED,.source=BOT_SOURCE_AUDIO,
+            .observed_ms=now+10,.token=token,.data.playback={.id=i+1,.purpose=purposes[i],.presentation_managed=true}});
+        post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_PLAYBACK_DONE,.source=BOT_SOURCE_AUDIO,
+            .observed_ms=now+20,.token=token,.data.playback={.id=i+1,.purpose=purposes[i],.presentation_managed=true}});
+        bot_runtime_get_snapshot(runtime,&state);
+        assert(!state.followup_armed && state.token.epoch==token.epoch &&
+               state.conversation==BOT_CONVERSATION_THINKING && !state.audio_uplink_permitted);
+    }
+    bus.command=(bot_command_t){.kind=BOT_COMMAND_PRESENTATION_DONE,.token=token,.received_ms=1600};
+    bus.has_command=true;bot_runtime_step(runtime,1600);
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(state.followup_armed && state.token.epoch!=token.epoch);
+    bot_runtime_destroy(runtime);
+}
+
 int main(void)
 {
     bot_bus_t bus = {0};
@@ -771,6 +835,8 @@ int main(void)
     bot_runtime_get_snapshot(runtime, &state);
     assert(!state.near_face && !state.camera_requested && state.behavior == BOT_BEHAVIOR_NIGHT_DARK);
     bot_runtime_destroy(runtime);
+    test_settings_close_commits_last_edit();
+    test_managed_playback_does_not_arm_followup();
     test_processing_requires_server_ack(false);
     test_processing_requires_server_ack(true);
     test_passive_sound_reactions();

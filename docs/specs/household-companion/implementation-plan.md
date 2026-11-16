@@ -1,11 +1,11 @@
 # 家庭陪伴架构：实施计划与逐步开发清单
 
-**日期：2026-11-16；源码基线：`90972a37530b68b8c8c9729960ac15e901c9d946`。** 本计划承接[已确认设计](README.md)。此文档合并只表示设计、开发范围与步骤已确定，不表示功能已开发。
+**日期：2026-11-16；开发基线：`5ae0c780e146a72ebf10f71f4d6976a0ed47e2fe`。状态：源码开发完成，待测试。** 本计划承接[已确认设计](README.md)，保留开发拆分、依赖和验收条件；本轮实际接线、配置、依赖及剩余限制统一见 [实施记录](implementation-2026-11-16.md)。
 
 ## 交付方法与状态
 
-- 本次先合并设计 PR，再创建 HC-00 总跟踪 issue 和 HC-01～HC-15 开发 issues；文档使用稳定编号及按标题检索链接，因此不会预填不存在的 GitHub issue 号码。
-- 以下每项初始状态均为**待开发**，实时状态以 [HC-00](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-00%22) 的子项与实现 PR 为准。一个 issue 可拆成多个小 PR；实现提交须更新代码接线、迁移/回退和实际验证范围。
+- 设计 PR #12 已合并，已建立 [HC-00 / #13](https://github.com/JasonGuoo/esp-bot/issues/13) 和 HC-01～HC-15 / #14～#28。本轮源码开发完成，子项保持**开发完成，待测试**，不据此关闭验收。
+- 下列“开发步骤”保留实施顺序和完整目标，其中模型评估、真实打印、声学测量和场景验收尚未执行。HC-15 只交付 18 个场景与手工记录入口，初始状态均为 `not_run`；没有勾选验收通过。本轮未编译 Rust/TypeScript/ESP-IDF、未执行模型、Mac GUI 或实板。
 - 保留现有模型路线、设备配对与局域网音频选择；当前不加入设备独立联网 Agent，不把通用家庭陪伴限定成教育产品。
 - 没有现成硬件/模型环境时继续交付可审阅源码，并明确未运行部分。**不创建 CI、不安装模型或增加测试基础设施来验证本次文档。** 后续验证只针对真实状态/数据/外部效果风险使用现有本地流程。
 - 依赖表示功能集成的前置条件；接口确定后可并行写适配器与 UI。接口尚未实现时必须标明使用的样例或占位，不伪装完整联调。
@@ -22,9 +22,9 @@
 | F：进一步自然交互 | HC-13、HC-14 | 多人重叠识别与全双工语音打断分别经过实际条件验收 |
 | G：贯穿迭代的场景验收 | HC-15 | 每个阶段留真实记录，基础家庭主线不等待 F 全部完成 |
 
-**第一轮开发建议：** HC-01 与已有 #7～#11 分别开代码 PR；契约固定后 HC-02/HC-03/HC-05 可并行推进，优先接出“唤醒→短应答→ASR→普通回答→日记录”的主线。接着落实 HC-04、HC-06 和 HC-07/08 的单图文语音路径。图索引评估 HC-09 可与呈现工作并行，打印 HC-12 可在任务/素材接口稳定后接入。
+**设计时的开发顺序（保留拆分依据）：** HC-01 与已有 #7～#11 分别开代码 PR；契约固定后 HC-02/HC-03/HC-05 可并行推进，优先接出“唤醒→短应答→ASR→普通回答→日记录”的主线。接着落实 HC-04、HC-06 和 HC-07/08 的单图文语音路径。图索引评估 HC-09 可与呈现工作并行，打印 HC-12 可在任务/素材接口稳定后接入。
 
-不要等完整 Graphiti、全视频或 AEC 才开始验证互动；也不能用一组后台任务取代前台响应。每个功能 issue 的验收是该实现的完成条件，不是本次文档 PR 的运行门槛。
+不要等完整 Graphiti、全视频或 AEC 才开始验证互动；也不能用一组后台任务取代前台响应。每个功能 issue 的验收仍是运行效果完成条件，不由本次源码交付代替。
 
 ## 已有缺陷：复用原 issue，不重复建单
 
@@ -36,37 +36,39 @@
 | [#10 关闭声音设置丢最后编辑](https://github.com/JasonGuoo/esp-bot/issues/10) | 音量/静音等偏好必须可靠 | 独立修复；HC-11/15 复用权威状态回执 |
 | [#11 准备 TTS 进度未转发](https://github.com/JasonGuoo/esp-bot/issues/11) | “小呆在做什么”缺少真实阶段 | HC-06 明确依赖，不另建相同 bug |
 
-**本次设计 PR 不关闭以上 issue。** 后续各修复提交必须给出对应代码与有针对性的验证结果。
+**#7～#11 已有源码修正，状态为开发完成、待测试。** 对应变更见 [实施记录](implementation-2026-11-16.md)，仍保留原 issue 和待执行验证，未以文档或源码合并关闭。
 
 ## 工作分解与依赖
 
 | 编号 / issue 入口 | 开发范围 | 前置 | 阶段 |
 | --- | --- | --- | --- |
-| [HC-01](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-01%22) | [统一家庭、激活、任务与呈现契约](#hc-01) | 无 | A |
-| [HC-02](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-02%22) | [建立家庭日会话与可追溯原始记录](#hc-02) | [HC-01](#hc-01) | A |
-| [HC-03](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-03%22) | [Mac 并行执行 ASR 与说话人识别](#hc-03) | [HC-01](#hc-01)、[HC-02](#hc-02) | B |
-| [HC-04](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-04%22) | [OpenCode 家庭日连续上下文与 compact](#hc-04) | [HC-02](#hc-02)、[#9](https://github.com/JasonGuoo/esp-bot/issues/9) | B |
-| [HC-05](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-05%22) | [持久任务调度与取消、输出许可分离](#hc-05) | [HC-01](#hc-01)、[HC-02](#hc-02) | B |
-| [HC-06](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-06%22) | [本地应答、真实阶段播报与表情联动](#hc-06) | [HC-03](#hc-03)、[HC-05](#hc-05)、[#7](https://github.com/JasonGuoo/esp-bot/issues/7)、[#11](https://github.com/JasonGuoo/esp-bot/issues/11) | B |
-| [HC-07](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-07%22) | [语义呈现规划、不可变素材与交付回执](#hc-07) | [HC-01](#hc-01)、[HC-05](#hc-05) | C |
-| [HC-08](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-08%22) | [分段图文、音视频与设备有界同步播放](#hc-08) | [HC-06](#hc-06)、[HC-07](#hc-07) | C |
-| [HC-09](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-09%22) | [接入 Graphiti 可重建家庭知识索引](#hc-09) | [HC-02](#hc-02) | D |
-| [HC-10](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-10%22) | [后台整理家庭事件、话题、学习证据与长期记忆](#hc-10) | [HC-04](#hc-04)、[HC-09](#hc-09) | D |
-| [HC-11](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-11%22) | [Mac 家庭时间轴、声纹标注与来源检查](#hc-11) | [HC-02](#hc-02)、[HC-03](#hc-03)、[HC-05](#hc-05)、[HC-10](#hc-10) | D |
-| [HC-12](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-12%22) | [Mac 打印能力与幂等任务回执](#hc-12) | [HC-05](#hc-05)、[HC-07](#hc-07) | E |
-| [HC-13](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-13%22) | [多人说话分段、重叠与家庭身份归属](#hc-13) | [HC-02](#hc-02)、[HC-03](#hc-03) | F |
-| [HC-14](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-14%22) | [播放参考、AEC 与真正的语音打断](#hc-14) | [HC-03](#hc-03)、[HC-05](#hc-05)、[HC-06](#hc-06)、[HC-08](#hc-08) | F |
-| [HC-15](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-15%22) | [家庭陪伴完整场景与资源验收记录](#hc-15) | [HC-04](#hc-04)、[HC-06](#hc-06)、[HC-08](#hc-08)、[HC-10](#hc-10)、[HC-11](#hc-11)、[HC-12](#hc-12)、[#7](https://github.com/JasonGuoo/esp-bot/issues/7)、[#8](https://github.com/JasonGuoo/esp-bot/issues/8)、[#9](https://github.com/JasonGuoo/esp-bot/issues/9)、[#10](https://github.com/JasonGuoo/esp-bot/issues/10)、[#11](https://github.com/JasonGuoo/esp-bot/issues/11) | G |
+| [HC-01](https://github.com/JasonGuoo/esp-bot/issues/14) | [统一家庭、激活、任务与呈现契约](#hc-01) | 无 | A |
+| [HC-02](https://github.com/JasonGuoo/esp-bot/issues/15) | [建立家庭日会话与可追溯原始记录](#hc-02) | [HC-01](#hc-01) | A |
+| [HC-03](https://github.com/JasonGuoo/esp-bot/issues/16) | [Mac 并行执行 ASR 与说话人识别](#hc-03) | [HC-01](#hc-01)、[HC-02](#hc-02) | B |
+| [HC-04](https://github.com/JasonGuoo/esp-bot/issues/17) | [OpenCode 家庭日连续上下文与 compact](#hc-04) | [HC-02](#hc-02)、[#9](https://github.com/JasonGuoo/esp-bot/issues/9) | B |
+| [HC-05](https://github.com/JasonGuoo/esp-bot/issues/18) | [持久任务调度与取消、输出许可分离](#hc-05) | [HC-01](#hc-01)、[HC-02](#hc-02) | B |
+| [HC-06](https://github.com/JasonGuoo/esp-bot/issues/19) | [本地应答、真实阶段播报与表情联动](#hc-06) | [HC-03](#hc-03)、[HC-05](#hc-05)、[#7](https://github.com/JasonGuoo/esp-bot/issues/7)、[#11](https://github.com/JasonGuoo/esp-bot/issues/11) | B |
+| [HC-07](https://github.com/JasonGuoo/esp-bot/issues/20) | [语义呈现规划、不可变素材与交付回执](#hc-07) | [HC-01](#hc-01)、[HC-05](#hc-05) | C |
+| [HC-08](https://github.com/JasonGuoo/esp-bot/issues/21) | [分段图文、音视频与设备有界同步播放](#hc-08) | [HC-06](#hc-06)、[HC-07](#hc-07) | C |
+| [HC-09](https://github.com/JasonGuoo/esp-bot/issues/22) | [接入 Graphiti 可重建家庭知识索引](#hc-09) | [HC-02](#hc-02) | D |
+| [HC-10](https://github.com/JasonGuoo/esp-bot/issues/23) | [后台整理家庭事件、话题、学习证据与长期记忆](#hc-10) | [HC-04](#hc-04)、[HC-09](#hc-09) | D |
+| [HC-11](https://github.com/JasonGuoo/esp-bot/issues/24) | [Mac 家庭时间轴、声纹标注与来源检查](#hc-11) | [HC-02](#hc-02)、[HC-03](#hc-03)、[HC-05](#hc-05)、[HC-10](#hc-10) | D |
+| [HC-12](https://github.com/JasonGuoo/esp-bot/issues/25) | [Mac 打印能力与幂等任务回执](#hc-12) | [HC-05](#hc-05)、[HC-07](#hc-07) | E |
+| [HC-13](https://github.com/JasonGuoo/esp-bot/issues/26) | [多人说话分段、重叠与家庭身份归属](#hc-13) | [HC-02](#hc-02)、[HC-03](#hc-03) | F |
+| [HC-14](https://github.com/JasonGuoo/esp-bot/issues/27) | [播放参考、AEC 与真正的语音打断](#hc-14) | [HC-03](#hc-03)、[HC-05](#hc-05)、[HC-06](#hc-06)、[HC-08](#hc-08) | F |
+| [HC-15](https://github.com/JasonGuoo/esp-bot/issues/28) | [家庭陪伴完整场景与资源验收记录](#hc-15) | [HC-04](#hc-04)、[HC-06](#hc-06)、[HC-08](#hc-08)、[HC-10](#hc-10)、[HC-11](#hc-11)、[HC-12](#hc-12)、[#7](https://github.com/JasonGuoo/esp-bot/issues/7)、[#8](https://github.com/JasonGuoo/esp-bot/issues/8)、[#9](https://github.com/JasonGuoo/esp-bot/issues/9)、[#10](https://github.com/JasonGuoo/esp-bot/issues/10)、[#11](https://github.com/JasonGuoo/esp-bot/issues/11) | G |
 
 依赖没有把所有工作排成单一长队。HC-11 的时间轴/标注可先随 HC-02/03 交付，记忆审阅等最后接齐；HC-08 静态图文首版完成后即可参与基础验收，视频作为扩展能力单独记录；HC-13 的 UI 接入与 HC-11 协作，不要求等完整记忆 UI 才开始后端开发。
 
 ## HC-01
 
+**当前交付：开发完成，待测试。** 共享契约和协商接线完成；设备精确 wire 见固件接线记录。
+
 **统一家庭、激活、任务与呈现契约**
 
 **目标：** 先把家庭会话、输入授权、Mac 工作与设备输出分开，避免后续模块继续复用同一个 session/turn ID。
 
-**前置：** 无。**规格：** [设计说明](README.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-01%22)。
+**前置：** 无。**规格：** [设计说明](README.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues/14)。
 
 **代码/文档入口：** [docs/module-contracts.md](../../../docs/module-contracts.md) · [shared/mac-brain-v3.md](../../../shared/mac-brain-v3.md) · [server/bot-server/src-tauri/src/brain/gateway.rs](../../../server/bot-server/src-tauri/src/brain/gateway.rs) · [firmware/components/bot_runtime/include/bot_runtime.h](../../../firmware/components/bot_runtime/include/bot_runtime.h)。
 
@@ -89,11 +91,13 @@
 
 ## HC-02
 
+**当前交付：开发完成，待测试。** 家庭 SQLite 迁移、日记录、原文修订与来源 RPC 已接线；迁移/跨日实际执行待验收。
+
 **建立家庭日会话与可追溯原始记录**
 
 **目标：** 先可靠保存发生过的对话，再从这些记录派生摘要和记忆；参与者变化不再切断家庭上下文。
 
-**前置：** [HC-01](#hc-01)。**规格：** [设计说明](household-memory.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-02%22)。
+**前置：** [HC-01](#hc-01)。**规格：** [设计说明](household-memory.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues/15)。
 
 **代码/文档入口：** [server/bot-server/src-tauri/src/memory/schema.sql](../../../server/bot-server/src-tauri/src/memory/schema.sql) · [server/bot-server/src-tauri/src/memory/store.rs](../../../server/bot-server/src-tauri/src/memory/store.rs) · [server/bot-server/src-tauri/src/memory/types.rs](../../../server/bot-server/src-tauri/src/memory/types.rs) · [server/bot-server/src-tauri/src/brain/mod.rs](../../../server/bot-server/src-tauri/src/brain/mod.rs)。
 
@@ -116,11 +120,13 @@
 
 ## HC-03
 
+**当前交付：开发完成，待测试。** ASR/身份独立受管通道已接线；模型并发延迟和识别效果待实测。
+
 **Mac 并行执行 ASR 与说话人识别**
 
 **目标：** 普通问答的响应不再等待声纹；身份结论可稍后补充，并保持同一份音频的准确来源。
 
-**前置：** [HC-01](#hc-01)、[HC-02](#hc-02)。**规格：** [设计说明](device-and-audio.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-03%22)。HC-02/03 可并行开发，HC-03 完成集成前必须接入家庭来源与修订接口。
+**前置：** [HC-01](#hc-01)、[HC-02](#hc-02)。**规格：** [设计说明](device-and-audio.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues/16)。HC-02/03 可并行开发，HC-03 完成集成前必须接入家庭来源与修订接口。
 
 **代码/文档入口：** [server/bot-server/src-tauri/src/brain/mod.rs](../../../server/bot-server/src-tauri/src/brain/mod.rs) · [server/bot-server/src-tauri/src/brain/worker.rs](../../../server/bot-server/src-tauri/src/brain/worker.rs) · [server/bot-server/local-models/worker.py](../../../server/bot-server/local-models/worker.py) · [server/bot-server/src-tauri/src/brain/media.rs](../../../server/bot-server/src-tauri/src/brain/media.rs)。
 
@@ -143,11 +149,13 @@
 
 ## HC-04
 
+**当前交付：开发完成，待测试。** 家庭日会话、稳定指纹、原生 compact 持久核对和 inbox 归属已接线；OpenCode 实际运行待验收。
+
 **OpenCode 家庭日连续上下文与 compact**
 
 **目标：** 同一家庭当天能持续追问，同时允许上下文压缩、记忆更新与跨天主题延续。
 
-**前置：** [HC-02](#hc-02)、[#9](https://github.com/JasonGuoo/esp-bot/issues/9)。**规格：** [设计说明](household-memory.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-04%22)。
+**前置：** [HC-02](#hc-02)、[#9](https://github.com/JasonGuoo/esp-bot/issues/9)。**规格：** [设计说明](household-memory.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues/17)。
 
 **代码/文档入口：** [server/bot-server/src-tauri/src/harness/turn.rs](../../../server/bot-server/src-tauri/src/harness/turn.rs) · [server/bot-server/src-tauri/src/harness/mod.rs](../../../server/bot-server/src-tauri/src/harness/mod.rs) · [server/bot-server/src-tauri/src/brain/mod.rs](../../../server/bot-server/src-tauri/src/brain/mod.rs) · [docs/mac-opencode.md](../../../docs/mac-opencode.md)。
 
@@ -170,11 +178,13 @@
 
 ## HC-05
 
+**当前交付：开发完成，待测试。** 持久任务、事件、取消、补参恢复和输出许可分离已接线；重启恢复与外部效果待验收。
+
 **持久任务调度与取消、输出许可分离**
 
 **目标：** 搜索、画图、视频准备和打印等长工作能够持续，而机器人仍能听下一次请求和响应停止。
 
-**前置：** [HC-01](#hc-01)、[HC-02](#hc-02)。**规格：** [设计说明](presentation-and-tasks.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-05%22)。
+**前置：** [HC-01](#hc-01)、[HC-02](#hc-02)。**规格：** [设计说明](presentation-and-tasks.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues/18)。
 
 **代码/文档入口：** [server/bot-server/src-tauri/src/brain/mod.rs](../../../server/bot-server/src-tauri/src/brain/mod.rs) · [server/bot-server/src-tauri/src/brain/gateway.rs](../../../server/bot-server/src-tauri/src/brain/gateway.rs) · [server/bot-server/src-tauri/src/brain/rpc.rs](../../../server/bot-server/src-tauri/src/brain/rpc.rs) · [server/bot-server/src-tauri/src/harness/turn.rs](../../../server/bot-server/src-tauri/src/harness/turn.rs)。
 
@@ -197,11 +207,13 @@
 
 ## HC-06
 
+**当前交付：开发完成，待测试。** 播放 purpose、ACK/进度和实际阶段反馈已接线；播放节奏和停止待实板验收。
+
 **本地应答、真实阶段播报与表情联动**
 
 **目标：** 明确听到了，也让用户知道小呆正在做什么；中间短语音不会破坏正式回答的 token 或播放时序。
 
-**前置：** [HC-03](#hc-03)、[HC-05](#hc-05)、[#7](https://github.com/JasonGuoo/esp-bot/issues/7)、[#11](https://github.com/JasonGuoo/esp-bot/issues/11)。**规格：** [设计说明](presentation-and-tasks.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-06%22)。
+**前置：** [HC-03](#hc-03)、[HC-05](#hc-05)、[#7](https://github.com/JasonGuoo/esp-bot/issues/7)、[#11](https://github.com/JasonGuoo/esp-bot/issues/11)。**规格：** [设计说明](presentation-and-tasks.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues/19)。
 
 **代码/文档入口：** [firmware/components/bot_runtime/bot_runtime.c](../../../firmware/components/bot_runtime/bot_runtime.c) · [firmware/components/bot_responses](../../../firmware/components/bot_responses) · [firmware/main/wake_response_player.c](../../../firmware/main/wake_response_player.c) · [server/bot-server/src-tauri/src/brain/gateway.rs](../../../server/bot-server/src-tauri/src/brain/gateway.rs) · [server/bot-server/src/companion.ts](../../../server/bot-server/src/companion.ts)。
 
@@ -224,11 +236,13 @@
 
 ## HC-07
 
+**当前交付：开发完成，待测试。** 冻结计划、不可变资产、来源及实际回执已接线；额外创意生成适配仍按下述能力边界处理。
+
 **语义呈现规划、不可变素材与交付回执**
 
 **目标：** 让每次结果选择合适的语音、图文和表情组合，并能证明用户实际收到了哪些内容。
 
-**前置：** [HC-01](#hc-01)、[HC-05](#hc-05)。**规格：** [设计说明](presentation-and-tasks.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-07%22)。
+**前置：** [HC-01](#hc-01)、[HC-05](#hc-05)。**规格：** [设计说明](presentation-and-tasks.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues/20)。
 
 **代码/文档入口：** [server/bot-server/src-tauri/src/brain/scene.rs](../../../server/bot-server/src-tauri/src/brain/scene.rs) · [server/bot-server/src-tauri/src/brain/mod.rs](../../../server/bot-server/src-tauri/src/brain/mod.rs) · [server/bot-server/src-tauri/src/brain/display.rs](../../../server/bot-server/src-tauri/src/brain/display.rs) · [server/bot-server/src-tauri/src/brain/gateway.rs](../../../server/bot-server/src-tauri/src/brain/gateway.rs)。
 
@@ -239,7 +253,7 @@
 3. 解决 image_prepare 改写 speech 的时序：先冻结语义段与 revision，再并行 TTS/图片制作；修订必须产生新版本并取消旧派生物。
 4. 建立 immutable asset manifest，保存 digest、来源/生成方式、版本、可用终端、格式、字幕/时间轴和引用；同一素材可供设备、Mac、回忆和打印。
 5. 分开 planned/prepared/dispatched/displayed/audio-started/audio-completed/failed/cancelled 回执，均绑定计划版本和播放尝试；不把网络发送完成当作已看/已听。
-6. 必要视觉缺失时标 partial，并选择明确的文字/语音替代；精确笔顺、公式、图表采用可靠数据与确定性渲染。创意图生成 adapter 属于待开发范围，只调用已配置且通过能力检查的服务；未配置时采用检索、图解或明确降级。
+6. 必要视觉缺失时标 partial，并选择明确的文字/语音替代；精确笔顺、公式、图表采用可靠数据与确定性渲染。创意图生成仍是后续扩展：本轮提供确定性图解、受控素材和现有工具结果接入，不内置新的生成模型；只有已配置且通过能力检查的服务可用，未配置时采用检索、图解或明确降级。
 
 ### 验收条件
 
@@ -251,11 +265,13 @@
 
 ## HC-08
 
+**当前交付：开发完成，待测试。** 分段图文语音、媒体准备、JPEG 帧播放及 Mac 预览已接线；帧率、同步和资源预算均未实测。
+
 **分段图文、音视频与设备有界同步播放**
 
 **目标：** 优先把声音、清晰图文和表情一起送到用户面前，再按实测能力扩展动画和视频。
 
-**前置：** [HC-06](#hc-06)、[HC-07](#hc-07)。**规格：** [设计说明](presentation-and-tasks.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-08%22)。
+**前置：** [HC-06](#hc-06)、[HC-07](#hc-07)。**规格：** [设计说明](presentation-and-tasks.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues/21)。
 
 **代码/文档入口：** [server/bot-server/src-tauri/src/brain/display.rs](../../../server/bot-server/src-tauri/src/brain/display.rs) · [server/bot-server/src-tauri/src/brain/gateway.rs](../../../server/bot-server/src-tauri/src/brain/gateway.rs) · [firmware/components/brain_link](../../../firmware/components/brain_link) · [firmware/components/bot_audio](../../../firmware/components/bot_audio) · [firmware/components/face](../../../firmware/components/face)。
 
@@ -278,11 +294,13 @@
 
 ## HC-09
 
+**当前交付：开发完成，待测试。** Graphiti v0.31.2 sidecar、检索投影与重建已接线；尚未安装依赖或运行模型/图数据库评估。
+
 **接入 Graphiti 可重建家庭知识索引**
 
 **目标：** 复用成熟的时序实体/关系和检索能力，把权威来源留在现有宿主数据库。
 
-**前置：** [HC-02](#hc-02)。**规格：** [设计说明](household-memory.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-09%22)。
+**前置：** [HC-02](#hc-02)。**规格：** [设计说明](household-memory.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues/22)。
 
 **代码/文档入口：** [server/bot-server/src-tauri/src/memory](../../../server/bot-server/src-tauri/src/memory) · [server/bot-server/src-tauri/src/brain/memory_worker.rs](../../../server/bot-server/src-tauri/src/brain/memory_worker.rs) · [server/bot-server/local-models](../../../server/bot-server/local-models) · [docs/research/household-memory-open-source-2026-11-16.md](../../../docs/research/household-memory-open-source-2026-11-16.md)。
 
@@ -305,11 +323,13 @@
 
 ## HC-10
 
+**当前交付：开发完成，待测试。** 持久后台整理、事件/主题/学习证据及撤销传播已接线；真实抽取质量待验收。
+
 **后台整理家庭事件、话题、学习证据与长期记忆**
 
 **目标：** 在不拖慢前台互动的前提下，让当天共同经历变成可追溯、可纠错、可检索的家庭记忆。
 
-**前置：** [HC-04](#hc-04)、[HC-09](#hc-09)。**规格：** [设计说明](household-memory.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-10%22)。
+**前置：** [HC-04](#hc-04)、[HC-09](#hc-09)。**规格：** [设计说明](household-memory.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues/23)。
 
 **代码/文档入口：** [server/bot-server/src-tauri/src/brain/memory_worker.rs](../../../server/bot-server/src-tauri/src/brain/memory_worker.rs) · [server/bot-server/local-models/memory_extract.py](../../../server/bot-server/local-models/memory_extract.py) · [server/bot-server/src-tauri/src/memory/store.rs](../../../server/bot-server/src-tauri/src/memory/store.rs) · [server/bot-server/src-tauri/src/brain/mod.rs](../../../server/bot-server/src-tauri/src/brain/mod.rs)。
 
@@ -332,11 +352,13 @@
 
 ## HC-11
 
+**当前交付：开发完成，待测试。** 家庭时间轴、来源标注/纠错、记忆核对、任务/素材回看与成员合并 UI 已接线；Mac GUI 未运行。
+
 **Mac 家庭时间轴、声纹标注与来源检查**
 
 **目标：** 让用户在 bot-server 看清今天发生了什么、谁说了什么、哪些被记住，以及小呆实际完成了什么。
 
-**前置：** [HC-02](#hc-02)、[HC-03](#hc-03)、[HC-05](#hc-05)、[HC-10](#hc-10)。**规格：** [设计说明](household-memory.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-11%22)。
+**前置：** [HC-02](#hc-02)、[HC-03](#hc-03)、[HC-05](#hc-05)、[HC-10](#hc-10)。**规格：** [设计说明](household-memory.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues/24)。
 
 **代码/文档入口：** [server/bot-server/src/companion.ts](../../../server/bot-server/src/companion.ts) · [server/bot-server/src/companion.css](../../../server/bot-server/src/companion.css) · [server/bot-server/src-tauri/src/brain/rpc.rs](../../../server/bot-server/src-tauri/src/brain/rpc.rs) · [docs/mac-console-design.md](../../../docs/mac-console-design.md)。
 
@@ -359,11 +381,13 @@
 
 ## HC-12
 
+**当前交付：开发完成，待测试。** 不可变 PDF、幂等提交、CUPS/IPP 查询和 unknown 核对已接线；没有执行实际打印。
+
 **Mac 打印能力与幂等任务回执**
 
 **目标：** 把对话中的“打印这张”落实到确定素材、实际打印任务和可追踪结果，避免重复出纸或虚假成功。
 
-**前置：** [HC-05](#hc-05)、[HC-07](#hc-07)。**规格：** [设计说明](presentation-and-tasks.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-12%22)。
+**前置：** [HC-05](#hc-05)、[HC-07](#hc-07)。**规格：** [设计说明](presentation-and-tasks.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues/25)。
 
 **代码/文档入口：** [server/bot-server/src-tauri/src/brain/display.rs](../../../server/bot-server/src-tauri/src/brain/display.rs) · [server/bot-server/src-tauri/src/brain/rpc.rs](../../../server/bot-server/src-tauri/src/brain/rpc.rs) · [server/bot-server/src-tauri/src/harness/turn.rs](../../../server/bot-server/src-tauri/src/harness/turn.rs) · [server/bot-server/src/companion.ts](../../../server/bot-server/src/companion.ts)。
 
@@ -386,11 +410,13 @@
 
 ## HC-13
 
+**当前交付：开发完成，待测试。** 本地 pyannote Community-1 分段与 ECAPA 匹配已接线；模型未安装，小规模实录评估待执行。
+
 **多人说话分段、重叠与家庭身份归属**
 
 **目标：** 多人轮流或同时说话时保留可解释的参与者证据，避免把整段录音错误归给一个家庭成员。
 
-**前置：** [HC-02](#hc-02)、[HC-03](#hc-03)。**规格：** [设计说明](device-and-audio.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-13%22)。
+**前置：** [HC-02](#hc-02)、[HC-03](#hc-03)。**规格：** [设计说明](device-and-audio.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues/26)。
 
 **代码/文档入口：** [server/bot-server/local-models/worker.py](../../../server/bot-server/local-models/worker.py) · [server/bot-server/src-tauri/src/brain/media.rs](../../../server/bot-server/src-tauri/src/brain/media.rs) · [server/bot-server/src-tauri/src/memory/store.rs](../../../server/bot-server/src-tauri/src/memory/store.rs)。
 
@@ -412,11 +438,13 @@
 
 ## HC-14
 
+**当前交付：开发完成，待测试。** 单 codec 实际 DAC 参考、AFE 门控和语音打断已接线；两个开关默认关闭，声学测量尚未执行。
+
 **播放参考、AEC 与真正的语音打断**
 
 **目标：** 在实际喇叭播放中能可靠听到用户打断，保留触摸停止与当前半双工回退。
 
-**前置：** [HC-03](#hc-03)、[HC-05](#hc-05)、[HC-06](#hc-06)、[HC-08](#hc-08)。**规格：** [设计说明](device-and-audio.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-14%22)。
+**前置：** [HC-03](#hc-03)、[HC-05](#hc-05)、[HC-06](#hc-06)、[HC-08](#hc-08)。**规格：** [设计说明](device-and-audio.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues/27)。
 
 **代码/文档入口：** [firmware/components/bot_audio/bot_audio_afe.c](../../../firmware/components/bot_audio/bot_audio_afe.c) · [firmware/components/bot_audio/bot_audio.c](../../../firmware/components/bot_audio/bot_audio.c) · [firmware/components/bot_runtime/bot_runtime.c](../../../firmware/components/bot_runtime/bot_runtime.c) · [server/bot-server/src-tauri/src/brain/media.rs](../../../server/bot-server/src-tauri/src/brain/media.rs)。
 
@@ -438,11 +466,13 @@
 
 ## HC-15
 
+**当前交付：开发完成，待测试。** 18 个手工场景、记录与导出入口完成；所有运行场景保持待执行，未生成通过结论。
+
 **家庭陪伴完整场景与资源验收记录**
 
 **目标：** 验证用户最终得到连续、有记忆、能呈现也能做事的体验，并明确基础能力与扩展能力的实际边界。
 
-**前置：** [HC-04](#hc-04)、[HC-06](#hc-06)、[HC-08](#hc-08)、[HC-10](#hc-10)、[HC-11](#hc-11)、[HC-12](#hc-12)、[#7](https://github.com/JasonGuoo/esp-bot/issues/7)、[#8](https://github.com/JasonGuoo/esp-bot/issues/8)、[#9](https://github.com/JasonGuoo/esp-bot/issues/9)、[#10](https://github.com/JasonGuoo/esp-bot/issues/10)、[#11](https://github.com/JasonGuoo/esp-bot/issues/11)。**规格：** [设计说明](README.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-15%22)。
+**前置：** [HC-04](#hc-04)、[HC-06](#hc-06)、[HC-08](#hc-08)、[HC-10](#hc-10)、[HC-11](#hc-11)、[HC-12](#hc-12)、[#7](https://github.com/JasonGuoo/esp-bot/issues/7)、[#8](https://github.com/JasonGuoo/esp-bot/issues/8)、[#9](https://github.com/JasonGuoo/esp-bot/issues/9)、[#10](https://github.com/JasonGuoo/esp-bot/issues/10)、[#11](https://github.com/JasonGuoo/esp-bot/issues/11)。**规格：** [设计说明](README.md)。**跟踪：** [对应 issue](https://github.com/JasonGuoo/esp-bot/issues/28)。
 
 **代码/文档入口：** [docs/specs/household-companion](../../../docs/specs/household-companion) · [docs/review-acceptance-2026-11-15.md](../../../docs/review-acceptance-2026-11-15.md) · [docs/specs/server-voice-tasks/acceptance.md](../../../docs/specs/server-voice-tasks/acceptance.md)。
 
@@ -461,7 +491,7 @@
 - 既有 #7～#11 通过各自代码变更解决；文档合并本身不视为修复。
 - 交付明确区分源码完成、构建通过、本机执行与实板验收；不新增 CI，不用模拟输出冒充物理效果。
 
-**交付边界：** 基于实际开发版本的验收记录与残留问题；不能在纯设计 PR 中勾选完成。
+**交付边界：** 本轮完成场景定义、手工记录/导出和状态接口，实际执行与残留问题记录仍待用户环境验收；不能因源码 PR 合并勾选通过。
 
 ## 结束条件与后续维护
 

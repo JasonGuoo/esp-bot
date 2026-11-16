@@ -107,6 +107,32 @@ config BOT_AUDIO_PLAYBACK_TAIL_MS
         this tail. PCM uplink is also withheld. Intentional
         touch/local stop can always cancel playback. Not a substitute for AEC.
 
+config BOT_AUDIO_HARDWARE_REFERENCE_AEC
+    bool "Use the S31 ES8389 synchronous MRMN playback reference for ESP-SR AEC"
+    depends on IDF_TARGET_ESP32S31
+    default n
+    help
+        Reads all four 16-bit 16-kHz TDM slots using the existing single codec
+        owner. Slot 1 is the hardware DAC reference (official GMF S31 MRMN
+        layout), slots 0/2 are microphones. The complete same-frame buffer is
+        fed to ESP-SR AFE; no timestamped software FIFO pretends to be aligned.
+        Allocation/format failures fall back to the existing half-duplex path.
+        This is source integration, not a claim of measured acoustic quality.
+        Do not enable in a release until the exact board and speaker have passed
+        echo suppression, double-talk, silence, volume, drift and cancel tests.
+
+config BOT_AUDIO_AEC_BARGE_IN
+    bool "Allow locally detected AEC residual speech to interrupt a reply"
+    depends on BOT_AUDIO_HARDWARE_REFERENCE_AEC
+    default n
+    help
+        After a real playback operation and stable, unclipped hardware reference,
+        sustained speech in AFE output emits a token-bound local interruption.
+        Missing/stale/clipped reference closes this path immediately. PCM upload
+        remains gated during playback; a new token and RX/AFE fence are required
+        after interruption. No pre-wake or old-token onset is retransmitted.
+        Default off until real-board double-talk/false-interruption validation.
+
 config BOT_AUDIO_PLAYBACK_QUEUE_FRAMES
     int "Bounded playback queue capacity (20 ms frames)"
     range 4 32

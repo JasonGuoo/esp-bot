@@ -1,0 +1,4 @@
+# Optional operator-installed adapter. Runtime never installs dependencies/models.
+# Install alongside the local worker requirements in a compatible environment.
+pyannote.audio>=4.0.0,<5
+# Community-1 model access/license acceptance and a complete offline snapshot are required.

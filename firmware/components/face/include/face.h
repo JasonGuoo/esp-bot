@@ -42,6 +42,8 @@ void face_set_subtitle(face_view_t *view, const char *text);
 /** Show the current text reply in a scrollable view. Call with an empty string
  * when the reply is no longer current. Must be called under the display lock. */
 void face_set_result_text(face_view_t *view, const char *text);
+/** A leased media segment may have no text; keep its panel available for JPEG. */
+void face_set_result_segment(face_view_t *view, const char *text);
 /** Fixed status lines above the scrollable answer. They never replace its text
  * or image, and remain visible while the person scrolls through the result. */
 void face_set_result_status(face_view_t *view, const char *status, const char *image_notice);

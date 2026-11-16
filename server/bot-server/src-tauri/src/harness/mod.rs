@@ -10,6 +10,7 @@ mod config;
 mod http;
 mod routing;
 mod turn;
+mod compaction;
 pub(crate) mod secrets;
 
 pub use config::{HarnessConfig, ModelRoute, SOURCE_VERSION};
@@ -27,7 +28,7 @@ use std::{
 use reqwest::{Client, Method};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::{process::{Child, Command}, sync::{watch, Mutex}, time::Instant};
+use tokio::{process::{Child, Command}, sync::{watch, Mutex, RwLock as AsyncRwLock, Semaphore}, time::Instant};
 use uuid::Uuid;
 
 use config::AGENT_ID;
@@ -87,6 +88,8 @@ pub struct TurnRequest {
     pub response_schema: Option<Value>,
     #[serde(default)]
     pub clarify_on_device: bool,
+    /// Stable persona/schema/policy revision; retrieval ordering is deliberately excluded.
+    #[serde(default)] pub context_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -122,6 +125,13 @@ struct Conversation {
     delete_pending: bool,
     context_fingerprint: String,
     abandoned: bool,
+    completed_turns: u64,
+    compacted_through: u64,
+    compact_pending: bool,
+    compact_message_id: Option<String>,
+    compact_target: u64,
+    compact_context_digest: Option<String>,
+    compacted_at_ms: Option<u64>,
 }
 
 struct ActiveTurn {
@@ -183,7 +193,9 @@ pub struct Harness {
     version: RwLock<Option<String>>,
     last_error: RwLock<Option<String>>,
     // One active conversation turn keeps quota use and provider failover bounded.
-    turn_gate: Mutex<()>,
+    turn_gate: AsyncRwLock<()>,
+    conversation_gates: StdMutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
+    turn_slots: Semaphore,
     active: StdMutex<HashMap<String, Arc<ActiveTurn>>>,
     pending_permissions: StdMutex<BTreeMap<String, Value>>,
     pending_questions: StdMutex<BTreeMap<String, Value>>,
@@ -221,6 +233,7 @@ impl TurnGuard<'_> {
                 let mut sessions = self.harness.sessions.lock().map_err(|_| "opencode_state: ledger lock")?;
                 if let Some(record) = sessions.conversations.get_mut(&self.active.conversation_id) {
                     record.abandoned = false;
+                    record.completed_turns = record.completed_turns.saturating_add(1);
                     if let Err(error) = write_state(&self.harness.data_dir.join("sessions.json"), &*sessions) {
                         if let Some(record) = sessions.conversations.get_mut(&self.active.conversation_id) { record.abandoned = true; }
                         return Err(error);
@@ -267,6 +280,17 @@ impl Drop for TurnGuard<'_> {
 }
 
 impl Harness {
+    fn conversation_gate(&self, id: &str) -> Result<Arc<Mutex<()>>, String> {
+        let mut gates = self.conversation_gates.lock().map_err(|_| "opencode_state: conversation gate")?;
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(id).and_then(std::sync::Weak::upgrade) { return Ok(gate); }
+        let gate = Arc::new(Mutex::new(()));
+        gates.insert(id.to_owned(), Arc::downgrade(&gate));
+        Ok(gate)
+    }
+    pub fn conversation_ids(&self) -> Result<Vec<String>, String> {
+        Ok(self.sessions.lock().map_err(|_| "opencode_state: ledger lock")?.conversations.keys().cloned().collect())
+    }
     pub(crate) fn workspace(&self) -> &std::path::Path { &self.workspace }
     /// Creates state, not a subprocess. Starting models remains a console action.
     pub fn new(config: HarnessConfig, data_dir: PathBuf, data_root: PathBuf, sink: HarnessEventSink) -> Result<Arc<Self>, String> {
@@ -302,7 +326,7 @@ impl Harness {
             process: Mutex::new(None), ready: AtomicBool::new(false),
             credential_envs: RwLock::new(BTreeSet::new()),
             password: RwLock::new(String::new()), version: RwLock::new(None), last_error: RwLock::new(None),
-            turn_gate: Mutex::new(()), active: StdMutex::new(HashMap::new()),
+            turn_gate: AsyncRwLock::new(()), conversation_gates: StdMutex::new(HashMap::new()), turn_slots: Semaphore::new(3), active: StdMutex::new(HashMap::new()),
             pending_permissions: StdMutex::new(BTreeMap::new()),
             pending_questions: StdMutex::new(BTreeMap::new()),
             sessions: StdMutex::new(sessions), routing: StdMutex::new(routing), sink,
@@ -533,7 +557,10 @@ impl Harness {
     pub async fn run(&self, request: TurnRequest) -> Result<HarnessReply, String> {
         validate_turn(&request)?;
         if !self.ready.load(Ordering::Acquire) { return Err("opencode_not_started: start the harness first".into()); }
-        let _gate = self.turn_gate.try_lock().map_err(|_| "opencode_busy: another turn is active")?;
+        let _gate = self.turn_gate.read().await;
+        let conversation_gate = self.conversation_gate(&request.conversation_id)?;
+        let _conversation = tokio::time::timeout(Duration::from_millis(self.config.turn_timeout_ms),conversation_gate.lock()).await.map_err(|_| "opencode_conversation_queue_timeout")?;
+        let _slot = self.turn_slots.try_acquire().map_err(|_| "opencode_capacity_exceeded")?;
         let (cancel, mut cancel_rx) = watch::channel(false);
         let active = Arc::new(ActiveTurn {
             conversation_id: request.conversation_id.clone(), session_id: StdMutex::new(None), cancel,
@@ -670,7 +697,7 @@ impl Harness {
         let turns = self.active.lock().map_err(|_| "opencode_state: active lock")?.iter()
             .filter(|(_, turn)| turn.conversation_id == conversation_id).map(|(id, _)| id.clone()).collect::<Vec<_>>();
         for id in turns { self.cancel(&id).await?; }
-        let _gate = tokio::time::timeout(Duration::from_secs(30), self.turn_gate.lock()).await
+        let _gate = tokio::time::timeout(Duration::from_secs(30), self.turn_gate.write()).await
             .map_err(|_| "opencode_busy: turn cleanup has not completed")?;
         let roots = {
             let mut ledger = self.sessions.lock().map_err(|_| "opencode_state: ledger lock")?;

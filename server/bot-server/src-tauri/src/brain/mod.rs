@@ -12,11 +12,18 @@ mod display;
 mod memory_worker;
 mod rpc;
 mod timing;
+pub mod contracts;
+pub mod tasks;
+pub mod presentation;
+pub mod artifacts;
+mod capabilities;
+mod orchestration;
+mod acceptance;
 
-use std::{path::PathBuf, sync::{Arc, Mutex as StdMutex, RwLock, atomic::{AtomicBool, Ordering}}, time::Instant};
+use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex as StdMutex, RwLock, atomic::{AtomicBool, Ordering}}, time::Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::{broadcast, watch, Mutex};
+use tokio::sync::{broadcast, watch, Mutex, RwLock as AsyncRwLock};
 use crate::{harness::{Harness, TurnRequest}, memory::{self, Store}};
 use settings::BrainConfig;
 use worker::ModelWorker;
@@ -35,6 +42,9 @@ pub struct TurnInput {
     /// Only trusted console callers may set a profile. Recognition never sets it.
     #[serde(default)] pub profile_id: Option<String>,
     #[serde(default)] pub speak: Option<bool>,
+    /// Console attribution is an observation; private scope remains explicit above.
+    #[serde(default)] pub speaker_person_id: Option<String>,
+    #[serde(default)] pub utterance_id: Option<String>,
     #[serde(skip)] pub(crate) device_display: bool,
 }
 
@@ -51,6 +61,10 @@ pub struct TurnOutput {
     pub identity_candidate: Option<Value>,
     pub warnings: Vec<String>,
     pub timings: TurnTimings,
+    pub journal: memory::JournalReceipt,
+    pub presentation: presentation::PresentationPlan,
+    pub task_ids: Vec<String>,
+    #[serde(skip)] pub(crate) prepared_segments: Vec<orchestration::PreparedSegment>,
     #[serde(skip)] pub(crate) tts_calls: u8,
     #[serde(skip)] pub(crate) display_image: Option<display::PreparedImage>,
     #[serde(skip)] pub(crate) device_outcome: String,
@@ -109,10 +123,10 @@ struct TurnLease<'a> { brain: &'a Brain, id: String, completed: bool }
 impl Drop for TurnLease<'_> {
     fn drop(&mut self) {
         if let Ok(mut active) = self.brain.active.lock() {
-            if active.as_ref().is_some_and(|turn|turn.id==self.id) { *active=None; }
+            active.remove(&self.id);
         }
         if !self.completed {
-            self.brain.models.cancel_current();
+            let _ = self.brain.memory.journal_finish(&self.id, "cancelled", None, json!({"reason":"request_dropped"}));
             let harness=Arc::clone(&self.brain.harness); let id=self.id.clone();
             tauri::async_runtime::spawn(async move {let _=harness.cancel(&id).await;});
         }
@@ -127,8 +141,13 @@ pub struct Brain {
     pub memory: Arc<Store>,
     pub credentials: Arc<credentials::Credentials>,
     sink: EventSink,
-    turn_gate: Mutex<()>,
-    active: StdMutex<Option<ActiveTurn>>,
+    turn_gate: AsyncRwLock<()>,
+    active: StdMutex<HashMap<String, ActiveTurn>>,
+    identity_jobs: StdMutex<HashMap<String, tokio::task::JoinHandle<()>>>,
+    pub tasks: Arc<tasks::TaskService>,
+    device_states: StdMutex<HashMap<String,Value>>,
+    progress_audio: Mutex<HashMap<String,Value>>,
+    pub(super) graphiti: Arc<memory::graphiti::GraphitiClient>,
     accepting: AtomicBool,
     cancellation_events: broadcast::Sender<Cancellation>,
     progress_events: broadcast::Sender<Value>,
@@ -141,6 +160,7 @@ pub struct Brain {
 impl Brain {
     fn new(config_dir: PathBuf, worker_resource: Option<PathBuf>, sink: EventSink) -> Result<Arc<Self>, String> {
         let memory_script = worker_resource.as_ref().and_then(|p|p.parent()).map(|p|p.join("memory_extract.py")).filter(|p|p.is_file());
+        let graphiti_script=worker_resource.as_ref().and_then(|p|p.parent()).map(|p|p.join("graphiti_worker.py")).unwrap_or_else(||config_dir.join("engines/local-models/graphiti_worker.py"));
         let config = settings::load_or_create(&config_dir, worker_resource)?;
         let runtime_dir = config_dir.join("runtime");
         settings::private_dir(&runtime_dir)?;
@@ -149,12 +169,9 @@ impl Brain {
         let sink: EventSink = Arc::new(move |event| {
             let kind = event["kind"].as_str().unwrap_or("");
             if matches!(kind, "turn.transcribing" | "turn.understood" | "turn.thinking"
-                | "turn.preparing_image" | "harness_tool_activity" | "harness_permission_required"
+                | "turn.preparing_image" | "turn.synthesizing" | "task.accepted" | "task.progress" | "task.state" | "harness_tool_activity" | "harness_permission_required"
                 | "harness_permission_replied" | "harness_question_required") {
-                let _ = progress.send(json!({
-                    "kind":kind, "turn_id":event["turn_id"],
-                    "phase":event["phase"], "preview":event["payload"]["preview"]
-                }));
+                let _ = progress.send(event.clone());
             }
             sink(event);
         });
@@ -163,9 +180,13 @@ impl Brain {
         let credentials = credentials::Credentials::open(runtime_dir.join("devices"))?;
         let (cancellation_events, _) = broadcast::channel(64);
         let (foreground_generation, _) = watch::channel(0);
-        Ok(Arc::new(Self { models: ModelWorker::new(config.models.clone(), config_dir.clone()), config, config_dir,
-            harness, memory, credentials, sink, turn_gate:Mutex::new(()), active:StdMutex::new(None), accepting:AtomicBool::new(false),
-            cancellation_events, progress_events, foreground_generation, background:Mutex::new(None), memory_script, gateway:Mutex::new(None) }))
+        let tasks = tasks::TaskService::open(runtime_dir.join("tasks"), config.tasks.clone(), Arc::clone(&sink))?;
+        let graphiti=Arc::new(memory::graphiti::GraphitiClient::new(&config.memory.graphiti,graphiti_script));
+        let brain = Arc::new(Self { models: ModelWorker::new(config.models.clone(), config_dir.clone()), config, config_dir,
+            harness, memory, credentials, sink, turn_gate:AsyncRwLock::new(()), active:StdMutex::new(HashMap::new()), identity_jobs:StdMutex::new(HashMap::new()), tasks, device_states:StdMutex::new(HashMap::new()), progress_audio:Mutex::new(HashMap::new()), graphiti, accepting:AtomicBool::new(false),
+            cancellation_events, progress_events, foreground_generation, background:Mutex::new(None), memory_script, gateway:Mutex::new(None) });
+        brain.install_task_handlers()?;
+        Ok(brain)
     }
 
     pub async fn start(self: &Arc<Self>) -> Result<Value, String> {
@@ -181,6 +202,7 @@ impl Brain {
             Ok(harness) => harness,
             Err(error) => { self.accepting.store(false, Ordering::Release); return Err(error); }
         };
+        self.tasks.start().await?;
         self.accepting.store(true,Ordering::Release);
         if self.memory.retry_failed_memory_jobs().is_err() {
             self.emit("memory.retry_unavailable", None, json!({}));
@@ -197,8 +219,10 @@ impl Brain {
         self.accepting.store(false,Ordering::Release);
         if let Some(task)=self.background.lock().await.take() {task.abort();}
         let cancellation = self.cancel(None).await;
-        let _turn = self.turn_gate.lock().await;
+        let _turn = self.turn_gate.write().await;
         if let Some(gateway) = self.gateway.lock().await.take() { gateway.stop().await; }
+        self.graphiti.stop().await;
+        self.tasks.stop().await;
         self.models.stop().await;
         let stopped = self.harness.stop().await;
         self.emit("service.stopped", None, json!({}));
@@ -206,17 +230,27 @@ impl Brain {
     }
 
     pub async fn status(&self) -> Value {
-        let active = self.active.lock().ok().and_then(|v|v.as_ref().map(|a|a.id.clone()));
+        let active = self.active.lock().map(|v|v.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
         let gateway = self.gateway.lock().await.as_ref().map(|g|g.status());
         let memory_model=self.config_dir.join("models/memory-qwen3-4b");
         let memory_ready=self.memory_script.as_ref().is_some_and(|p|p.is_file()) &&
             ["config.json","model.safetensors","chat_template.jinja"].iter().all(|name|memory_model.join(name).is_file());
-        json!({"ready":true,"accepting_turns":self.accepting.load(Ordering::Acquire),"active_turn":active,"harness":self.harness.status().await,
+        let task_states=self.tasks.list(None,None,50).unwrap_or_default().into_iter().map(|task|json!({"task_id":task.task_id,"capability":task.capability,"state":task.state,"stage":task.stage})).collect::<Vec<_>>();
+        json!({"ready":true,"accepting_turns":self.accepting.load(Ordering::Acquire),"active_turn":active.first(),"active_turns":active,"tasks":task_states,"contract":contracts::capabilities(),"harness":self.harness.status().await,
             "models_configured":self.models.configured(),"memory":self.memory.status().unwrap_or_else(|e|json!({"error":e})),
             "background_memory_model_ready":memory_ready,
+            "device_activity":self.device_states.lock().map(|s|s.values().cloned().collect::<Vec<_>>()).unwrap_or_default(),
             "gateway":gateway,"gateway_enabled":self.config.gateway.enabled,
             "config_path":self.config_dir.join("brain.json"),"legacy_lan_is_authenticated":false,
             "device_media_requires_v3":true})
+    }
+
+    pub(crate) fn device_activity(&self, device_id:&str, mut state:Value) {
+        state["device_id"]=json!(device_id);
+        let changed=if let Ok(mut states)=self.device_states.lock(){
+            if states.get(device_id)==Some(&state){false}else{states.insert(device_id.into(),state.clone());true}
+        }else{false};
+        if changed{self.emit("device.activity",state["turn_id"].as_str(),state.clone());}
     }
 
     pub fn emit(&self, kind: &str, turn_id: Option<&str>, payload: Value) {
@@ -232,18 +266,21 @@ impl Brain {
         let cancellation = Cancellation {scope, reason};
         // Audio delivery can outlive inference; its owner must see Stop too.
         let _ = self.cancellation_events.send(cancellation.clone());
-        let id = {
+        let ids = {
             let active = self.active.lock().map_err(|_|"brain_state_poisoned")?;
-            if let Some(active) = active.as_ref().filter(|a|cancellation.matches_turn(&a.id, Some(&a.conversation_id))) {
-                active.cancelled.send_replace(true);
-                Some(active.id.clone())
-            } else { None }
+            active.values().filter(|a|cancellation.matches_turn(&a.id,Some(&a.conversation_id)))
+                .map(|a|{a.cancelled.send_replace(true); a.id.clone()}).collect::<Vec<_>>()
         };
-        if matches!(cancellation.scope, CancelScope::All) { self.models.cancel_current(); }
-        if let Some(id) = id {
+        if matches!(cancellation.scope, CancelScope::All) {
+            self.foreground_generation.send_modify(|value|*value=value.wrapping_add(1));
             self.models.cancel_current();
-            let result = self.harness.cancel(&id).await;
-            self.emit("turn.cancelled", Some(&id), json!({"code":reason}));
+            self.graphiti.stop().await;
+            if let Ok(mut jobs)=self.identity_jobs.lock(){for (_,job) in jobs.drain(){job.abort();}}
+            self.tasks.revoke_outputs(None)?;
+        } else if let CancelScope::DeviceSession(id)=&cancellation.scope { self.tasks.revoke_outputs(Some(id))?; }
+        for id in ids {
+            let result=self.harness.cancel(&id).await;
+            self.emit("turn.cancelled",Some(&id),json!({"code":reason}));
             result?;
         }
         Ok(())
@@ -253,6 +290,8 @@ impl Brain {
 
     fn progress(&self) -> broadcast::Receiver<Value> { self.progress_events.subscribe() }
 
+    pub fn foreground_busy(&self) -> bool { self.active.lock().map(|a|!a.is_empty()).unwrap_or(true) }
+
     pub async fn turn(self: &Arc<Self>, input: TurnInput, trusted_console: bool) -> Result<TurnOutput, String> {
         if !self.accepting.load(Ordering::Acquire) { return Err("brain_not_started: start the service from the console".into()); }
         if !valid_turn_id(&input.turn_id) || !valid_turn_id(&input.conversation_id) { return Err("turn_or_conversation_id_invalid".into()); }
@@ -260,12 +299,17 @@ impl Brain {
         if input.text.is_some() == input.wav_base64.is_some() { return Err("provide_exactly_one_text_or_audio_input".into()); }
         if input.text.as_ref().is_some_and(|v|v.trim().is_empty() || v.chars().count() > 4000) { return Err("text_must_be_1_to_4000_characters".into()); }
         if input.wav_base64.as_ref().is_some_and(|v|v.len() > 1_300_000) { return Err("audio_input_limit_30_seconds".into()); }
-        let _gate = self.turn_gate.try_lock().map_err(|_|"brain_busy: stop the current turn first")?;
+        let _gate = self.turn_gate.read().await;
         if !self.accepting.load(Ordering::Acquire) { return Err("brain_stopping".into()); }
         self.foreground_generation.send_modify(|value|*value=value.wrapping_add(1));
         let (cancelled, mut cancellation) = watch::channel(false);
-        *self.active.lock().map_err(|_|"brain_state_poisoned")? = Some(ActiveTurn {
-            id:input.turn_id.clone(), conversation_id:input.conversation_id.clone(), cancelled });
+        {
+            let mut active=self.active.lock().map_err(|_|"brain_state_poisoned")?;
+            if active.len()>=8 {return Err("brain_capacity_exceeded".into());}
+            if active.contains_key(&input.turn_id) {return Err("duplicate_turn".into());}
+            if active.values().any(|a|a.conversation_id==input.conversation_id) {return Err("activation_busy".into());}
+            active.insert(input.turn_id.clone(),ActiveTurn {id:input.turn_id.clone(),conversation_id:input.conversation_id.clone(),cancelled});
+        }
         let mut lease = TurnLease {brain:self,id:input.turn_id.clone(),completed:false};
         let started = Instant::now();
         self.emit("turn.started", Some(&input.turn_id), json!({"input":if input.text.is_some(){"text"}else{"audio"}}));
@@ -273,167 +317,14 @@ impl Brain {
             result = self.execute(&input, trusted_console) => result,
             _ = cancellation.changed() => Err("cancelled".into()),
         };
-        if let Ok(mut active) = self.active.lock() { *active = None; }
+        if let Ok(mut active) = self.active.lock() { active.remove(&input.turn_id); }
+        if let Err(error)=&result {let _=self.memory.journal_finish(&input.turn_id,if error.contains("cancelled"){"cancelled"}else{"failed"},None,json!({"error":error.split(':').next()}));}
         lease.completed=true;
         self.emit(if result.is_ok(){"turn.completed"}else{"turn.failed"}, Some(&input.turn_id),
             json!({"error":result.as_ref().err().map(|e|e.split(':').next().unwrap_or("turn_failed")),
                 "elapsed_ms":started.elapsed().as_millis() as u64,
                 "timings":result.as_ref().ok().map(|output|&output.timings)}));
         result
-    }
-
-    async fn execute(&self, input: &TurnInput, trusted_console: bool) -> Result<TurnOutput, String> {
-        let started = Instant::now();
-        let mut timings = TurnTimings::default();
-        // Keep short durable writes inside the turn gate, with no detached
-        // spawn_blocking closure that could recreate metadata after Forget.
-        self.timed_stage(&input.turn_id, "memory_register", &mut timings, async {
-            self.memory.register_conversation(&input.conversation_id, input.profile_id.as_deref())
-        }).await?;
-        let mut warnings = Vec::new();
-        let (transcript, identity_candidate) = if let Some(wav) = input.wav_base64.as_ref() {
-            self.emit("turn.transcribing", Some(&input.turn_id), json!({}));
-            let result = self.timed_stage(&input.turn_id, "asr", &mut timings,
-                self.models.call("transcribe", json!({"wav_base64":wav,"language":"zh"}))).await?;
-            timings.input_audio_ms = result.pointer("/quality/duration_ms").and_then(Value::as_u64);
-            let text = result.get("text").and_then(Value::as_str).unwrap_or("").trim().to_owned();
-            if text.is_empty() { return Err("asr_no_speech".into()); }
-            if text.chars().count() > 4000 { return Err("asr_transcript_too_long".into()); }
-            let preview: String = text.chars().take(80).collect();
-            self.emit("turn.understood",Some(&input.turn_id),json!({"preview":preview}));
-            // Matching cannot select a profile or change this turn's memory.
-            // Do not load ECAPA for an empty enrollment store or a sample the
-            // existing worker's three-second quality gate would reject.
-            let skip_identity = if timings.input_audio_ms.is_some_and(|duration|duration < 3_000) {
-                Some("audio_under_3_seconds")
-            } else {
-                match self.memory.has_enrollment(memory::IdentityKind::Speaker) {
-                    Ok(true) => None,
-                    Ok(false) => Some("no_enrolled_speakers"),
-                    Err(error) => {
-                        warnings.push(format!("speaker_identification_unavailable: {error}"));
-                        Some("enrollment_lookup_failed")
-                    }
-                }
-            };
-            let identity = if let Some(reason) = skip_identity {
-                self.skip_stage(&input.turn_id, "speaker_identification", reason, &mut timings);
-                None
-            } else {
-                match self.timed_stage(&input.turn_id, "speaker_identification", &mut timings,
-                    self.identify_media(memory::IdentityKind::Speaker, json!({"wav_base64":wav}))).await {
-                    Ok(result) => Some(result),
-                    Err(error) => { warnings.push(format!("speaker_identification_unavailable: {error}")); None }
-                }
-            };
-            (text, identity)
-        } else {
-            self.skip_stage(&input.turn_id, "asr", "text_input", &mut timings);
-            self.skip_stage(&input.turn_id, "speaker_identification", "text_input", &mut timings);
-            (input.text.clone().unwrap_or_default().trim().to_owned(), None)
-        };
-
-        if let Err(error)=self.timed_stage(&input.turn_id, "memory_enqueue", &mut timings, async {
-            self.memory.enqueue_memory_job(&input.turn_id,&input.conversation_id,input.profile_id.as_deref(),&transcript)
-        }).await {
-            warnings.push(format!("background_memory_queue_failed: {error}"));
-        }
-        let memory = Arc::clone(&self.memory);
-        let request = memory::ContextRequest { profile_id:input.profile_id.clone(), profile_confirmed:trusted_console && input.profile_id.is_some(),
-            // Every configured plan can route to a cloud model; never include local-only notes.
-            destination:memory::ContextDestination::Cloud, query:transcript.clone(), include_household:true };
-        let context = self.timed_stage(&input.turn_id, "memory_context", &mut timings, async move {
-            tokio::task::spawn_blocking(move || memory.context(request)).await.map_err(|_|"memory_task_failed".to_owned())?
-        }).await?;
-        self.emit("turn.thinking", Some(&input.turn_id), json!({"memory_count":context.memory_ids.len()}));
-        let mut prompt=scene::system_prompt(&self.config.conversation.language, &context.text);
-        if input.device_display {
-            prompt.push_str("\n当用户要求看已有图片时，先用工具找到准确文件路径或 HTTPS 图片地址，在 visual 填 photo 和 source，图片字节由宿主处理。用户要求比较图时，先读资料，在 visual 填 bars、unit 和两项 series。无图片请求时 visual.kind 为 none。无关字段用 null 或空数组。直接回答用 outcome=answered，已经通过工具完成操作用 done，需补充信息用 needs_input，未能完成用 partial。effect 填 none、read、write 或 other，按用户实际要求选择。");
-            prompt.push_str("\n追问沿用本次对话的上下文。若“那个”等指代有多个合理对象，把一句简短问题直接放在 speech 中，按用户的原称呼列出候选。小呆会显示问题，用户用下一句语音选择。等待选择前不要查找或猜测文件。此轮用 needs_input、effect=none、visual.kind=none。用户选定后再执行。visual.requested 仅在用户要求显示图片或图表时填 true，包括对前一句看图请求的补充。普通算术问答用文字即可。");
-        }
-        let reply = self.timed_stage(&input.turn_id, "harness", &mut timings, self.harness.run(TurnRequest {
-            turn_id:input.turn_id.clone(), conversation_id:input.conversation_id.clone(), user_text:transcript.clone(),
-            system_prompt:prompt, response_schema:Some(if input.device_display {scene::device_schema()} else {scene::schema()}),
-            clarify_on_device:input.device_display,
-        })).await?;
-        let mut scene = scene::normalize(&reply.text, reply.structured.as_ref(), self.config.conversation.max_reply_characters, &self.config.conversation.media_hosts);
-        if scene.speech.trim().is_empty() { return Err("assistant_empty_reply".into()); }
-        let mut device_outcome=reply.structured.as_ref().and_then(|value|value["outcome"].as_str())
-            .filter(|value|matches!(*value,"answered"|"done"|"needs_input"|"partial")).unwrap_or("answered").to_owned();
-        let effect = reply.structured.as_ref().and_then(|value| value["effect"].as_str()).unwrap_or("none");
-        let mut effect_unconfirmed=false;
-        if input.device_display && device_outcome=="done" {
-            let confirmed=display::confirmed_effect(effect,&reply.evidence);
-            if !confirmed {
-                effect_unconfirmed=true;
-                device_outcome="partial".into();
-                scene.speech="暂时无法确认操作是否完成，请在 Mac 上检查。".into();
-            }
-        }
-        let display_image = if input.device_display && device_outcome != "needs_input" {
-            let visual=reply.structured.as_ref().and_then(|v|v.get("visual"));
-            let required = display::image_required(visual, &device_outcome, effect);
-            if visual.and_then(|v|v["kind"].as_str()).is_some_and(|kind|kind!="none") {
-                self.emit("turn.preparing_image",Some(&input.turn_id),json!({}));
-            }
-            match self.timed_stage(&input.turn_id, "image_prepare", &mut timings,
-                display::prepare(&self.models, self.harness.workspace(), visual, &reply.evidence, &transcript,
-                    &self.config.conversation.media_hosts)).await {
-                Ok(Some((image, conclusion))) => {
-                    if let Some(conclusion)=conclusion {
-                        scene.speech=if effect_unconfirmed {
-                            format!("{conclusion} 暂时无法确认操作是否完成，请在 Mac 上检查。")
-                        } else { conclusion };
-                    }
-                    Some(image)
-                },
-                Ok(None) if required => {
-                    warnings.push("display_image_unavailable: missing_visual".into());
-                    device_outcome = "partial".into();
-                    None
-                }
-                Ok(None) => None,
-                Err(error) => {
-                    if required {
-                        warnings.push(format!("display_image_unavailable: {error}"));
-                        device_outcome = "partial".into();
-                    } else {
-                        warnings.push(format!("optional_image_unavailable: {error}"));
-                    }
-                    None
-                }
-            }
-        } else {
-            self.skip_stage(&input.turn_id, "image_prepare", "no_device_image", &mut timings);
-            None
-        };
-        let mut tts_calls = 0;
-        let audio = if input.speak.unwrap_or(self.config.conversation.default_speak) {
-            self.emit("turn.synthesizing", Some(&input.turn_id), json!({}));
-            let spoken: String = scene.speech.chars().take(1000).collect();
-            if spoken.chars().count() < scene.speech.chars().count() { warnings.push("tts_truncated_to_1000_characters: full reply remains on screen".into()); }
-            tts_calls += 1;
-            match self.timed_stage(&input.turn_id, "tts", &mut timings,
-                self.models.call("tts", json!({"text":spoken,"voice":self.models.voice()}))).await {
-                Ok(audio) => Some(audio),
-                Err(error) => { warnings.push(format!("tts_unavailable: {error}")); None }
-            }
-        } else {
-            self.skip_stage(&input.turn_id, "tts", "output_disabled", &mut timings);
-            None
-        };
-        let user_turn = memory::TurnRecord { conversation_id:input.conversation_id.clone(), profile_id:input.profile_id.clone(), role:memory::TurnRole::User, content:transcript.clone() };
-        let assistant_turn = memory::TurnRecord { conversation_id:input.conversation_id.clone(), profile_id:input.profile_id.clone(), role:memory::TurnRole::Assistant, content:scene.speech.clone() };
-        // Cancellation drops async work. It must not leave a queued SQLite
-        // writer behind after the gate is released to a deletion request.
-        if let Err(error) = self.timed_stage(&input.turn_id, "history", &mut timings, async {
-            self.memory.append_turn(user_turn).and_then(|()| self.memory.append_turn(assistant_turn))
-        }).await {
-            warnings.push(format!("transcript_storage_failed: {error}"));
-        }
-        timings.total_ms = started.elapsed().as_millis() as u64;
-        Ok(TurnOutput { turn_id:input.turn_id.clone(), conversation_id:input.conversation_id.clone(), transcript, scene,
-            provider_id:reply.provider_id, model_id:reply.model_id, harness_session_id:reply.session_id, audio, identity_candidate, warnings, timings, tts_calls, display_image, device_outcome })
     }
 
     /// Return a local candidate. Never mutate current profile or send embeddings to OpenCode.
@@ -448,7 +339,7 @@ impl Brain {
 
     /// Local parent console submits distinct media samples; embeddings never traverse IPC back to UI.
     pub async fn enroll_media(&self, request: EnrollmentMedia) -> Result<Value, String> {
-        let _gate = self.turn_gate.try_lock().map_err(|_|"brain_busy: finish the current turn before enrollment")?;
+        let _gate = self.turn_gate.try_write().map_err(|_|"brain_busy: finish the current turn before enrollment")?;
         if !request.guardian_confirmed { return Err("enrollment_requires_guardian_confirmation".into()); }
         if request.samples.len() < self.config.memory.min_enrollment_samples || request.samples.len() > self.config.memory.max_enrollment_samples {
             return Err("enrollment_sample_count_invalid".into());

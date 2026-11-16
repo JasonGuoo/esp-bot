@@ -1,12 +1,14 @@
 # esp-bot
 
-## 当前设计：Mac 后端的家庭陪伴机器人（2026-11-16）
+## 当前交付：Mac 后端的家庭陪伴机器人（2026-11-16）
 
 小呆负责本地唤醒、及时应答、表情、采集与有界播放；Mac `bot-server` 负责声音理解、OpenCode、家庭记忆、图文音视频制作和打印等任务。日常对话按家庭每天一份记录组织，成员是参与者，后台持续整理可追溯的共同经历。本阶段不开发设备独立联网 Agent。
 
-**本次交付是设计与开发计划，尚未实现这些新增能力。** 阅读 [家庭陪伴总设计](docs/specs/household-companion/README.md)、[15 项详细开发步骤](docs/specs/household-companion/implementation-plan.md) 和 [开源记忆研究](docs/research/household-memory-open-source-2026-11-16.md)。[HC-00 总跟踪 issue](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+in%3Atitle+%22HC-00%22) 在设计 PR 合并后建立，汇总实现状态。以下带旧日期的段落是交付历史；实际运行范围以最近验收为准。
+**源码开发完成，待测试。** 本轮接入了家庭日记录与来源修订、并行 ASR/身份、OpenCode 日上下文及 compact、持久任务、分段图文语音与真实回执、家庭控制台、记忆/Graphiti 适配、媒体准备和打印；AEC 与语音打断保留默认关闭的真实参考路径。配置、依赖、缺口及逐项交付入口见 [2026-11-16 实施记录](docs/specs/household-companion/implementation-2026-11-16.md)。本轮没有编译 Rust/TypeScript/ESP-IDF，没有执行模型、打印、Mac GUI 或实板验证，没有 CI；已有旧版本验收不代表本轮通过。
 
-**Current delivery status, 2026-11-15:** [Local and S31 acceptance](docs/review-acceptance-2026-11-15.md) records the authorized local tests, Mac release build, application flashing and voice/device checks following the [review corrections](docs/review-fixes-2026-11-14.md). It distinguishes passed checks, recognition misses and remaining physical/OS limits. No CI was used. Older dated “pending” paragraphs below describe their original deliveries.
+阅读 [家庭陪伴总设计](docs/specs/household-companion/README.md)、[15 项开发步骤与待执行验收](docs/specs/household-companion/implementation-plan.md) 和 [开源记忆研究](docs/research/household-memory-open-source-2026-11-16.md)。[HC-00 总跟踪 issue](https://github.com/JasonGuoo/esp-bot/issues/13) 汇总 #14～#28 和关联缺陷的实时状态，开发完成后仍保留待测试。以下带旧日期的段落是交付历史。
+
+**Previous-version acceptance, 2026-11-15:** [Local and S31 acceptance](docs/review-acceptance-2026-11-15.md) records the authorized local tests, Mac release build, application flashing and voice/device checks following the [review corrections](docs/review-fixes-2026-11-14.md). It distinguishes passed checks, recognition misses and remaining physical/OS limits. No CI was used. Older dated “pending” paragraphs below describe their original deliveries.
 
 **小呆 (Xiao Dai)** — a quiet, passive desktop companion built around ESP32-S31-Korvo-1. Local gaze, wake and behavior stay independent of Mac availability; the Rust/Tauri Mac Brain coordinates OpenCode, local speech, identity and memory. The only production voice wake phrase is **小呆小呆**, a single continuous four-syllable keyword. A standalone **小呆** must never wake the device.
 
@@ -47,7 +49,7 @@ The **new physical target** is a good-looking enclosed **pan/tilt** head with in
 
 - **[Current system authority / behavior architecture](docs/architecture.md)**
 
-**Current boundary:** firmware and Mac build/device evidence is in the November 15 acceptance record. BLE, new household memory/presentation tasks and motor assembly remain separate work; the older source-only delivery is not the current hardware status.
+**Current boundary:** the November 16 household implementation is source-complete and pending testing. The November 15 build/device evidence applies to the previous version. BLE, physical calibration and motor assembly remain independent work.
 
 ## Identity and wake-word policy
 
@@ -63,7 +65,7 @@ The canonical system ownership specification is **[docs/architecture.md](docs/ar
 
 | Document | Owns |
 | --- | --- |
-| [Household companion design](docs/specs/household-companion/README.md) · [development steps](docs/specs/household-companion/implementation-plan.md) | Current Mac-backed family architecture, daily context, tasks, presentation and HC issue dependencies |
+| [Household companion design](docs/specs/household-companion/README.md) · [implementation record](docs/specs/household-companion/implementation-2026-11-16.md) · [development steps](docs/specs/household-companion/implementation-plan.md) | Current Mac-backed architecture, completed source integration, configuration and pending HC acceptance |
 | [Household memory](docs/specs/household-companion/household-memory.md) · [open-source research](docs/research/household-memory-open-source-2026-11-16.md) | Source-backed shared memory, corrections, Graphiti evaluation and reuse decisions |
 | [Device/audio](docs/specs/household-companion/device-and-audio.md) · [presentation/tasks](docs/specs/household-companion/presentation-and-tasks.md) | Parallel ASR/identity, ACK/progress, media, task lifecycle and printing |
 | [Module contracts and bot_bus](docs/module-contracts.md) | bot_runtime/bot_bus, events, latest snapshots, permissions, freshness |
@@ -78,7 +80,7 @@ The canonical system ownership specification is **[docs/architecture.md](docs/ar
 | [Mac bot-server](docs/mac-bot-server.md) · [OpenCode](docs/mac-opencode.md) | Native v2 harness, model routing, tools, parent console and installation |
 | [Mac companion console](docs/mac-console.md) | Explicit recording/camera, reply cards, family management and one-time tool approval |
 | [Local models](docs/mac-local-models.md) · [Memory](docs/mac-memory.md) | Official ASR/TTS/identity adapters, explicit enrollment and scoped memory |
-| [Authenticated Mac gateway](docs/mac-gateway.md) · [WSS v3 contract](shared/mac-brain-v3.md) | Existing authenticated control and per-turn media, plus explicit compatibility boundaries for future extensions |
+| [Authenticated Mac gateway](docs/mac-gateway.md) · [WSS v3 contract](shared/mac-brain-v3.md) | Authenticated control, negotiated presentation segments, actual receipts and shared TCP audio streams with legacy compatibility |
 | [Appearance design](docs/face-design.md) · [LAN discovery](docs/lan-discovery.md) | UI/Face and existing isolated link architecture |
 
 **No CI:** this project is code-first; do not create CI workflows or block implementation on unavailable test hardware. Report build/device verification honestly (see [AGENTS.md](AGENTS.md)).
@@ -137,11 +139,11 @@ python3 -m espbot
 # http://127.0.0.1:8766/health
 ```
 
-No third-party Python dependencies for this historical prototype. See [server/README.md](server/README.md). The current firmware entry point no longer polls it. Use [server/bot-server](server/bot-server/README.md) for the selected Mac implementation; firmware-side WSS media integration is still pending.
+No third-party Python dependencies for this historical prototype. See [server/README.md](server/README.md). The current firmware entry point no longer polls it. Use [server/bot-server](server/bot-server/README.md) for the selected Mac implementation; firmware WSS and bounded media are integrated. See the [current source delivery](docs/specs/household-companion/implementation-2026-11-16.md) for the new household path and its pending acceptance.
 
 ### Firmware (S31 board)
 
-These are **future setup commands**, not commands executed for the current source-only delivery. Use Espressif **ESP-IDF 6.1+ with ESP32-S31 support**, then:
+These are **local setup and testing commands** for the user; they were not executed for the November 16 source delivery. Use Espressif **ESP-IDF 6.1+ with ESP32-S31 support**, then:
 
 ```sh
 cd firmware
@@ -169,9 +171,9 @@ One face API, multiple appearance packs. A pack selects a renderer, colors and m
 
 **Current foundation:** local runtime/bus/focus, full-phrase MultiNet wake and 104 offline clips, audio/camera adapters, Face/settings, paired Mac WSS, local ASR/OpenCode/TTS, bounded image/voice output and hardware playback receipts. Existing themes and appearance persistence remain. The latest acceptance record separates actual observations from unverified acoustics, gaze and physical display effects.
 
-**New development scope:** family daily archive and OpenCode continuity, parallel ASR/identity, persistent tasks, source-backed household memory, structured presentation and printing. Advanced video, multi-speaker overlap and AEC/voice barge-in have separate gates. Identity adapters exist but the latest Mac check lacked required dependencies; family recognition is not yet accepted. BLE, hardware calibration and actuators remain independent work.
+**Current source scope:** family daily archive and OpenCode continuity, parallel ASR/identity, persistent tasks, source-backed household memory, structured presentation, media preparation and printing are integrated. Video, multi-speaker overlap, Graphiti and the default-off AEC/voice barge-in path still require their configured dependencies and actual acceptance. Family recognition accuracy has not been accepted. BLE, hardware calibration and actuators remain independent work.
 
-See [implementation inventory](docs/implementation-roadmap.md), [detailed development plan](docs/specs/household-companion/implementation-plan.md) and [local runtime guide](docs/local-runtime.md). This design update does not change runtime code or add a new build/device validation claim.
+See [implementation inventory](docs/implementation-roadmap.md), [detailed development plan](docs/specs/household-companion/implementation-plan.md) and [local runtime guide](docs/local-runtime.md). This source delivery changes runtime code but does not claim a new build, model run or device validation.
 
 Read [face design](docs/face-design.md), [appearance pack contract](shared/appearance-packs.md), [human eye-contact architecture](docs/eye-contact.md), and [device/Brain protocol](shared/protocol.md) before integrating new components.
 
