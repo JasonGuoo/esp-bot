@@ -66,6 +66,9 @@ function errorText(error: unknown): string {
     ["no_speech", "这段录音没有识别出文字。等小呆提示“请说”后再说一次。"],
     ["audio_too_quiet", "小呆收到的声音太轻。请靠近麦克风，等“请说”后再试。"],
     ["brain_busy", "还有一个任务正在进行，可以先停止当前任务再重试。"],
+    ["device_volume_unavailable", "设备未连接或暂不支持远程音量控制。"],
+    ["device_settings_open", "请先关闭小呆上的设置页面。"],
+    ["device_volume_busy", "上一次音量调整还在等待设备确认。"],
     ["api_key_keychain_authorization_timeout", "等待 macOS 钥匙串授权已超时，密钥仍然保留。请完成系统授权，再点击“启动服务”。"],
     ["api_key_keychain_read", "macOS 未允许读取已保存密钥。请解锁登录钥匙串并完成系统授权，再启动服务。无需重新填写密钥。"],
   ]) if (text.includes(code)) return message;
@@ -136,6 +139,10 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   let pendingQuestionCount = 0;
   let serviceReady = false;
   let serviceRunning = false;
+  let speakerStates: JsonObject[] = [];
+  let speakerDirty = false;
+  let speakerBusy = false;
+  let speakerSelectedId = "";
   let recordPurpose: CapturePurpose | null = null;
   let captureConverting = false;
   let cameraPurpose: "enroll" | "recognize" = "enroll";
@@ -813,6 +820,56 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     await stopConsole(false); await request("memory.save", payload);
     memoryDialog.close(); resetMemoryForm(); resetConversationView(); await refreshFamily(); notice("记忆已保存，对话已重新开始以应用新内容。");
   }
+  function renderSpeakerControls(status: JsonObject): void {
+    const select = $<HTMLSelectElement>("#cc-speaker-device");
+    const slider = $<HTMLInputElement>("#cc-speaker-volume");
+    const apply = $<HTMLButtonElement>("#cc-speaker-apply");
+    const mute = $<HTMLButtonElement>("#cc-speaker-mute");
+    const previous = select.value;
+    speakerStates = list(status.device_volumes).map(object).filter((state) => state.online === true && string(state.device_id));
+    select.replaceChildren();
+    for (const state of speakerStates) {
+      const option = element("option", "", string(state.device_id));
+      option.value = string(state.device_id); select.append(option);
+    }
+    if (!speakerStates.length) select.append(element("option", "", "等待设备连接"));
+    if (speakerStates.some((state) => state.device_id === previous)) select.value = previous;
+    if (select.value !== previous) speakerDirty = false;
+    const selected = speakerStates.find((state) => state.device_id === select.value);
+    const changedDevice = string(selected?.device_id) !== speakerSelectedId;
+    speakerSelectedId = string(selected?.device_id);
+    select.disabled = speakerBusy || speakerStates.length === 0;
+    const disabled = !selected || speakerBusy || selected.pending === true || selected.settings_open === true;
+    slider.disabled = apply.disabled = mute.disabled = disabled;
+    if (!selected) {
+      $("#cc-speaker-value").textContent = "—";
+      $("#cc-speaker-status").textContent = "等待支持音量控制的设备连接。";
+      mute.textContent = "静音";
+      return;
+    }
+    if (speakerDirty && !speakerBusy && selected.pending !== true && selected.result === "applied"
+      && Number(slider.value) === number(selected.volume)) speakerDirty = false;
+    if (!speakerDirty && (selected.pending !== true || changedDevice)) slider.value = String(number(selected.volume));
+    $("#cc-speaker-value").textContent = `${slider.value} / 60`;
+    mute.textContent = selected.muted === true ? "取消静音" : "静音";
+    const current = `当前 ${number(selected.volume)} / 60 · ${selected.muted === true ? "已静音" : "未静音"}`;
+    $("#cc-speaker-status").textContent = selected.pending === true ? "正在调整，等待设备确认…"
+      : selected.settings_open === true ? "请先关闭小呆上的设置页面。"
+      : selected.result === "rejected" ? `${current} · 设备未接受调整。`
+      : selected.result === "timed_out" ? `${current} · 等待设备确认超时，请重试。`
+      : selected.hardware_applied !== true ? `${current} · 正在等待音频设备应用设置。`
+      : `${current}${selected.result === "applied" ? " · 已应用" : ""}`;
+  }
+  async function setSpeaker(change: { volume?: number; muted?: boolean }): Promise<void> {
+    const id = $<HTMLSelectElement>("#cc-speaker-device").value;
+    if (!id || speakerBusy) return;
+    speakerBusy = true; renderSpeakerControls({ device_volumes: speakerStates });
+    try {
+      await request("device.volume.set", { device_id: id, ...change });
+      await refreshStatus();
+    } catch (error) { notice(errorText(error), true); }
+    finally { speakerBusy = false; renderSpeakerControls({ device_volumes: speakerStates }); }
+  }
   async function refreshStatus(): Promise<void> {
     if (disposed) return;
     if (statusBusy) { statusAgain = true; return; }
@@ -844,6 +901,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       renderKeySettings(list(harness.routes));
       renderRoutes(list(harness.routes));
       renderDeviceStatus(container, value);
+      renderSpeakerControls(value);
       renderRuntimeMetrics(container, value);
       const mcp = $("#cc-mcp"); mcp.replaceChildren();
       for (const item of list(harness.mcp)) {
@@ -1186,6 +1244,17 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   const on = (selector: string, action: () => void | Promise<void>) => {
     $(selector).addEventListener("click", () => { void action(); });
   };
+  $<HTMLSelectElement>("#cc-speaker-device").addEventListener("change", () => {
+    speakerDirty = false; renderSpeakerControls({ device_volumes: speakerStates });
+  });
+  $<HTMLInputElement>("#cc-speaker-volume").addEventListener("input", (event) => {
+    speakerDirty = true; $("#cc-speaker-value").textContent = `${(event.target as HTMLInputElement).value} / 60`;
+  });
+  on("#cc-speaker-apply", () => setSpeaker({ volume: Number($<HTMLInputElement>("#cc-speaker-volume").value) }));
+  on("#cc-speaker-mute", () => {
+    const selected = speakerStates.find((state) => state.device_id === $<HTMLSelectElement>("#cc-speaker-device").value);
+    if (selected) return setSpeaker({ muted: selected.muted !== true });
+  });
   const form = (selector: string, label: string, action: () => Promise<void>) => {
     $<HTMLFormElement>(selector).addEventListener("submit", (event) => { event.preventDefault(); void perform(label, action); });
   };
@@ -1437,7 +1506,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       if (["service.started", "service.stopped", "harness_started", "harness_stopped"].includes(kind)) { void refreshStatus(); void refreshPermissions(); }
       if (kind.startsWith("device.turn.") || kind.startsWith("device.presentation.")
         || kind.startsWith("device.playback.") || kind === "device.activity"
-        || kind === "device.audio"
+        || kind === "device.audio" || kind === "device.volume"
         || ["turn.started", "turn.completed", "turn.failed", "turn.cancelled"].includes(kind)) void refreshStatus();
       if (kind === "service.started") phase("idle", "服务已启动，可以开始对话。");
       if (kind === "service.stopped") {

@@ -700,6 +700,58 @@ static void test_overflow_recovery_does_not_restore_authority(void)
     bot_runtime_destroy(runtime);
 }
 
+static void test_remote_volume_requires_secure_link_and_respects_settings(void)
+{
+    bot_bus_t bus={0};bot_runtime_t *runtime=NULL;bot_runtime_snapshot_t state;
+    assert(bot_runtime_create(&bus,NULL,NULL,NULL,1000,&runtime)==ESP_OK);
+    bot_event_t volume={.kind=BOT_EVENT_REMOTE_VOLUME,.source=BOT_SOURCE_LINK,.observed_ms=1010,
+        .data.remote_volume={.request_id=1,.set_volume=true,.volume=40}};
+    post_event(&bus,runtime,volume);
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(state.voice_settings.volume_percent==30 && state.remote_volume_result==2);
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_LINK_STATE,.source=BOT_SOURCE_LINK,
+        .observed_ms=1020,.data.link={.connected=true,.authenticated=true,.encrypted=true}});
+    volume.observed_ms=1030;volume.data.remote_volume.request_id=2;
+    post_event(&bus,runtime,volume);
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(state.voice_settings.volume_percent==40 && state.remote_volume_request_id==2 && state.remote_volume_result==1);
+    assert(!state.token.session_id && !state.audio_session_requested && !state.voice_settings.muted);
+    volume.observed_ms=1040;volume.data.remote_volume.request_id=3;
+    volume.data.remote_volume.set_volume=false;volume.data.remote_volume.set_muted=true;volume.data.remote_volume.muted=true;
+    post_event(&bus,runtime,volume);
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(state.voice_settings.volume_percent==40 && state.voice_settings.muted && state.remote_volume_result==1);
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_SETTINGS_OPEN,.source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1050,.settings_lease=1});
+    volume.observed_ms=1060;volume.data.remote_volume.request_id=4;volume.data.remote_volume.muted=false;
+    post_event(&bus,runtime,volume);
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(state.voice_settings.muted && state.remote_volume_request_id==4 && state.remote_volume_result==2);
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_SETTINGS_CLOSE,.source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1070,.settings_lease=1});
+    volume.observed_ms=1080;volume.data.remote_volume.request_id=5;
+    volume.data.remote_volume.set_muted=false;volume.data.remote_volume.set_volume=true;volume.data.remote_volume.volume=61;
+    post_event(&bus,runtime,volume);
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(state.voice_settings.volume_percent==40 && state.voice_settings.muted && state.remote_volume_result==2);
+    volume.source=BOT_SOURCE_LOCAL_UI;volume.observed_ms=1090;volume.data.remote_volume.request_id=6;volume.data.remote_volume.volume=20;
+    post_event(&bus,runtime,volume);
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(state.voice_settings.volume_percent==40 && state.remote_volume_request_id==5);
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,.source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1100,.data.touch={.intentional=true}});
+    bot_runtime_get_snapshot(runtime,&state);
+    const bot_session_token_t active=state.token;
+    assert(active.session_id);
+    volume.source=BOT_SOURCE_LINK;volume.observed_ms=1110;volume.data.remote_volume.request_id=7;
+    volume.data.remote_volume.set_volume=false;volume.data.remote_volume.set_muted=true;volume.data.remote_volume.muted=false;
+    post_event(&bus,runtime,volume);
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(!state.voice_settings.muted && state.remote_volume_result==1);
+    assert(state.token.epoch==active.epoch && state.token.session_id==active.session_id && state.token.turn_id==active.turn_id);
+    bot_runtime_destroy(runtime);
+}
+
 static void test_settings_close_commits_last_edit(void)
 {
     bot_bus_t bus={0};bot_runtime_t *runtime=NULL;bot_runtime_snapshot_t state;
@@ -844,6 +896,7 @@ int main(void)
     bot_runtime_get_snapshot(runtime, &state);
     assert(!state.near_face && !state.camera_requested && state.behavior == BOT_BEHAVIOR_NIGHT_DARK);
     bot_runtime_destroy(runtime);
+    test_remote_volume_requires_secure_link_and_respects_settings();
     test_settings_close_commits_last_edit();
     test_managed_playback_does_not_arm_followup(false);
     test_managed_playback_does_not_arm_followup(true);

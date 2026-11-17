@@ -8,6 +8,7 @@ pub mod media;
 mod plain_audio;
 pub mod gateway;
 mod discovery;
+mod device_volume;
 mod display;
 mod memory_worker;
 mod rpc;
@@ -146,6 +147,7 @@ pub struct Brain {
     identity_jobs: StdMutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     pub tasks: Arc<tasks::TaskService>,
     device_states: StdMutex<HashMap<String,Value>>,
+    device_volumes: device_volume::DeviceVolumes,
     progress_audio: Mutex<HashMap<String,Value>>,
     pub(super) graphiti: Arc<memory::graphiti::GraphitiClient>,
     accepting: AtomicBool,
@@ -183,7 +185,7 @@ impl Brain {
         let tasks = tasks::TaskService::open(runtime_dir.join("tasks"), config.tasks.clone(), Arc::clone(&sink))?;
         let graphiti=Arc::new(memory::graphiti::GraphitiClient::new(&config.memory.graphiti,graphiti_script));
         let brain = Arc::new(Self { models: ModelWorker::new(config.models.clone(), config_dir.clone()), config, config_dir,
-            harness, memory, credentials, sink, turn_gate:AsyncRwLock::new(()), active:StdMutex::new(HashMap::new()), identity_jobs:StdMutex::new(HashMap::new()), tasks, device_states:StdMutex::new(HashMap::new()), progress_audio:Mutex::new(HashMap::new()), graphiti, accepting:AtomicBool::new(false),
+            harness, memory, credentials, sink, turn_gate:AsyncRwLock::new(()), active:StdMutex::new(HashMap::new()), identity_jobs:StdMutex::new(HashMap::new()), tasks, device_states:StdMutex::new(HashMap::new()), device_volumes:Default::default(), progress_audio:Mutex::new(HashMap::new()), graphiti, accepting:AtomicBool::new(false),
             cancellation_events, progress_events, foreground_generation, background:Mutex::new(None), memory_script, gateway:Mutex::new(None) });
         brain.install_task_handlers()?;
         Ok(brain)
@@ -240,6 +242,7 @@ impl Brain {
             "models_configured":self.models.configured(),"memory":self.memory.status().unwrap_or_else(|e|json!({"error":e})),
             "background_memory_model_ready":memory_ready,
             "device_activity":self.device_states.lock().map(|s|s.values().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+            "device_volumes":self.device_volumes.status(),
             "gateway":gateway,"gateway_enabled":self.config.gateway.enabled,
             "config_path":self.config_dir.join("brain.json"),"legacy_lan_is_authenticated":false,
             "device_media_requires_v3":true})

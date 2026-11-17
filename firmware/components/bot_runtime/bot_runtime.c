@@ -391,6 +391,7 @@ static bool source_allowed(const bot_event_t *event)
     case BOT_EVENT_CAPTURE_READY:
         return event->source == BOT_SOURCE_AUDIO || event->source == BOT_SOURCE_LINK;
     case BOT_EVENT_TURN_SUBMITTED:
+    case BOT_EVENT_REMOTE_VOLUME:
         return event->source == BOT_SOURCE_LINK;
     case BOT_EVENT_AUDIO_HEALTH:
         return event->source == BOT_SOURCE_AUDIO || event->source == BOT_SOURCE_PLATFORM;
@@ -732,6 +733,24 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         runtime->wake_barrier_ms = now_ms;
         set_passive(runtime, now_ms);
         break;
+    case BOT_EVENT_REMOTE_VOLUME: {
+        const uint32_t request = event->data.remote_volume.request_id;
+        if (!request) { state->rejected_events++; break; }
+        state->remote_volume_request_id = request;
+        if (!secure_link(runtime) || state->settings_open || state->critical_fault ||
+            (!event->data.remote_volume.set_volume && !event->data.remote_volume.set_muted) ||
+            (event->data.remote_volume.set_volume && event->data.remote_volume.volume > BOT_VOICE_VOLUME_MAX)) {
+            state->remote_volume_result = 2;
+            state->rejected_events++;
+            break;
+        }
+        if (event->data.remote_volume.set_volume)
+            state->voice_settings.volume_percent = event->data.remote_volume.volume;
+        if (event->data.remote_volume.set_muted)
+            state->voice_settings.muted = event->data.remote_volume.muted;
+        state->remote_volume_result = 1;
+        break;
+    }
     case BOT_EVENT_VOICE_SETTINGS:
         if (!state->settings_open || state->critical_fault ||
             event->settings_lease != state->settings_lease ||

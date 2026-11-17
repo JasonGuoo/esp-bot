@@ -54,6 +54,12 @@ typedef struct {
     uint32_t stream, sequence, playback_id, playback_stream, playback_sequence;
     uint32_t playback_expected, playback_received;
     uint8_t reply_gain_percent, playback_gain_percent;
+    bot_voice_settings_t voice_settings;
+    bool voice_settings_open;
+    uint32_t remote_volume_request_id, remote_volume_seen_id;
+    uint8_t remote_volume_result;
+    char volume_poll_id[24];
+    int64_t volume_poll_us;
     int64_t playback_started_us;
     uint32_t progress_seq;
     int64_t commit_started_us;
@@ -241,6 +247,7 @@ void brain_secure_network_down(void) {
     portENTER_CRITICAL(&s_lock);
     bool was = s.authenticated;
     s.authenticated = false; s.audio_allowed = false; s.result_valid=false; s.phase = DOWN;
+    s.volume_poll_id[0]='\0';s.volume_poll_us=0;s.remote_volume_seen_id=0;
     portEXIT_CRITICAL(&s_lock);
     if (was) { link_event(false); fail_session("Secure connection lost; session stopped"); }
 }
@@ -301,6 +308,9 @@ void brain_secure_update(const bot_runtime_snapshot_t *state) {
     s.pcm_permitted=state->audio_uplink_permitted;
     s.followup_armed=state->followup_armed;
     s.spoken_answers=state->voice_settings.spoken_answers;
+    s.voice_settings=state->voice_settings;s.voice_settings_open=state->settings_open;
+    s.remote_volume_request_id=state->remote_volume_request_id;
+    s.remote_volume_result=state->remote_volume_result;
     s.reply_gain_percent=state->clock_valid && state->night_policy?state->voice_settings.night_gain_percent:100;
     if (!s.active || !same(s.desired,s.remote)) {
         s.audio_allowed=false;
@@ -667,6 +677,8 @@ static void text_message(const char *data,size_t n) {
     } else if (!strcmp(kind,"response") && cJSON_IsString(id)) {
         char requested_asset[BOT_DISPLAY_ASSET_ID_BYTES]={0};
         portENTER_CRITICAL(&s_lock);
+        bool volume_reply=s.authenticated && *s.volume_poll_id && !strcmp(id->valuestring,s.volume_poll_id);
+        if (volume_reply) s.volume_poll_id[0]='\0';
         phase_t phase=s.phase; bool opening=phase==OPENING&&!strcmp(id->valuestring,s.open_id);
         bool beginning=phase==BEGINNING&&!strcmp(id->valuestring,s.begin_id);
         bool completing=phase==COMMITTED&&!strcmp(id->valuestring,s.commit_id);
@@ -682,6 +694,34 @@ static void text_message(const char *data,size_t n) {
             s.image_request_id[0]='\0';
         }
         portEXIT_CRITICAL(&s_lock);
+        if (volume_reply) {
+            if (!cJSON_IsTrue(ok)) goto done;
+            cJSON *payload=cJSON_GetObjectItemCaseSensitive(root,"payload");
+            cJSON *remote=cJSON_GetObjectItemCaseSensitive(payload,"command");
+            if (!cJSON_IsObject(remote)) goto done;
+            cJSON *volume=cJSON_GetObjectItemCaseSensitive(remote,"volume");
+            cJSON *muted=cJSON_GetObjectItemCaseSensitive(remote,"muted");
+            uint32_t remote_id=0,value=0;
+            const bool set_volume=volume && !cJSON_IsNull(volume);
+            const bool set_muted=muted && !cJSON_IsNull(muted);
+            if (!json_uint(cJSON_GetObjectItemCaseSensitive(remote,"id"),UINT32_MAX,&remote_id) || !remote_id ||
+                (!set_volume && !set_muted) ||
+                (set_volume && !json_uint(volume,BOT_VOICE_VOLUME_MAX,&value)) ||
+                (set_muted && !cJSON_IsTrue(muted) && !cJSON_IsFalse(muted))) goto done;
+            portENTER_CRITICAL(&s_lock);
+            bool unseen=s.authenticated && s.remote_volume_seen_id!=remote_id;
+            portEXIT_CRITICAL(&s_lock);
+            if (unseen && s_bus) {
+                const bot_event_t change={.kind=BOT_EVENT_REMOTE_VOLUME,.source=BOT_SOURCE_LINK,
+                    .observed_ms=(uint32_t)(esp_timer_get_time()/1000),
+                    .data.remote_volume={.request_id=remote_id,.set_volume=set_volume,.set_muted=set_muted,
+                        .muted=cJSON_IsTrue(muted),.volume=(uint8_t)value}};
+                if (bot_bus_post(s_bus,&change,0)==ESP_OK) {
+                    portENTER_CRITICAL(&s_lock);s.remote_volume_seen_id=remote_id;portEXIT_CRITICAL(&s_lock);
+                }
+            }
+            goto done;
+        }
         if (image_fresh && image_reply) {
             current=result_token;
             if (!cJSON_IsTrue(ok)) {
@@ -1109,6 +1149,30 @@ static bool simple_request(const char *method) {
     snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"%s\",\"payload\":{}}",id,method);
     return send_text(msg);
 }
+static void volume_status_poll(const secure_state_t *state) {
+    const int64_t now=esp_timer_get_time();
+    if (now-state->volume_poll_us<2000000 || (*state->volume_poll_id && now-state->volume_poll_us<5000000)) return;
+    bot_audio_status_t audio={0};
+    if (s_audio) bot_audio_get_status(s_audio,&audio);
+    const bool applied=audio.codec_available && audio.controls_error==ESP_OK &&
+        audio.controls_revision==audio.controls_applied_revision &&
+        bot_voice_settings_equal(&audio.controls_applied,&state->voice_settings);
+    char id[24],message[420];request_id(id,sizeof(id));
+    int n=snprintf(message,sizeof(message),
+        "{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"device.audio.status\",\"payload\":{\"volume\":%u,\"muted\":%s,\"settings_open\":%s,\"hardware_applied\":%s,\"last_id\":%lu,\"last_result\":%u}}",
+        id,(unsigned)state->voice_settings.volume_percent,state->voice_settings.muted?"true":"false",
+        state->voice_settings_open?"true":"false",applied?"true":"false",
+        (unsigned long)state->remote_volume_request_id,(unsigned)state->remote_volume_result);
+    if (n<=0 || (size_t)n>=sizeof(message)) return;
+    portENTER_CRITICAL(&s_lock);
+    if (s.authenticated) {snprintf(s.volume_poll_id,sizeof(s.volume_poll_id),"%s",id);s.volume_poll_us=now;}
+    portEXIT_CRITICAL(&s_lock);
+    if (!send_text(message)) {
+        portENTER_CRITICAL(&s_lock);
+        if (!strcmp(s.volume_poll_id,id)) s.volume_poll_id[0]='\0';
+        portEXIT_CRITICAL(&s_lock);
+    }
+}
 static bool playback_report(const playback_event_t *event, const char *status, const char *code) {
     char id[24],runtime[180],message[480];
     request_id(id,sizeof(id));runtime_json(runtime,sizeof(runtime),event->token);
@@ -1508,6 +1572,7 @@ static void secure_task(void *unused) {
         presentation_poll();
         secure_state_t state;
         portENTER_CRITICAL(&s_lock); state=s; portEXIT_CRITICAL(&s_lock);
+        if (state.authenticated) volume_status_poll(&state);
         if (atomic_exchange(&s_playback_event_overflow,false)) {
             fail_session("Hardware playback event queue overflow");
             /* The missing terminal cannot keep an otherwise revoked network

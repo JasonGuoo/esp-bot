@@ -59,6 +59,7 @@ typedef enum {
     BOT_EVENT_PLAYBACK_PROGRESS, /* successful hardware writes, bounded low frequency */
     BOT_EVENT_TURN_SUBMITTED, /* LINK has sealed this token's microphone stream */
     BOT_EVENT_BARGE_IN, /* AUDIO: hardware-reference AEC residual speech */
+    BOT_EVENT_REMOTE_VOLUME, /* authenticated Mac setting; runtime remains owner */
     BOT_EVENT_COUNT
 } bot_event_kind_t;
 
@@ -103,6 +104,7 @@ typedef struct {
         bot_voice_settings_t voice_settings;
         struct { bool ready; } capture;
         struct { bot_voice_command_t command; float score; } local_command;
+        struct { uint32_t request_id; bool set_volume, set_muted, muted; uint8_t volume; } remote_volume;
     } data;
 } bot_event_t;
 

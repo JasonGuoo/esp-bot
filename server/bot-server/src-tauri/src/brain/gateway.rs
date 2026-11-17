@@ -66,6 +66,15 @@ impl Drop for OnlinePeer {
     }
 }
 
+struct VolumePeer { brain:Arc<Brain>, device:String, connection:String }
+impl Drop for VolumePeer {
+    fn drop(&mut self) {
+        if self.brain.device_volumes.disconnect(&self.device,&self.connection) {
+            self.brain.emit("device.volume",None,json!({"device_id":self.device,"disconnected":true}));
+        }
+    }
+}
+
 pub async fn start(brain: Arc<Brain>) -> Result<RunningGateway,String> {
     let config = &brain.config.gateway;
     let certificate = config.certificate_pem.as_ref().ok_or("gateway_certificate_missing")?;
@@ -367,6 +376,8 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
     // Close the gap between callback authentication and subscribing to rotation.
     if !brain.credentials.authenticate(&device_id,&credential){return Err("device_credential_revoked".into());}
     let _online_peer=OnlinePeer::new(device_id.clone(),online);
+    let volume_connection=uuid::Uuid::new_v4().simple().to_string();
+    let _volume_peer=VolumePeer{brain:Arc::clone(&brain),device:device_id.clone(),connection:volume_connection.clone()};
     let mut cancellations=brain.cancellations();
     let mut progress=brain.progress();
     send(&mut socket, Message::Text(json!({"v":3,"type":"welcome","device_id":device_id,"capabilities":["assistant.text","audio.pcm16","speaker.candidate","scene.cards",DISPLAY_REPLY_CAPABILITY,AUDIO_REPLY_CAPABILITY,"presentation.segments.v1"],"sample_rate":16000,"max_audio_seconds":30,"requires_activation":true}).to_string())).await.map_err(|_|"ws_write_failed")?;
@@ -728,6 +739,11 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                         let mut pending=false;
                         let result:Result<Value,String>=async {
                             match frame.method.as_str(){
+                                "device.audio.status"=>{
+                                    let (result,changed)=brain.device_volumes.observe(&device_id,&volume_connection,&frame.payload)?;
+                                    if changed {brain.emit("device.volume",None,json!({"device_id":device_id}));}
+                                    Ok(result)
+                                },
                                 "session.open"=>{
                                     if engagement.is_some() || active.is_some() || playback.is_some(){return Err("session_already_open".into());}
                                     let activation=frame.payload.get("activation").and_then(Value::as_str).unwrap_or("");
@@ -1111,6 +1127,25 @@ mod tests {
         assert!(welcome["capabilities"].as_array().unwrap().iter().any(|v|v==DISPLAY_REPLY_CAPABILITY));
         assert!(welcome["capabilities"].as_array().unwrap().iter().any(|v|v==AUDIO_REPLY_CAPABILITY));
         assert_eq!(brain.gateway.lock().await.as_ref().unwrap().status()["devices"].as_array().unwrap().len(),1);
+        let mut sound=json!({"volume":30,"muted":false,"settings_open":false,"hardware_applied":true,"last_id":0,"last_result":0});
+        socket.send(Message::Text(json!({"v":3,"type":"request","id":"sound1","method":"device.audio.status","payload":sound}).to_string())).await.unwrap();
+        let initial:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert!(initial["payload"]["command"].is_null());
+        brain.device_volumes.set("test-bot",Some(40),None).unwrap();
+        socket.send(Message::Text(json!({"v":3,"type":"request","id":"sound2","method":"device.audio.status","payload":sound}).to_string())).await.unwrap();
+        let command:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        let command_id=command["payload"]["command"]["id"].as_u64().unwrap();
+        assert_eq!(command["payload"]["command"]["volume"],40);
+        sound["volume"]=json!(40);sound["last_id"]=json!(command_id);sound["last_result"]=json!(1);sound["hardware_applied"]=json!(false);
+        socket.send(Message::Text(json!({"v":3,"type":"request","id":"sound3","method":"device.audio.status","payload":sound}).to_string())).await.unwrap();
+        let waiting:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(waiting["payload"]["command"]["id"],command_id);
+        assert_eq!(brain.device_volumes.status()[0]["pending"],true);
+        sound["hardware_applied"]=json!(true);
+        socket.send(Message::Text(json!({"v":3,"type":"request","id":"sound4","method":"device.audio.status","payload":sound}).to_string())).await.unwrap();
+        let applied:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert!(applied["payload"]["command"].is_null());
+        assert_eq!(brain.device_volumes.status()[0]["result"],"applied");
         socket.send(Message::Text(json!({"v":3,"type":"request","id":"open1","method":"session.open",
             "payload":{"activation":"touch","runtime":{"epoch":7,"session_id":12,"turn_id":1,"focus_generation":0}}}).to_string())).await.unwrap();
         let reply:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();

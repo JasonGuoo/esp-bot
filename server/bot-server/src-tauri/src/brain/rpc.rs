@@ -172,6 +172,14 @@ impl BrainHost {
             "device.credentials.list" => brain.credentials.list(),
             "device.credentials.issue" => brain.credentials.issue(required(&payload,"device_id")?),
             "device.credentials.revoke" => {brain.credentials.revoke(required(&payload,"device_id")?)?;Ok(json!({"revoked":true}))},
+            "device.volume.set" => {
+                let device=required(&payload,"device_id")?;
+                let volume=match payload.get("volume") {None|Some(Value::Null)=>None,Some(value)=>Some(value.as_u64().filter(|v|*v<=60).ok_or("volume_out_of_range")? as u8)};
+                let muted=match payload.get("muted") {None|Some(Value::Null)=>None,Some(value)=>Some(value.as_bool().ok_or("mute_invalid")?)};
+                let status=brain.device_volumes.set(device,volume,muted)?;
+                brain.emit("device.volume",None,json!({"device_id":device}));
+                Ok(status)
+            },
             "conversation.forget" => {
                 brain.cancel_scoped(CancelScope::All,"memory_changed").await?;
                 let _gate = brain.turn_gate.write().await;

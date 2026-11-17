@@ -42,6 +42,8 @@ typedef struct {
     bool settings_open;
     uint32_t settings_lease, settings_revision;
     bot_voice_settings_t voice_settings;
+    uint32_t remote_volume_request_id;
+    uint8_t remote_volume_result; /* 0 none, 1 accepted, 2 rejected */
     bool sound_preview_active; /* explicit settings audition; no microphone/session lease */
     bool capture_ready;        /* AUDIO confirms current token's DMA fence is clear */
     bool transport_ready;      /* LINK confirms current token's authenticated media path */

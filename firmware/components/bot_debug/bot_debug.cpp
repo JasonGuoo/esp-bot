@@ -32,7 +32,7 @@ const char *event_name(unsigned kind) {
         "display.health", "wake.status", "night.policy", "session.end", "fault", "sound.activity",
         "result.dismissed", "local.response.failed", "voice.settings", "sound.preview",
         "capture.ready", "local.command", "capture.overflow", "playback.progress", "turn.submitted",
-        "barge.in"};
+        "barge.in", "remote.volume"};
     static_assert(sizeof(names) / sizeof(names[0]) == BOT_EVENT_COUNT);
     return kind < BOT_EVENT_COUNT ? names[kind] : "unknown";
 }
