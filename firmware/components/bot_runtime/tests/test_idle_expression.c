@@ -1,4 +1,5 @@
 #include "idle_expression.h"
+#include "../../face/include/face_expressions_generated.h"
 #include <assert.h>
 #include <string.h>
 
@@ -30,7 +31,15 @@ int main(void)
     /* Repeated cycles have varied poses separated by a quiet neutral phase. */
     unsigned seen = 0;
     for (unsigned i = 0; i < 80; ++i) {
-        if (idle.presenting) seen |= 1U << idle.current;
+        if (idle.presenting) {
+            const char *current = bot_idle_expression_step(&idle, idle.next_change_ms - 1, true);
+            size_t expression = 0;
+            while (expression < FACE_EX_COUNT && strcmp(current, k_face_expression_ids[expression]) != 0)
+                ++expression;
+            assert(expression < FACE_EX_COUNT);
+            assert(k_face_eve_eyes[expression][0] == k_face_eve_eyes[expression][1]);
+            seen |= 1U << idle.current;
+        }
         bot_idle_expression_step(&idle, idle.next_change_ms, true);
     }
     assert((seen & (seen - 1)) != 0 && seen != 0); /* at least two expressions */

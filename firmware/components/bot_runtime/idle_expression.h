@@ -30,7 +30,7 @@ static inline const char *bot_idle_expression_step(bot_idle_expression_t *idle,
                                                     uint32_t now_ms, bool enabled)
 {
     static const char *const poses[] = {
-        "curious", "discovery", "happy", "wink", "laughing", "gentle", "affection"
+        "happy", "laughing", "gentle", "excited", "relieved"
     };
     const uint8_t count = (uint8_t)(sizeof(poses) / sizeof(poses[0]));
     if (!enabled) {

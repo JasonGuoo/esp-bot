@@ -52,6 +52,7 @@ typedef struct {
     bool audio_session_requested; /* local post-wake permission, never opens a second mic */
     bool audio_uplink_permitted;  /* session + current secure link + capture availability */
     bool visual_tracking_permitted;
+    bool person_visible;         /* fresh valid face, not identity or conversation intent */
     bool near_face;              /* large nearby face, not a gaze/consent claim */
     uint16_t near_face_area_permille; /* largest fresh face box / full image */
     bool sound_reaction, sound_direction_valid;

@@ -12,6 +12,13 @@ typedef struct {
     uint32_t last_close_ms, last_capture_ms;
 } bot_near_face_t;
 
+/* Visible-person evidence is independent of the close-face threshold. It is
+ * not identity, gaze, speech, consent, or authorization to start a session. */
+typedef struct {
+    bool active, has_capture;
+    uint32_t last_seen_ms, last_capture_ms;
+} bot_face_presence_t;
+
 static inline bool bot_near_face_fresh(uint32_t now, uint32_t then, uint32_t max_age)
 {
     const int32_t age = (int32_t)(now - then);
@@ -41,6 +48,28 @@ static inline float bot_near_face_largest_area(const vatt_snapshot_t *frame,
         if (area > largest) largest = area;
     }
     return largest;
+}
+
+static inline bool bot_face_presence_step(bot_face_presence_t *presence,
+                                           const vatt_snapshot_t *frame,
+                                           uint32_t now, uint32_t max_age,
+                                           float min_confidence, bool permitted)
+{
+    if (!permitted) {
+        *presence = (bot_face_presence_t){0};
+        return false;
+    }
+    if (bot_near_face_largest_area(frame, now, max_age, min_confidence) > 0.0f) {
+        presence->active = true;
+        if (!presence->has_capture || (int32_t)(frame->timestamp_ms - presence->last_capture_ms) > 0) {
+            presence->last_seen_ms = now;
+            presence->last_capture_ms = frame->timestamp_ms;
+            presence->has_capture = true;
+        }
+    } else if (presence->active && !bot_near_face_fresh(now, presence->last_seen_ms, 400)) {
+        presence->active = false;
+    }
+    return presence->active;
 }
 
 /* Enter above 20%. A small exit margin and a 400ms loss grace avoid switching

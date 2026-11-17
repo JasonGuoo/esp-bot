@@ -24,6 +24,9 @@ struct bot_runtime {
     bot_passive_cycle_t passive_cycle;
     bot_idle_expression_t idle_expression;
     bot_near_face_t near_face;
+    bot_face_presence_t face_presence;
+    bool face_reaction_active;
+    uint32_t face_reaction_started_ms;
     bot_ambient_light_t ambient;
     bot_responses_state_t responses;
     const bot_response_entry_t *response, *last_response;
@@ -1430,6 +1433,20 @@ void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
         runtime->config.focus.min_face_confidence,
         runtime->state.camera_requested && !runtime->state.settings_open && !runtime->state.critical_fault,
         &runtime->state.near_face_area_permille);
+    const bool had_person = runtime->state.person_visible;
+    runtime->state.person_visible = bot_face_presence_step(&runtime->face_presence,
+        runtime->has_vision && runtime->state.camera_available ? &runtime->vision : NULL, now_ms,
+        runtime->config.focus.observation_max_age_ms, runtime->config.focus.min_face_confidence,
+        runtime->state.camera_requested && runtime->state.camera_available &&
+            !runtime->state.settings_open && !runtime->state.critical_fault);
+    if (!runtime->state.person_visible || runtime->state.behavior != BOT_BEHAVIOR_IDLE)
+        runtime->face_reaction_active = false;
+    else if (!had_person) {
+        runtime->face_reaction_started_ms = now_ms;
+        runtime->face_reaction_active = true;
+    } else if (runtime->face_reaction_active &&
+               !within_age(now_ms, runtime->face_reaction_started_ms, 1800))
+        runtime->face_reaction_active = false;
     if (is_active(runtime) || runtime->state.settings_open || runtime->state.critical_fault ||
         runtime->state.behavior == BOT_BEHAVIOR_NIGHT_DARK ||
         runtime->state.behavior == BOT_BEHAVIOR_SLEEPING ||
@@ -1443,15 +1460,19 @@ void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
     if (idle_expression) {
         memcpy(runtime->state.expression, idle_expression, strlen(idle_expression) + 1);
     } else if (runtime->state.behavior == BOT_BEHAVIOR_IDLE) {
-        /* A nearby face owns the visible smile; leave no stale idle pose behind. */
+        /* Leave no stale idle pose behind when a nearby face is present. */
         reset_expression(runtime);
-    }
-    if (runtime->state.sound_reaction && !runtime->state.near_face) {
-        memcpy(runtime->state.expression, "curious", sizeof("curious"));
-    } else if (runtime->state.behavior == BOT_BEHAVIOR_DROWSY &&
-               strcmp(runtime->state.expression, "curious") == 0) {
-        reset_expression(runtime);
-    }
+    } else if (!is_active(runtime)) reset_expression(runtime);
+    /* A passive nearby person gets a smile. Once explicitly awakened, the
+     * actual listening/thinking/speaking state must remain visible. */
+    if (runtime->state.near_face && !is_active(runtime) &&
+        runtime->state.behavior != BOT_BEHAVIOR_SLEEPING &&
+        runtime->state.behavior != BOT_BEHAVIOR_NIGHT_DARK &&
+        !runtime->state.settings_open && !runtime->state.critical_fault)
+        memcpy(runtime->state.expression, "happy", sizeof("happy"));
+    else if (runtime->face_reaction_active && !runtime->state.near_face &&
+        within_age(now_ms, runtime->face_reaction_started_ms, 1800))
+        memcpy(runtime->state.expression, "happy", sizeof("happy"));
     if (runtime->recovery_requested && runtime->overflow_fault &&
         !bot_bus_events_pending(runtime->bus)) bot_runtime_clear_fault(runtime, now_ms);
     publish_state(runtime);

@@ -94,7 +94,7 @@ typedef struct {
     bool camera_request_sent, last_camera_requested;
     bool light_mode_sent, last_light_mode;
     bool ambient_reported, last_ambient_dark, last_ambient_probe;
-    bool near_face_reported, last_near_face;
+    bool near_face_reported, last_near_face, person_visible_reported, last_person_visible;
     bool night_sent, last_night, last_clock_valid;
     uint8_t last_local_hour;
     uint32_t last_clock_poll_ms, last_diagnostic_ms, last_light_poll_ms, last_audio_retry_ms;
@@ -830,6 +830,11 @@ static void reconcile(app_t *app, uint32_t now_ms) {
     attention_output_t gaze = update_gaze(app, now_ms);
     const char *gaze_source = gaze.person_tracked ? "face" : "center";
     const bool near_face = s->near_face && !s->settings_open && !s->critical_fault;
+    if (!app->person_visible_reported || app->last_person_visible != s->person_visible) {
+        ESP_LOGI(TAG, "Person visible=%d (fresh face evidence only)", s->person_visible);
+        app->person_visible_reported = true;
+        app->last_person_visible = s->person_visible;
+    }
     if (!app->near_face_reported || app->last_near_face != near_face) {
         ESP_LOGI(TAG, "Near-face reaction=%d face_area=%u.%u%% camera_available=%d", near_face,
                  (unsigned)s->near_face_area_permille / 10,
@@ -842,12 +847,6 @@ static void reconcile(app_t *app, uint32_t now_ms) {
     if (idle_attention_step(&app->idle_attention, now_ms, idle_look, &gaze.eye_x, &gaze.eye_y))
         ESP_LOGI(TAG, "Idle glance target=(%d,%d)", gaze.eye_x, gaze.eye_y);
     if (idle_look) gaze_source = "idle";
-    if (s->sound_reaction && !near_face && !s->settings_open && !s->critical_fault &&
-        platform.display_awake) {
-        gaze.eye_x = s->sound_direction_valid ? attention_sound_eye_x(s->sound_azimuth_deg) : 0;
-        gaze.eye_y = 0;
-        gaze_source = s->sound_direction_valid ? "sound" : "sound_unlocated";
-    }
     if (near_face) { gaze.eye_x = 0; gaze.eye_y = 0; gaze_source = "near_face"; }
 #if CONFIG_ESPBOT_USB_DEBUG_PREVIEW
     const bool eye_test_allowed = bot_debug_preview_enabled() && platform.display_awake &&
@@ -865,7 +864,7 @@ static void reconcile(app_t *app, uint32_t now_ms) {
         gaze_source = "manual_eye";
     } else app->debug_eye_until_ms = 0;
 #endif
-    const char *expression = near_face && !s->local_response_active ? "happy" : s->expression;
+    const char *expression = s->expression;
 #if CONFIG_ESPBOT_USB_DEBUG_PREVIEW
     const bool face_test_allowed = bot_debug_preview_enabled() && platform.display_awake &&
         !s->critical_fault && !s->settings_open && s->behavior != BOT_BEHAVIOR_NIGHT_DARK;

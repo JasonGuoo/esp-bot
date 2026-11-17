@@ -10,14 +10,17 @@ Settings now provides a candidate preview and 24-expression navigation before Ap
 
 **2026-11-07 expressive update:** the shared EVE catalog now offers 24 selectable
 poses plus four lifecycle/compatibility poses. Eye contours interpolate and blinks
-close and reopen; the daytime idle scheduler occasionally uses short curious,
-discovery, smile, wink, laugh, gentle and affection poses between neutral pauses.
+close and reopen; the daytime idle scheduler uses short symmetric smile, laugh,
+gentle, excited and relieved poses between neutral pauses. A newly visible valid
+face may cause a brief smile without opening a conversation; sound alone does not
+change the passive expression or gaze.
 Sideways gaze translates the paired silhouettes by up to 92 px at 800 px
 screen width without changing either eye's proportions. Both eyes use one
 shared gaze vector; the existing animation smooths motion and holds each idle
 glance. With a fresh
-face box above 20% of the camera image, the automatic
-reaction is a centered smiling blink, without conversation or idle glances.
+face box above 20% of the camera image, the passive reaction is a centered
+smiling blink, without conversation or idle glances. An explicitly awakened
+conversation shows its listening, thinking or speaking state instead.
 `overjoyed` alone adds white reflected highlights, fading with the blink; it is
 not selected by idle, normal happiness or the near-face reaction. It can be
 explicitly previewed over USB; meaningful automatic triggers require a future

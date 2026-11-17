@@ -197,47 +197,117 @@ static void test_passive_sound_reactions(void)
     post_event(&bus, runtime, sound);
     bot_runtime_get_snapshot(runtime, &state);
     assert(state.sound_reaction && state.sound_direction_valid && state.sound_azimuth_deg == 135);
-    assert(strcmp(state.expression, "curious") == 0 && state.behavior == BOT_BEHAVIOR_IDLE);
+    assert(strcmp(state.expression, "idle") == 0 && state.behavior == BOT_BEHAVIOR_IDLE);
     assert(state.token.session_id == 0 && !state.audio_session_requested && !state.audio_uplink_permitted);
+    /* Ambient activity keeps diagnostics fresh but does not change the face or
+     * grant a conversation, including when the sound repeats continuously. */
+    sound.observed_ms = 1800;
+    post_event(&bus, runtime, sound);
+    sound.observed_ms = 2600;
+    post_event(&bus, runtime, sound);
     bot_runtime_step(runtime, 2821);
     bot_runtime_get_snapshot(runtime, &state);
+    assert(state.sound_reaction && state.sound_direction_valid);
+    assert(strcmp(state.expression, "idle") == 0);
+    assert(!state.token.session_id && !state.audio_session_requested);
+    bot_runtime_step(runtime, 4401);
+    bot_runtime_get_snapshot(runtime, &state);
     assert(!state.sound_reaction && !state.sound_direction_valid);
+    char idle_expression[BOT_EXPRESSION_MAX_BYTES + 1];
+    memcpy(idle_expression, state.expression, sizeof(idle_expression));
 
-    sound.observed_ms = 2840;
+    sound.observed_ms = 4420;
     sound.data.sound.direction_valid = false;
     post_event(&bus, runtime, sound);
     bot_runtime_get_snapshot(runtime, &state);
-    assert(state.sound_reaction && !state.sound_direction_valid);
+    assert(state.sound_reaction && !state.sound_direction_valid && strcmp(state.expression, idle_expression) == 0);
 
-    camera_health(&bus, 2860, true);
-    set_face(&bus, 2860, 0.5f);
-    bot_runtime_step(runtime, 2860);
+    camera_health(&bus, 4440, true);
+    set_face(&bus, 4440, 0.5f);
+    bot_runtime_step(runtime, 4440);
     bot_runtime_get_snapshot(runtime, &state);
     assert(state.near_face && strcmp(state.expression, "curious") != 0);
 
-    set_night(&bus, 2880, true);
-    bot_runtime_step(runtime, 2880);
-    sound.observed_ms = 2900;
+    set_night(&bus, 4460, true);
+    bot_runtime_step(runtime, 4460);
+    sound.observed_ms = 4480;
     post_event(&bus, runtime, sound);
     bot_runtime_get_snapshot(runtime, &state);
     assert(state.behavior == BOT_BEHAVIOR_NIGHT_DARK && !state.sound_reaction);
     assert(state.token.session_id == 0 && !state.audio_uplink_permitted);
 
-    set_night(&bus, 2920, false);
-    bot_runtime_step(runtime, 2920);
-    sound.observed_ms = 2940;
+    set_night(&bus, 4500, false);
+    bot_runtime_step(runtime, 4500);
+    sound.observed_ms = 4520;
     sound.data.sound.direction_valid = true;
     sound.data.sound.azimuth_deg = NAN;
     uint32_t rejected = state.rejected_events;
     post_event(&bus, runtime, sound);
     bot_runtime_get_snapshot(runtime, &state);
     assert(!state.sound_reaction && state.rejected_events == rejected + 1);
-    sound.observed_ms = 2960;
+    sound.observed_ms = 4540;
     sound.source = BOT_SOURCE_LINK;
     sound.data.sound.azimuth_deg = 90;
     post_event(&bus, runtime, sound);
     bot_runtime_get_snapshot(runtime, &state);
     assert(!state.sound_reaction && state.rejected_events == rejected + 2);
+    bot_runtime_destroy(runtime);
+}
+
+static void test_visible_person_reaction_does_not_start_a_session(void)
+{
+    bot_bus_t bus = {0};
+    bot_runtime_t *runtime = NULL;
+    bot_runtime_snapshot_t state;
+    assert(bot_runtime_create(&bus, NULL, NULL, NULL, 1000, &runtime) == ESP_OK);
+    camera_health(&bus, 1010, true);
+    set_face(&bus, 1020, 0.10f); /* valid person, 5% area: not a near-face cue */
+    bot_runtime_step(runtime, 1020);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.person_visible && !state.near_face && strcmp(state.expression, "happy") == 0);
+    assert(!state.token.session_id && !state.audio_session_requested && !state.audio_uplink_permitted);
+    set_face(&bus, 2000, 0.10f);
+    bot_runtime_step(runtime, 2000);
+    set_face(&bus, 2900, 0.10f);
+    bot_runtime_step(runtime, 2900);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.person_visible && strcmp(state.expression, "idle") == 0);
+    set_face(&bus, 3000, 0.10f);
+    bus.vision.faces[0].observation.face_confidence = 0.1f;
+    bot_runtime_step(runtime, 3000);
+    bot_runtime_step(runtime, 3301);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.person_visible && !state.token.session_id);
+    set_night(&bus, 3320, true);
+    set_face(&bus, 3320, 0.10f);
+    bot_runtime_step(runtime, 3320);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.person_visible && !state.camera_requested && !state.audio_session_requested);
+    bot_runtime_destroy(runtime);
+}
+
+static void test_conversation_expression_takes_priority_over_near_face(void)
+{
+    bot_bus_t bus = {0};
+    bot_runtime_t *runtime = NULL;
+    bot_runtime_snapshot_t state;
+    bot_runtime_config_t config = bot_runtime_default_config();
+    config.waking_ms = 50;
+    assert(bot_runtime_create(&bus, &config, NULL, NULL, 1000, &runtime) == ESP_OK);
+    camera_health(&bus, 1010, true);
+    set_face(&bus, 1020, 0.5f);
+    bot_runtime_step(runtime, 1020);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.near_face && strcmp(state.expression, "happy") == 0 && !state.token.session_id);
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE, .source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1030, .data.touch={.intentional=true}});
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.near_face && state.behavior == BOT_BEHAVIOR_WAKING && strcmp(state.expression, "surprised") == 0);
+    bot_runtime_step(runtime, 1090);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.near_face && state.behavior == BOT_BEHAVIOR_ENGAGED &&
+           state.conversation == BOT_CONVERSATION_LISTENING && strcmp(state.expression, "listening") == 0);
+    assert(state.token.session_id && !state.audio_uplink_permitted);
     bot_runtime_destroy(runtime);
 }
 
@@ -890,7 +960,7 @@ int main(void)
     set_face(&bus, 13020, 0.5f);
     bot_runtime_step(runtime, 13020);
     bot_runtime_get_snapshot(runtime, &state);
-    assert(state.near_face && strcmp(state.expression, "idle") == 0 && state.token.session_id == 0);
+    assert(state.near_face && strcmp(state.expression, "happy") == 0 && state.token.session_id == 0);
     set_night(&bus, 13040, true);
     bot_runtime_step(runtime, 13040);
     bot_runtime_get_snapshot(runtime, &state);
@@ -903,6 +973,8 @@ int main(void)
     test_processing_requires_server_ack(false);
     test_processing_requires_server_ack(true);
     test_passive_sound_reactions();
+    test_visible_person_reaction_does_not_start_a_session();
+    test_conversation_expression_takes_priority_over_near_face();
     test_ambient_sleep_and_recovery();
     test_ambient_session_and_night_priority();
     test_wake_response_ownership();
