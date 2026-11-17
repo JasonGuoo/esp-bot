@@ -37,6 +37,7 @@ os.environ["ANONYMIZED_TELEMETRY"] = "false"
 os.environ["GRAPHITI_TELEMETRY_ENABLED"] = "false"
 LIMIT = 524288
 VERSION = "0.31.2"
+SIGNATURE_PREFIX = b"espbot-graphiti-0.31.2-v2\0"
 
 
 class AdapterError(Exception):
@@ -90,6 +91,7 @@ class Adapter:
     def __init__(self, path):
         self.graph = None
         self.driver = None
+        self.driver_scope = None
         self.config = None
         self.remote = False
         self.error = None
@@ -102,7 +104,7 @@ class Adapter:
                 raise AdapterError("graphiti_configuration_too_large")
             with open(path, "rb") as stream:
                 raw_config = stream.read(32769)
-            self.engine_signature = hashlib.sha256(b"espbot-graphiti-0.31.2-v1\0" + raw_config).hexdigest()
+            self.engine_signature = hashlib.sha256(SIGNATURE_PREFIX + raw_config).hexdigest()
             self.config = json.loads(raw_config)
             if not isinstance(self.config, dict):
                 raise AdapterError("invalid_graphiti_configuration")
@@ -136,32 +138,53 @@ class Adapter:
         except Exception:
             self.error = "graphiti_configuration_invalid"
 
-    async def ready_driver(self):
+    def graph_group(self, household):
+        backend = self.config["backend"]
+        if backend["kind"] != "falkordb":
+            return household
+        # Graphiti 0.31.2 maps FalkorDB group_id to a graph name. Namespace it
+        # by both the configured database and the household, so sharing a
+        # server cannot mix separate installations or ignore database config.
+        namespace = backend.get("database", "espbot_household") + "\0" + household
+        return "espbot_" + hashlib.sha256(namespace.encode("utf-8")).hexdigest()
+
+    async def ready_driver(self, group):
         # Cleanup remains possible after model credentials or cloud consent
         # have been revoked. It needs only the explicitly configured local DB.
         if not self.database_ready:
             raise AdapterError(self.error or "graph_database_not_configured")
-        if self.driver is not None:
+        scope = group if self.config["backend"]["kind"] == "falkordb" else None
+        if self.driver is not None and self.driver_scope == scope:
             return self.driver
+        if self.driver is not None:
+            if self.graph is not None:
+                await self.graph.close()
+            else:
+                await self.driver.close()
+            self.graph = None
+            self.driver = None
         backend = self.config["backend"]
         if backend["kind"] == "falkordb":
             from graphiti_core.driver.falkordb_driver import FalkorDriver
             self.driver = FalkorDriver(host=backend.get("host", "127.0.0.1"), port=backend.get("port", 6379),
                                        username=backend.get("username"),
                                        password=secret(backend) if backend.get("password_env") else None,
-                                       database=backend.get("database", "espbot_household"))
+                                       database=scope)
         else:
             from graphiti_core.driver.neo4j_driver import Neo4jDriver
             self.driver = Neo4jDriver(uri=backend["uri"], user=backend.get("username", "neo4j"),
                                      password=secret(backend, True), database=backend.get("database", "neo4j"))
+        self.driver_scope = scope
         return self.driver
 
-    async def ready(self):
+    async def ready(self, group):
         if self.error:
             raise AdapterError(self.error)
+        driver = await self.ready_driver(group)
         if self.graph is not None:
             return self.graph
         from graphiti_core import Graphiti
+        from graphiti_core.graphiti import validate_group_id
         from graphiti_core.llm_client.config import LLMConfig
         from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
         from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
@@ -178,9 +201,24 @@ class Adapter:
         common = {"llm_client": llm, "embedder": embed,
                   "cross_encoder": OpenAIRerankerClient(config=llm_config),
                   "store_raw_episode_content": True, "max_coroutines": 2}
-        graph = Graphiti(graph_driver=await self.ready_driver(), **common)
+        backend_kind = self.config["backend"]["kind"]
+        class ConfiguredDatabaseGraphiti(Graphiti):
+            # Neo4j may have only the one configured database. FalkorDB's
+            # normal resolver maps each group to its namespaced graph.
+            def _resolve_request_scope(self, group_id):
+                if group_id is None or backend_kind == "falkordb":
+                    return super()._resolve_request_scope(group_id)
+                validate_group_id(group_id)
+                return group_id, self.driver, self.clients
+        graph = ConfiguredDatabaseGraphiti(graph_driver=driver, **common)
         try:
-            await graph.build_indices_and_constraints()
+            # FalkorDriver schedules its own initialization at construction.
+            # Do not concurrently create the same indexes a second time.
+            pending = getattr(driver, "_init_task", None)
+            if pending is not None:
+                await pending
+            else:
+                await graph.build_indices_and_constraints()
         except Exception:
             await graph.close()
             self.driver = None
@@ -252,21 +290,24 @@ class Adapter:
                     "engine_signature": self.engine_signature}
         if operation not in ("ingest", "search", "delete"):
             raise AdapterError("operation_not_allowed")
-        group = identifier(request.get("household_id"), "household_id")
+        household = identifier(request.get("household_id"), "household_id")
+        if not self.database_ready:
+            raise AdapterError(self.error or "graph_database_not_configured")
+        group = self.graph_group(household)
         if operation == "delete":
             episode_uuid = str(UUID(request.get("graph_uuid", "")))
-            await self.delete(SimpleNamespace(driver=await self.ready_driver()), episode_uuid, group)
+            await self.delete(SimpleNamespace(driver=await self.ready_driver(group)), episode_uuid, group)
             return {"deleted": True, "graph_uuid": episode_uuid, "engine_signature": self.engine_signature}
         if operation in ("ingest", "search"):
             self.permit_models(request)
-        graph = await self.ready()
+        graph = await self.ready(group)
         if operation == "search":
             query = request.get("query")
             if not isinstance(query, str) or not query.strip() or len(query) > 4000:
                 raise AdapterError("invalid_graph_query")
             edges = await graph.search(query=query, group_ids=[group], num_results=12)
             return {"engine_signature": self.engine_signature, "edges": [{"uuid": edge.uuid, "fact": edge.fact,
-                               "episodes": edge.episodes, "group_id": edge.group_id}
+                               "episodes": edge.episodes, "group_id": household}
                               for edge in edges if edge.group_id == group]}
         episode_uuid = str(UUID(request.get("graph_uuid", "")))
         items = request.get("items")
@@ -277,7 +318,7 @@ class Adapter:
         for item in items:
             if not isinstance(item, dict) or not item.get("sources") or item.get("private_profile_id"):
                 raise AdapterError("invalid_graph_source")
-        from graphiti_core.nodes import EpisodeType, SagaNode
+        from graphiti_core.nodes import EpisodeType, EpisodicNode, SagaNode
         from graphiti_core.errors import NodeNotFoundError
         day = identifier(request.get("daily_conversation_id"), "daily_id")
         saga_uuid = str(uuid5(NAMESPACE_URL, "espbot:" + group + ":" + day))
@@ -290,11 +331,20 @@ class Adapter:
             await saga.save(graph.driver)
         # Reconcile an interrupted ingest using its preallocated durable UUID.
         await self.delete(graph, episode_uuid, group)
+        body = json.dumps({"observations": items}, ensure_ascii=False)
+        description = "espbot SQLite source revision " + identifier(request.get("input_version"), "input_version")
+        reference_time = datetime.fromtimestamp(request["reference_time_ms"] / 1000, tz=timezone.utc)
+        # In Graphiti 0.31.2, supplying uuid means "load an existing episode",
+        # not "create one with this UUID". Save the preallocated source first
+        # so an interrupted ingest remains addressable by the deletion outbox.
+        await EpisodicNode(uuid=episode_uuid, name=identifier(request.get("episode_id"), "episode_id"),
+                           group_id=group, source=EpisodeType.json, content=body,
+                           source_description=description, valid_at=reference_time).save(graph.driver)
         result = await graph.add_episode(
             name=identifier(request.get("episode_id"), "episode_id"),
-            episode_body=json.dumps({"observations": items}, ensure_ascii=False),
-            source_description="espbot SQLite source revision " + identifier(request.get("input_version"), "input_version"),
-            reference_time=datetime.fromtimestamp(request["reference_time_ms"] / 1000, tz=timezone.utc),
+            episode_body=body,
+            source_description=description,
+            reference_time=reference_time,
             source=EpisodeType.json, group_id=group, uuid=episode_uuid,
             update_communities=False, previous_episode_uuids=[], saga=saga,
             custom_extraction_instructions=(

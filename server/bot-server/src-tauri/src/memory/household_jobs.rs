@@ -209,6 +209,10 @@ impl Store {
             if !subjects_valid||subjects.len()>16{continue;}
             if item.kind=="learning" && item.evidence.as_deref()!=Some("introduced") && subjects.is_empty(){continue;}
             let assertion=item.assertion_kind.as_deref().filter(|s|["observed","self_reported","reported_by_other","uncertain"].contains(s)).unwrap_or("uncertain");
+            // A model can describe an anonymous or third-person observation
+            // as self-reported. Without a known subject, preserve uncertainty
+            // instead of silently assigning the claim to the speaker.
+            let assertion=if assertion=="self_reported" && subjects.is_empty() {"uncertain"} else {assertion};
             let topic=item.topic_key.as_deref().map(str::trim).filter(|s|!s.is_empty()&&s.chars().count()<=100).map(|s|format!("topic_{}",&digest(&json!([job.household_id,s.to_lowercase()]))[..24]));
             let id=uid("derived");let content=item.content.trim();let owner=owners.iter().next();
             let confirmation_key=digest(&json!([item.kind,content,subjects,refs]));

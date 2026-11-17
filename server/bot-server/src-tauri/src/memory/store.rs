@@ -800,6 +800,34 @@ mod background_tests {
     use super::*;
 
     #[test]
+    fn anonymous_derived_fact_does_not_claim_self_reported_identity() {
+        use crate::memory::{HouseholdExtraction, JournalInput};
+        let dir = std::env::temp_dir().join(format!("xiaodai-anonymous-{}", Uuid::new_v4()));
+        let store = Store::open(dir.clone(), MemoryConfig::default()).unwrap();
+        store.update_household_settings(&json!({"history_enabled":true,"allow_cloud":true})).unwrap();
+        let source = JournalInput {
+            turn_id:"anonymous-turn".into(), activation_id:"anonymous-visit".into(), utterance_id:None,
+            text:"小北喜欢芝麻汤圆".into(), occurred_at_ms:now_ms(), input_kind:"text".into(),
+            speaker_person_id:None, private_profile_id:None, allow_cloud:true, metadata:json!({}),
+        };
+        let receipt=store.journal_input(&source).unwrap();
+        store.journal_finish("anonymous-turn","completed",None,json!({})).unwrap();
+        store.connection().unwrap().execute("UPDATE household_jobs SET available_at_ms=0 WHERE kind='organize'",[]).unwrap();
+        let job=store.next_household_job(false).unwrap().unwrap();
+        let extraction:HouseholdExtraction=serde_json::from_value(json!({"items":[{
+            "kind":"fact","content":"小北喜欢芝麻汤圆","subject_entity_ids":[],
+            "assertion_kind":"self_reported","sources":[{"conversation_turn_id":receipt.conversation_turn_id,
+            "source_revision":receipt.source_revision,"quote":"小北喜欢芝麻汤圆"}]
+        }]})).unwrap();
+        assert!(store.complete_household_job(&job,&extraction).unwrap());
+        let recall=store.household_context("小北喜欢什么",true).unwrap();
+        assert!(recall.contains("小北喜欢芝麻汤圆"));
+        assert!(recall.contains("\"assertion_kind\":\"uncertain\""));
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn forgetting_one_activation_preserves_another_after_reopen() {
         use crate::memory::JournalInput;
         let dir = std::env::temp_dir().join(format!("xiaodai-household-{}", Uuid::new_v4()));

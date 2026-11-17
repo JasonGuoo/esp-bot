@@ -4,6 +4,8 @@
 
 **本次交付是已接入主链路的源码，状态为“开发完成，待测试”。** 本次没有构建 Rust/Mac App、安装模型或 Graphiti 依赖、启动图数据库、执行 ASR/声纹/MLX/云端模型推理、运行实机或 CI。Python 文件只做静态语法解析，SQLite 建表与迁移声明在空内存库做了语法检查；这不代表真实用户数据库迁移、模型或端到端验证通过。
 
+后续运行证据和修复见[11 月 17 日专项验收](../../review-household-acceptance-2026-11-17.md)；本文保留 11 月 16 日原始交付记录。
+
 设计依据为[家庭记忆规范](household-memory.md)、[开发计划](implementation-plan.md)与[官方开源调查](../../research/household-memory-open-source-2026-11-16.md)。本文说明当前实现及启用条件，不将上游已有能力当成本机已经配置成功。
 
 ## 1. 数据归属与默认开关
@@ -200,6 +202,8 @@ python3 -m venv .venv-graphiti
 ```
 
 Neo4j backend 使用 `kind="neo4j"`、`uri`、`username`、`password_env` 和可选 `database`。两个 backend 都限制在 loopback，本实现不开放远程图数据库。
+
+FalkorDB 的图名按配置的 `database` 与 household ID 共同派生。11 月 17 日修复使用 v2 索引签名，已有投影会按原始 SQLite 来源重新排队；此前实验版本在其他图或其他数据库留下的外部数据不会因重建而自动清除。FalkorDB 的真实模型写入、查询和删除已在隔离数据库验证；Neo4j 尚未实测。
 
 远程模型端点必须是 HTTPS，并显式提供 `api_key_env`。配置仅写环境变量名，进程从环境取实际密钥；不会自动读取 OpenCode 子进程的钥匙串注入值。远程调用同时要求 sidecar 配置、`memory.graphiti.allow_cloud` 和本次来源权限允许。一个 episode 中只要包含不允许云端的被引用共享观察，就不能把整个 episode 发送给远程模型。
 

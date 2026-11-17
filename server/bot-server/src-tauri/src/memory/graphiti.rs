@@ -29,7 +29,7 @@ impl GraphitiClient {
         let path=self.config.config_file.as_deref().ok_or("graphiti_not_configured")?;
         let bytes=std::fs::read(path).map_err(|_|"graphiti_not_configured")?;
         if bytes.len()>32768{return Err("graphiti_configuration_too_large".into());}
-        let mut hash=Sha256::new();hash.update(b"espbot-graphiti-0.31.2-v1\0");hash.update(bytes);
+        let mut hash=Sha256::new();hash.update(b"espbot-graphiti-0.31.2-v2\0");hash.update(bytes);
         Ok(format!("{:x}",hash.finalize()))
     }
 

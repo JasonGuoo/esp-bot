@@ -299,6 +299,14 @@ impl Playback {
             None=>self.created.elapsed()>self.ready_timeout,
         }
     }
+    fn transport_lost(&mut self)->Value {
+        // Stop sending PCM, but retain the control connection and the exact
+        // stream lease until its hardware terminal report or timeout. Closing
+        // the media socket during a local stop can race that WSS report.
+        self.ready=false;
+        json!({"v":3,"type":"event","event":"audio.cancelled","stream_id":self.stream_id,
+            "runtime":self.token,"code":"plain_audio_disconnected"})
+    }
 }
 struct PlaybackReceipt {token:RuntimeToken,stream_id:u32,status:String}
 // A failed or just-started clip may have received only a prefix. Missing
@@ -558,7 +566,13 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                 let frame=media::output_frame(clip.stream_id,clip.sequence,&clip.pcm[clip.offset..end]);
                 if let Some(transport)=plain.as_mut() {
                     match timeout(Duration::from_secs(2),transport.outgoing.send(plain_audio::Output::Frame(frame))).await {
-                        Ok(Ok(()))=>{},_=>break,
+                        Ok(Ok(()))=>{},_=>{
+                            brain.emit("device.audio",Some(&clip.turn_id),json!({"device_id":device_id,
+                                "status":"unconfirmed","code":"plain_audio_disconnected","runtime":clip.token}));
+                            let event=clip.transport_lost();
+                            if send(&mut socket,Message::Text(event.to_string())).await.is_err(){break;}
+                            continue;
+                        },
                     }
                 } else {
                     match timeout(Duration::from_secs(2),send(&mut socket, Message::Binary(frame))).await {
@@ -569,7 +583,13 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                 if clip.offset==clip.pcm.len(){
                     if let Some(transport)=plain.as_mut() {
                         let finish=plain_audio::Output::Finish {stream:clip.stream_id,frames:clip.sequence};
-                        if !matches!(timeout(Duration::from_secs(2),transport.outgoing.send(finish)).await,Ok(Ok(()))){break;}
+                        if !matches!(timeout(Duration::from_secs(2),transport.outgoing.send(finish)).await,Ok(Ok(()))){
+                            brain.emit("device.audio",Some(&clip.turn_id),json!({"device_id":device_id,
+                                "status":"unconfirmed","code":"plain_audio_disconnected","runtime":clip.token}));
+                            let event=clip.transport_lost();
+                            if send(&mut socket,Message::Text(event.to_string())).await.is_err(){break;}
+                            continue;
+                        }
                     }
                     let complete=json!({"v":3,"type":"event","event":"audio.complete","stream_id":clip.stream_id,"runtime":clip.token});
                     clip.sent_complete=true;

@@ -1,3 +1,6 @@
 # Optional, isolated sidecar environment. No dependency/model is installed at
 # app startup. Python >= 3.10; a local FalkorDB or Neo4j service is configured.
 graphiti-core[falkordb]==0.31.2
+# Graphiti imports httpx directly. Newer OpenAI SDKs no longer guarantee it
+# as a transitive dependency, so the isolated adapter needs it explicitly.
+httpx>=0.27,<1

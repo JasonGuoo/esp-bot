@@ -8,6 +8,8 @@
   describes the original source-only delivery. The subsequent [local and S31
   acceptance](docs/review-household-acceptance-2026-11-16.md) records the builds,
   actual model calls and physical runs, and distinguishes the remaining gaps.
+  The [November 17 follow-up](docs/review-household-acceptance-2026-11-17.md)
+  records isolated speaker, face, memory and Graphiti runs plus the AEC failure.
   The accepted direction supersedes older person-isolated
   conversation, device Cloud Direct and monolithic turn/task assumptions below.
 - The [second static review](docs/review-household-static-2026-11-16.md) records
@@ -26,8 +28,9 @@
   background memory, device activation, task and output-lease lifecycles.
   Preserve original sources, corrections, deletion and existing private scopes.
 - SQLite remains authoritative; the pinned Graphiti v0.31.2 adapter is a
-  rebuildable derived index. Its model/database deployment remains untested;
-  enabling configuration does not prove readiness. Reuse upstream implementations
+  rebuildable derived index. Isolated FalkorDB and local model integration was
+  exercised on November 17; Neo4j and production deployment remain untested,
+  and enabling configuration does not prove readiness. Reuse upstream implementations
   rather than adding a competing agent runtime or a new memory framework.
 - Treat presentation as a first-class server responsibility: frozen semantic
   segments, immutable assets, synchronized bounded playback and actual receipts.
