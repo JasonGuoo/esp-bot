@@ -27,6 +27,12 @@ struct bot_runtime {
     bot_face_presence_t face_presence;
     bool face_reaction_active;
     uint32_t face_reaction_started_ms;
+    /* Short idle-only reactions to touch, sound and drowsiness. */
+    const char *gesture_expression;
+    uint32_t gesture_until_ms, last_tap_ms, touch_gaze_until_ms;
+    uint8_t tap_count;
+    bool laugh_pending, idle_presenting;
+    bot_behavior_t last_behavior;
     bot_ambient_light_t ambient;
     bot_responses_state_t responses;
     const bot_response_entry_t *response, *last_response;
@@ -99,6 +105,19 @@ static void reset_expression(bot_runtime_t *runtime)
     default: break;
     }
     memcpy(runtime->state.expression, expression, strlen(expression) + 1);
+}
+
+static void react(bot_runtime_t *runtime, const char *expression, uint32_t duration_ms, uint32_t now_ms)
+{
+    runtime->gesture_expression = expression;
+    runtime->gesture_until_ms = now_ms + duration_ms;
+}
+
+static bool may_react(const bot_runtime_t *runtime)
+{
+    const bot_runtime_snapshot_t *state = &runtime->state;
+    return !is_active(runtime) && !state->settings_open && !state->critical_fault &&
+        state->behavior != BOT_BEHAVIOR_NIGHT_DARK && state->behavior != BOT_BEHAVIOR_SLEEPING;
 }
 
 static void derive_permissions(bot_runtime_t *runtime)
@@ -696,6 +715,7 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
             state->sound_direction_valid = event->data.sound.direction_valid;
             state->sound_azimuth_deg = event->data.sound.azimuth_deg;
             runtime->last_sound_ms = event->observed_ms;
+            if (event->data.sound.loud) react(runtime, "surprised", 700, now_ms); /* flinch */
         }
         break;
     case BOT_EVENT_WAKE_DETECTED:
@@ -726,6 +746,44 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         if (state->critical_fault && runtime->overflow_fault && event->data.touch.intentional) {
             runtime->recovery_requested = true;
             break; /* Recovery consumes the touch; a second action may wake. */
+        }
+        if (event->data.touch.gesture) {
+            /* Affection and drag are idle-only play; they never open a session. */
+            if (stopped_this_step || !may_react(runtime)) { state->rejected_events++; break; }
+            if (event->data.touch.gesture == 3) {
+                state->touch_gaze_valid = true;
+                state->touch_gaze_x = event->data.touch.x;
+                state->touch_gaze_y = event->data.touch.y;
+                runtime->touch_gaze_until_ms = now_ms + 600;
+            } else {
+                react(runtime, "affection", 2500, now_ms);
+                state->blink_request++;
+            }
+            break;
+        }
+        runtime->tap_count = within_age(event->observed_ms, runtime->last_tap_ms, 700) ?
+            (uint8_t)(runtime->tap_count + 1) : 1;
+        runtime->last_tap_ms = event->observed_ms;
+        if (!stopped_this_step && is_active(runtime) && !state->settings_open && !state->critical_fault) {
+            const bot_conversation_t conversation = state->conversation;
+            if (runtime->tap_count >= 4 && !state->utterance_seen &&
+                (conversation == BOT_CONVERSATION_LISTENING || conversation == BOT_CONVERSATION_WAITING)) {
+                /* A poke storm, not a question: grumble, then laugh it off. */
+                end_session(runtime, now_ms, SESSION_DISMISSED);
+                runtime->tap_count = 0;
+                react(runtime, "annoyed", 900, now_ms);
+                runtime->laugh_pending = true;
+                break;
+            }
+            if (conversation == BOT_CONVERSATION_SPEAKING) { /* a tap while talking means stop */
+                end_session(runtime, now_ms, SESSION_DISMISSED);
+                break;
+            }
+            if (conversation == BOT_CONVERSATION_SUBMITTED || conversation == BOT_CONVERSATION_THINKING) {
+                /* a tap while thinking adds one more sentence to the same question */
+                if (begin_turn_with_intent(runtime, now_ms, true)) state->activation = BOT_ACTIVATION_TOUCH;
+                break;
+            }
         }
         if (stopped_this_step || !event->data.touch.intentional || !may_wake(runtime, event, now_ms)) {
             state->rejected_events++;
@@ -1101,7 +1159,7 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         case BOT_SESSION_END_PARENT_STOP: strcpy(state->caption, "Mac 已停止本次互动"); break;
         case BOT_SESSION_END_MEMORY_CHANGED: strcpy(state->caption, "记忆已更新，请再问一次"); break;
         case BOT_SESSION_END_SERVICE_STOPPED: strcpy(state->caption, "Mac 服务已停止"); break;
-        case BOT_SESSION_END_EXPIRED: strcpy(state->caption, "本次互动已结束"); break;
+        case BOT_SESSION_END_EXPIRED: break; /* a goodbye or quiet expiry ends warmly, without a notice */
         default: break;
         }
         break;
@@ -1516,6 +1574,10 @@ void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
     const bool expressive_idle = runtime->state.behavior == BOT_BEHAVIOR_IDLE &&
         !runtime->state.near_face && !runtime->state.settings_open && !runtime->state.critical_fault;
     const char *idle_expression = bot_idle_expression_step(&runtime->idle_expression, now_ms, expressive_idle);
+    if (runtime->idle_expression.presenting && !runtime->idle_presenting && !runtime->gesture_expression &&
+        bot_idle_expression_random(&runtime->idle_expression) % 16 == 0) /* rare easter egg */
+        react(runtime, bot_idle_expression_random(&runtime->idle_expression) & 1 ? "wink" : "smug", 1400, now_ms);
+    runtime->idle_presenting = runtime->idle_expression.presenting;
     if (idle_expression) {
         memcpy(runtime->state.expression, idle_expression, strlen(idle_expression) + 1);
     } else if (runtime->state.behavior == BOT_BEHAVIOR_IDLE) {
@@ -1532,6 +1594,27 @@ void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
     else if (runtime->face_reaction_active && !runtime->state.near_face &&
         within_age(now_ms, runtime->face_reaction_started_ms, 1800))
         memcpy(runtime->state.expression, "happy", sizeof("happy"));
+    if (had_person != runtime->state.person_visible && runtime->state.person_visible)
+        runtime->state.blink_request++; /* a face appears: double blink */
+    if (runtime->state.behavior == BOT_BEHAVIOR_DROWSY && runtime->last_behavior != BOT_BEHAVIOR_DROWSY &&
+        may_react(runtime)) react(runtime, "sleepy", 1600, now_ms); /* yawn on the way down */
+    runtime->last_behavior = runtime->state.behavior;
+    if (runtime->state.touch_gaze_valid &&
+        (!may_react(runtime) || (int32_t)(now_ms - runtime->touch_gaze_until_ms) >= 0))
+        runtime->state.touch_gaze_valid = false;
+    if (runtime->gesture_expression && (!may_react(runtime) ||
+        (int32_t)(now_ms - runtime->gesture_until_ms) >= 0)) {
+        runtime->gesture_expression = NULL;
+        if (runtime->laugh_pending && may_react(runtime)) {
+            runtime->laugh_pending = false;
+            react(runtime, "laughing", 1600, now_ms);
+            memcpy(runtime->state.caption, "别戳啦～", sizeof("别戳啦～"));
+        } else if (!is_active(runtime)) runtime->state.caption[0] = '\0';
+    }
+    if (!may_react(runtime)) runtime->laugh_pending = false;
+    if (runtime->gesture_expression)
+        memcpy(runtime->state.expression, runtime->gesture_expression,
+               strlen(runtime->gesture_expression) + 1);
     if (runtime->recovery_requested && runtime->overflow_fault &&
         !bot_bus_events_pending(runtime->bus)) bot_runtime_clear_fault(runtime, now_ms);
     publish_state(runtime);

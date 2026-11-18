@@ -33,7 +33,12 @@ struct face_view {
     const face_theme_t *theme;
     face_render_state_t state;
     lv_timer_t *timer;
-    uint32_t blink_start, gear_expire;
+    uint32_t blink_start, blink_gap, gear_expire;
+    uint32_t press_ms, drag_ms;
+    int touch_x, touch_y, press_x, prev_x;
+    int8_t rub_dir;
+    uint8_t rub_turns;
+    bool press_gesture, rubbed, blink_twice;
     uint32_t expression_since, nod_until, aha_until;
     uint8_t level_target;
     int last_layout_w, last_layout_h;
@@ -199,6 +204,11 @@ static void start_blink(face_view_t *f, uint32_t now) {
     lv_anim_set_exec_cb(&animation, blink_anim_step);
     lv_anim_set_completed_cb(&animation, blink_anim_completed);
     f->blink_start = now;
+    /* People blink irregularly, sometimes twice. */
+    const uint32_t interval = f->theme->blink_interval_ms;
+    if (f->blink_twice) { f->blink_twice = false; f->blink_gap = f->theme->blink_duration_ms + 120; }
+    else if (lv_rand(0, 6) == 0) { f->blink_twice = true; f->blink_gap = f->theme->blink_duration_ms + 120; }
+    else f->blink_gap = interval * lv_rand(55, 165) / 100;
     f->blink_anim_running = true;
     if (!lv_anim_start(&animation)) f->blink_anim_running = false;
 }
@@ -219,8 +229,58 @@ static void open_settings(lv_event_t *event) {
     sync_settings_event(f);
 }
 
+static void touch_point(face_view_t *f) {
+    lv_point_t p;
+    lv_indev_get_point(lv_indev_active(), &p);
+    const int w = lv_obj_get_width(f->root), h = lv_obj_get_height(f->root);
+    f->touch_x = w ? clamp((p.x - w / 2) * 200 / w, -100, 100) : 0;
+    f->touch_y = h ? clamp((p.y - h / 2) * 200 / h, -100, 100) : 0;
+}
+
+static void press_face(lv_event_t *event) {
+    face_view_t *f = lv_event_get_user_data(event);
+    if (!f || face_settings_is_open(f->settings) || !lv_indev_active()) return;
+    const lv_event_code_t code = lv_event_get_code(event);
+    const uint32_t now = lv_tick_get();
+    touch_point(f);
+    if (code == LV_EVENT_PRESSED) {
+        f->press_ms = now; f->press_x = f->prev_x = f->touch_x;
+        f->rub_dir = 0; f->rub_turns = 0; f->press_gesture = f->rubbed = false;
+    } else if (code == LV_EVENT_PRESSING) {
+        /* Rub: the finger reverses direction a few times; a steady stroke is a drag. */
+        const int step = f->touch_x - f->prev_x;
+        if (abs(step) >= 4) {
+            const int8_t dir = step > 0 ? 1 : -1;
+            if (f->rub_dir && dir != f->rub_dir) f->rub_turns++;
+            f->rub_dir = dir;
+            f->prev_x = f->touch_x;
+        }
+        if (f->rub_turns >= 3 && !f->rubbed) {
+            f->rubbed = f->press_gesture = true;
+            emit(f, FACE_EVENT_RUB);
+        } else if (!f->rub_turns && abs(f->touch_x - f->press_x) >= 15 && (uint32_t)(now - f->drag_ms) >= 80) {
+            f->drag_ms = now; f->press_gesture = true; emit(f, FACE_EVENT_DRAG);
+        }
+    } else if (code == LV_EVENT_LONG_PRESSED && !f->press_gesture) {
+        f->press_gesture = true;
+        emit(f, FACE_EVENT_LONG_PRESS);
+    }
+}
+
+void face_get_touch_point(const face_view_t *f, int *x, int *y) {
+    if (x) *x = f ? f->touch_x : 0;
+    if (y) *y = f ? f->touch_y : 0;
+}
+
+void face_double_blink(face_view_t *f) {
+    if (!f || !f->animation_active || !expression_can_blink(f->state.expression) || f->blink_anim_running) return;
+    f->blink_twice = true;
+    start_blink(f, lv_tick_get());
+}
+
 static void tap_face(lv_event_t *event) {
     face_view_t *f = lv_event_get_user_data(event);
+    if (f && f->press_gesture) { f->press_gesture = false; return; } /* the press was a gesture */
     if (f && !face_settings_is_open(f->settings)) {
         face_reveal_settings(f);
         emit(f, FACE_EVENT_TOUCH);
@@ -271,11 +331,14 @@ static void animation_tick(lv_timer_t *timer) {
 
     const bool auto_blink = expression_can_blink(f->state.expression);
     if (auto_blink && !f->blink_anim_running &&
-        (uint32_t)(now - f->blink_start) >= f->theme->blink_interval_ms) {
+        (uint32_t)(now - f->blink_start) >= (f->blink_gap ? f->blink_gap : f->theme->blink_interval_ms)) {
         start_blink(f, now);
     }
 
-    const int factor = clamp(f->theme->gaze_smoothing, 1, 20);
+    int factor = clamp(f->theme->gaze_smoothing, 1, 20);
+    /* Glance pace follows mood: lazy when bored or drowsy, quick when excited. */
+    if (f->state.expression == FACE_EX_BORED || f->state.expression == FACE_EX_DROWSY) factor = clamp(factor * 2, 1, 20);
+    else if (f->state.expression == FACE_EX_EXCITED || f->state.expression == FACE_EX_OVERJOYED) factor = clamp(factor / 2, 1, 20);
     int tx = f->requested_gaze_x, ty = f->requested_gaze_y;
     if (f->state.expression == FACE_EX_THINKING) {
         /* Thinking: look up and to the side, then slowly scan, as if searching. */
@@ -331,6 +394,9 @@ face_view_t *face_create(lv_obj_t *parent) {
     lv_obj_remove_flag(f->root, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(f->root, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(f->root, tap_face, LV_EVENT_CLICKED, f);
+    lv_obj_add_event_cb(f->root, press_face, LV_EVENT_PRESSED, f);
+    lv_obj_add_event_cb(f->root, press_face, LV_EVENT_PRESSING, f);
+    lv_obj_add_event_cb(f->root, press_face, LV_EVENT_LONG_PRESSED, f);
 
     /* Owns whatever children its installed renderer creates. */
     f->eyes_host = lv_obj_create(f->root);

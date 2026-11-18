@@ -102,6 +102,7 @@ typedef struct {
     bot_session_token_t replace_token; /* read/written under the display lock */
     char rendered_expression[BOT_EXPRESSION_MAX_BYTES + 1];
     bot_conversation_t rendered_conversation;
+    uint8_t rendered_blink;
 } app_t;
 
 static void post(app_t *app, const bot_event_t *event) {
@@ -240,8 +241,14 @@ static void audio_event(void *context, const bot_audio_event_t *source) {
         event.data.sound.direction_valid = source->direction_valid;
         event.data.sound.azimuth_deg = source->azimuth_deg;
         event.data.sound.quality = source->direction_quality;
-        ESP_LOGI(TAG, "sound activity speech=%d direction_valid=%d az=%.1f quality=%.1f eye_if_awake=%d (screen-x)",
-                 source->speech, source->direction_valid, source->azimuth_deg, source->direction_quality,
+        if (!source->speech && app->audio) {
+            /* A sharp non-speech peak in the current block reads as a bang (threshold untuned). */
+            bot_audio_status_t audio;
+            bot_audio_get_status(app->audio, &audio);
+            event.data.sound.loud = audio.microphone_peak >= 20000 || audio.microphone_peak_2 >= 20000;
+        }
+        ESP_LOGI(TAG, "sound activity loud=%d speech=%d direction_valid=%d az=%.1f quality=%.1f eye_if_awake=%d (screen-x)",
+                 event.data.sound.loud, source->speech, source->direction_valid, source->azimuth_deg, source->direction_quality,
                  source->direction_valid ? attention_sound_eye_x(source->azimuth_deg) : 0);
         break;
     case BOT_AUDIO_EVENT_PLAYBACK_STARTED:
@@ -481,6 +488,16 @@ static void usb_manual_task(void *context) {
 static void face_event(face_event_t event, void *context) {
     app_t *app = context;
     if (event == FACE_EVENT_TOUCH) { touch_wake(app); return; }
+    if (event == FACE_EVENT_LONG_PRESS || event == FACE_EVENT_RUB || event == FACE_EVENT_DRAG) {
+        int x = 0, y = 0;
+        face_get_touch_point(app->face, &x, &y);
+        if (event != FACE_EVENT_DRAG) ESP_LOGI(TAG, "Touch gesture=%s", event == FACE_EVENT_RUB ? "rub" : "long_press");
+        post(app, &(bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE, .source=BOT_SOURCE_LOCAL_UI,
+            .observed_ms=bot_platform_now_ms(), .data.touch={.intentional=true,
+            .gesture=event == FACE_EVENT_LONG_PRESS ? 1 : event == FACE_EVENT_RUB ? 2 : 3,
+            .x=(int8_t)x, .y=(int8_t)y}});
+        return;
+    }
     if (event == FACE_EVENT_ASK_AGAIN || event == FACE_EVENT_SUPPLEMENT) {
         if (app->replace_token.session_id) post(app,&(bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,.source=BOT_SOURCE_LOCAL_UI,
             .observed_ms=bot_platform_now_ms(),.token=app->replace_token,.data.touch={.intentional=true,.supplement=event==FACE_EVENT_SUPPLEMENT}});
@@ -861,6 +878,7 @@ static void reconcile(app_t *app, uint32_t now_ms) {
         ESP_LOGI(TAG, "Idle glance target=(%d,%d)", gaze.eye_x, gaze.eye_y);
     if (idle_look) gaze_source = "idle";
     if (near_face) { gaze.eye_x = 0; gaze.eye_y = 0; gaze_source = "near_face"; }
+    if (s->touch_gaze_valid) { gaze.eye_x = s->touch_gaze_x; gaze.eye_y = s->touch_gaze_y; gaze_source = "touch"; }
 #if CONFIG_ESPBOT_USB_DEBUG_PREVIEW
     const bool eye_test_allowed = bot_debug_preview_enabled() && platform.display_awake &&
         !s->critical_fault && !s->settings_open && s->behavior != BOT_BEHAVIOR_NIGHT_DARK;
@@ -913,6 +931,8 @@ static void reconcile(app_t *app, uint32_t now_ms) {
         if (s->conversation == BOT_CONVERSATION_SUBMITTED && app->rendered_conversation != BOT_CONVERSATION_SUBMITTED)
             face_nod(app->face);
         app->rendered_conversation = s->conversation;
+        if (s->blink_request != app->rendered_blink) face_double_blink(app->face);
+        app->rendered_blink = s->blink_request;
         face_get_gaze(app->face, &rendered_gaze_x, &rendered_gaze_y);
         rendered_gaze_valid = true;
         face_set_stop_visible(app->face, s->behavior == BOT_BEHAVIOR_WAKING ||

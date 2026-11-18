@@ -89,7 +89,8 @@ typedef struct {
     bool settings_has_value;
     union {
         struct { bot_wake_phrase_t phrase; float confidence; bool echo_safe; bool confidence_available; } wake;
-        struct { bool intentional, supplement; } touch;
+        /* gesture: 0 tap, 1 long press, 2 rub, 3 drag; x/y are -100..100 screen offsets. */
+        struct { bool intentional, supplement; uint8_t gesture; int8_t x, y; } touch;
         struct { bool echo_safe; } utterance;
         struct { uint32_t id; bool local_response; bool preview;
             bot_playback_purpose_t purpose; bool presentation_managed; } playback; /* real bot_audio operation */
@@ -100,7 +101,7 @@ typedef struct {
         struct { bool clock_valid; bool night; uint8_t local_hour; } night;
         struct { uint32_t code; } fault;
         struct { bot_session_end_code_t code; } session_end;
-        struct { bool direction_valid; float azimuth_deg, quality; } sound;
+        struct { bool direction_valid, loud; float azimuth_deg, quality; } sound;
         bot_voice_settings_t voice_settings;
         struct { bool ready; } capture;
         struct { bot_voice_command_t command; float score; } local_command;

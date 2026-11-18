@@ -68,8 +68,13 @@ void face_reveal_settings(face_view_t *view);
 
 typedef enum {
     FACE_EVENT_TOUCH, FACE_EVENT_STOP,
-    FACE_EVENT_SETTINGS_OPENED, FACE_EVENT_SETTINGS_CLOSED, FACE_EVENT_RESULT_DISMISSED, FACE_EVENT_ASK_AGAIN, FACE_EVENT_SUPPLEMENT
+    FACE_EVENT_SETTINGS_OPENED, FACE_EVENT_SETTINGS_CLOSED, FACE_EVENT_RESULT_DISMISSED, FACE_EVENT_ASK_AGAIN, FACE_EVENT_SUPPLEMENT,
+    FACE_EVENT_LONG_PRESS, FACE_EVENT_RUB, FACE_EVENT_DRAG /* gestures; one per press except DRAG */
 } face_event_t;
+/** Last touch point as -100..100 offsets from the face centre. */
+void face_get_touch_point(const face_view_t *view, int *x, int *y);
+/** Two quick blinks, e.g. when a face appears. */
+void face_double_blink(face_view_t *view);
 /** UI events are intent only; runtime owns behavior. Callback runs under the
  * LVGL lock and must only enqueue work. No driver/network calls in callback. */
 typedef void (*face_event_cb_t)(face_event_t event, void *context);

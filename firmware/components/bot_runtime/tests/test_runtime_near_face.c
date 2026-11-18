@@ -1003,8 +1003,81 @@ static void test_wait_feedback_and_interruption(bool replace, bool supplement, b
     bot_runtime_destroy(runtime);
 }
 
+static void tap(bot_bus_t *bus, bot_runtime_t *runtime, uint32_t now, uint8_t gesture, int8_t x)
+{
+    post_event(bus, runtime, (bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE, .source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=now, .data.touch={.intentional=true, .gesture=gesture, .x=x}});
+}
+
+static void test_touch_gestures_are_contextual(void)
+{
+    bot_bus_t bus = {0};
+    bot_runtime_t *runtime = NULL;
+    bot_runtime_snapshot_t state;
+    assert(bot_runtime_create(&bus, NULL, NULL, NULL, 1000, &runtime) == ESP_OK);
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_AUDIO_HEALTH, .source=BOT_SOURCE_AUDIO,
+        .observed_ms=1010, .data.health={.available=true}});
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_LINK_STATE, .source=BOT_SOURCE_LINK,
+        .observed_ms=1020, .data.link={.connected=true,.authenticated=true,.encrypted=true}});
+    /* Long press: affection and a double blink, never a session. */
+    bot_runtime_get_snapshot(runtime, &state);
+    const uint8_t blinks = state.blink_request;
+    tap(&bus, runtime, 1100, 1, 0);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!strcmp(state.expression, "affection") && !state.token.session_id && state.blink_request != blinks);
+    bot_runtime_step(runtime, 3700);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(strcmp(state.expression, "affection") && !state.token.session_id);
+    /* Drag: the eyes follow the finger briefly. */
+    tap(&bus, runtime, 3800, 3, 40);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.touch_gaze_valid && state.touch_gaze_x == 40 && !state.token.session_id);
+    bot_runtime_step(runtime, 4500);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.touch_gaze_valid);
+    /* A poke storm right after waking: grumble, laugh it off, no question asked. */
+    for (uint32_t t = 5000; t <= 5450; t += 150) tap(&bus, runtime, t, 0, 0);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.token.session_id && !strcmp(state.expression, "annoyed"));
+    bot_runtime_step(runtime, 6400);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!strcmp(state.expression, "laughing") && !strcmp(state.caption, "别戳啦～"));
+    bot_runtime_step(runtime, 8100);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!*state.caption && !state.token.session_id);
+    /* One tap wakes; a tap while thinking adds a sentence; a tap while speaking stops. */
+    tap(&bus, runtime, 10000, 0, 0);
+    bot_runtime_get_snapshot(runtime, &state);
+    bot_session_token_t token = state.token;
+    assert(token.session_id && state.conversation == BOT_CONVERSATION_LISTENING);
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_UTTERANCE_STARTED,.source=BOT_SOURCE_AUDIO,.observed_ms=10100,.token=token});
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_UTTERANCE_ENDED,.source=BOT_SOURCE_AUDIO,.observed_ms=10200,.token=token});
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_TURN_SUBMITTED,.source=BOT_SOURCE_LINK,.observed_ms=10300,.token=token});
+    bus.command=(bot_command_t){.kind=BOT_COMMAND_THINKING,.received_ms=10400,.token=token};
+    bus.has_command=true; bot_runtime_step(runtime,10400);
+    tap(&bus, runtime, 11500, 0, 0);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.supplement_turn && state.token.turn_id == token.turn_id + 1 &&
+           state.conversation == BOT_CONVERSATION_LISTENING);
+    token = state.token;
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_UTTERANCE_STARTED,.source=BOT_SOURCE_AUDIO,.observed_ms=11600,.token=token});
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_UTTERANCE_ENDED,.source=BOT_SOURCE_AUDIO,.observed_ms=11700,.token=token});
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_TURN_SUBMITTED,.source=BOT_SOURCE_LINK,.observed_ms=11800,.token=token});
+    bus.command=(bot_command_t){.kind=BOT_COMMAND_THINKING,.received_ms=11850,.token=token};
+    bus.has_command=true; bot_runtime_step(runtime,11850);
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_PLAYBACK_STARTED,.source=BOT_SOURCE_AUDIO,
+        .observed_ms=11900,.token=token,.data.playback={.id=7}});
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.conversation == BOT_CONVERSATION_SPEAKING);
+    tap(&bus, runtime, 13000, 0, 0);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.token.session_id && state.conversation == BOT_CONVERSATION_NONE);
+    bot_runtime_destroy(runtime);
+}
+
 int main(void)
 {
+    test_touch_gestures_are_contextual();
     test_wait_feedback_and_interruption(false,false,false);
     test_wait_feedback_and_interruption(true,false,false);
     test_wait_feedback_and_interruption(false,true,false);

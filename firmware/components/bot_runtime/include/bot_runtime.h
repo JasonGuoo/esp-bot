@@ -57,6 +57,9 @@ typedef struct {
     bool near_face;              /* large nearby face, not a gaze/consent claim */
     uint16_t near_face_area_permille; /* largest fresh face box / full image */
     bool sound_reaction, sound_direction_valid;
+    bool touch_gaze_valid;       /* idle finger drag; the eyes follow, no session */
+    int8_t touch_gaze_x, touch_gaze_y;
+    uint8_t blink_request;       /* changes when the face should double blink */
     float sound_azimuth_deg;     /* two-microphone direction; no elevation or identity */
     bool link_connected, link_authenticated, link_encrypted;
     bool audio_available, camera_available;
