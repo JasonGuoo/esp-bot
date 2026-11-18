@@ -6,7 +6,7 @@
 #define BOT_AUDIO_MULTINET_MODEL "mn7_cn"
 #define BOT_AUDIO_MULTINET_COMMAND "xiao dai xiao dai"
 
-typedef enum { BOT_KEYWORD_WAKE_ONLY, BOT_KEYWORD_COMMANDS, BOT_KEYWORD_STOP_ONLY } bot_keyword_policy_t;
+typedef enum { BOT_KEYWORD_WAKE_ONLY, BOT_KEYWORD_COMMANDS, BOT_KEYWORD_STOP_ONLY, BOT_KEYWORD_WAIT_CONTROLS } bot_keyword_policy_t;
 
 /* One instance, owned by the capture/AFE worker. No pre-wake recording cache. */
 typedef struct {

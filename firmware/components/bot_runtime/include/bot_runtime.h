@@ -47,6 +47,7 @@ typedef struct {
     bool sound_preview_active; /* explicit settings audition; no microphone/session lease */
     bool capture_ready;        /* AUDIO confirms current token's DMA fence is clear */
     bool transport_ready;      /* LINK confirms current token's authenticated media path */
+    bool supplement_turn;     /* explicitly adds input to the previous foreground turn */
     bool followup_armed;       /* next token allocated before follow-up speech starts */
     bool display_awake_requested, camera_requested;
     bool audio_session_requested; /* local post-wake permission, never opens a second mic */

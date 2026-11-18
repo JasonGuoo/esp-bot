@@ -31,6 +31,7 @@ typedef enum {
     BOT_VOICE_COMMAND_HAPPY,
     BOT_VOICE_COMMAND_REPEAT,
     BOT_VOICE_COMMAND_UNMUTE,
+    BOT_VOICE_COMMAND_SUPPLEMENT,
 } bot_voice_command_t;
 
 /* Small, metadata-only snapshot for the sound settings page. Never audio data. */

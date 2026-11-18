@@ -52,6 +52,12 @@ int main(void) {
     assert(bot_audio_keyword_detect(&keyword, pcm, 512, -20.0f, true, true) == 0);
     result.prob[0] = 0.95f;
     assert(bot_audio_keyword_detect(&keyword, pcm, 512, -20.0f, true, true) == BOT_VOICE_COMMAND_STOP);
+    result.command_id[0] = BOT_VOICE_COMMAND_SUPPLEMENT;
+    assert(bot_audio_keyword_detect(&keyword, pcm, 512, -20.0f, true, true) == 0);
+    keyword.policy = BOT_KEYWORD_WAIT_CONTROLS;
+    assert(bot_audio_keyword_detect(&keyword, pcm, 512, -20.0f, true, true) == BOT_VOICE_COMMAND_SUPPLEMENT);
+    keyword.policy = BOT_KEYWORD_WAKE_ONLY;
+    assert(bot_audio_keyword_detect(&keyword, pcm, 512, -20.0f, true, true) == 0);
     result.command_id[0] = 999;
     assert(bot_audio_keyword_detect(&keyword, pcm, 512, -20.0f, true, true) == 0);
     puts("PASS keyword frame retention, VAD boundaries, permission closure and invalid energy");

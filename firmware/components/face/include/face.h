@@ -63,13 +63,13 @@ void face_reveal_settings(face_view_t *view);
 
 typedef enum {
     FACE_EVENT_TOUCH, FACE_EVENT_STOP,
-    FACE_EVENT_SETTINGS_OPENED, FACE_EVENT_SETTINGS_CLOSED, FACE_EVENT_RESULT_DISMISSED, FACE_EVENT_ASK_AGAIN
+    FACE_EVENT_SETTINGS_OPENED, FACE_EVENT_SETTINGS_CLOSED, FACE_EVENT_RESULT_DISMISSED, FACE_EVENT_ASK_AGAIN, FACE_EVENT_SUPPLEMENT
 } face_event_t;
 /** UI events are intent only; runtime owns behavior. Callback runs under the
  * LVGL lock and must only enqueue work. No driver/network calls in callback. */
 typedef void (*face_event_cb_t)(face_event_t event, void *context);
 void face_on_event(face_view_t *view, face_event_cb_t callback, void *context);
-void face_set_turn_controls(face_view_t *view, bool replace, const char *status);
+void face_set_turn_controls(face_view_t *view, bool replace, bool supplement, const char *status);
 void face_set_stop_visible(face_view_t *view, bool visible);
 /** Pause only the rendering animation timer, e.g. behind logical blackout.
  * Does not disable board touch or decide when to sleep. */

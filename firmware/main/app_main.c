@@ -480,9 +480,9 @@ static void usb_manual_task(void *context) {
 static void face_event(face_event_t event, void *context) {
     app_t *app = context;
     if (event == FACE_EVENT_TOUCH) { touch_wake(app); return; }
-    if (event == FACE_EVENT_ASK_AGAIN) {
+    if (event == FACE_EVENT_ASK_AGAIN || event == FACE_EVENT_SUPPLEMENT) {
         if (app->replace_token.session_id) post(app,&(bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,.source=BOT_SOURCE_LOCAL_UI,
-            .observed_ms=bot_platform_now_ms(),.token=app->replace_token,.data.touch.intentional=true});
+            .observed_ms=bot_platform_now_ms(),.token=app->replace_token,.data.touch={.intentional=true,.supplement=event==FACE_EVENT_SUPPLEMENT}});
         return;
     }
     if (event == FACE_EVENT_STOP) { bot_bus_request_stop(app->bus, bot_platform_now_ms()); return; }
@@ -542,12 +542,16 @@ static void apply_audio_session(app_t *app, const bot_runtime_snapshot_t *state)
                            state->conversation == BOT_CONVERSATION_WAITING;
     const bool mac_session_possible = state->link_connected && state->link_authenticated && state->link_encrypted;
     const bot_audio_session_options_t options = {
-        .deliver_pcm = listening && state->audio_uplink_permitted && brain_secure_uplink(&state->token),
+        /* After VAD release, drain the existing network queue and retain a
+         * bounded same-token onset locally if speech resumes before commit. */
+        .deliver_pcm = listening && state->utterance_active && state->audio_uplink_permitted && brain_secure_uplink(&state->token),
         /* No pending network utterance exists when the Mac is offline. Keep
          * local commands enabled without an irrelevant 800 ms overflow limit. */
         .retain_start = listening && state->audio_session_requested && mac_session_possible,
         .waiting_for_followup = state->followup_armed,
         .local_commands = listening && state->audio_session_requested,
+        .allow_wait_supplement = brain_secure_live_turns() &&
+            (state->conversation == BOT_CONVERSATION_SUBMITTED || state->conversation == BOT_CONVERSATION_THINKING),
         .stop_only = state->audio_session_requested && !state->playback_id &&
             (state->conversation == BOT_CONVERSATION_SUBMITTED || state->conversation == BOT_CONVERSATION_THINKING),
     };
@@ -918,7 +922,7 @@ static void reconcile(app_t *app, uint32_t now_ms) {
             if (seconds>=3) snprintf(wait,sizeof(wait),"%s · %u 秒",stages[s->wait_stage],seconds);
             else snprintf(wait,sizeof(wait),"%s",stages[s->wait_stage]);
         }
-        face_set_turn_controls(app->face,replace,wait);
+        face_set_turn_controls(app->face,replace,replace && brain_secure_live_turns(),wait);
         const char *caption = s->caption;
         if (s->critical_fault) caption = s->fault_recoverable ? "请点击停止，再唤醒小呆" : "小呆需要重新启动";
         if ((!*caption || strcmp(caption, "请说") == 0) && s->audio_session_requested &&

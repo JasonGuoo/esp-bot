@@ -89,7 +89,7 @@ typedef struct {
     bool settings_has_value;
     union {
         struct { bot_wake_phrase_t phrase; float confidence; bool echo_safe; bool confidence_available; } wake;
-        struct { bool intentional; } touch;
+        struct { bool intentional, supplement; } touch;
         struct { bool echo_safe; } utterance;
         struct { uint32_t id; bool local_response; bool preview;
             bot_playback_purpose_t purpose; bool presentation_managed; } playback; /* real bot_audio operation */

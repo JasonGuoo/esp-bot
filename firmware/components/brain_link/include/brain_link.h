@@ -20,6 +20,7 @@ esp_err_t brain_link_wifi_provision(const char *base64_json);
  * base64 JSON over a physically connected USB console, never the LAN. */
 esp_err_t brain_secure_start(bot_bus_t *bus, bot_audio_t *audio);
 esp_err_t brain_secure_provision(const char *base64_json);
+bool brain_secure_live_turns(void);
 void brain_secure_update(const bot_runtime_snapshot_t *state);
 /** True only for this token's established capture transport. Runtime must also
  * authorize capture/delivery; follow-up preparation alone never sends PCM. */

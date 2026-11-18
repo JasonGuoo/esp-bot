@@ -41,6 +41,7 @@ typedef struct {
     phase_t phase;
     bool authenticated, active, utterance, audio_allowed, pcm_permitted, silent_supported;
     bool audio_supported, spoken_answers, session_spoken, followup_armed;
+    bool live_available, live_session, supplement_turn;
     bool presentation_supported, presentation_valid, segment_active, segment_final;
     bool segment_text_done, segment_image_done, segment_audio_done, segment_failed, segment_video;
     uint32_t presentation_sequence, presentation_index, segment_generation, presented_segments, segment_hold_ms;
@@ -89,7 +90,8 @@ static atomic_bool s_playback_event_overflow;
 typedef struct {
     bot_audio_event_kind_t kind;
     bot_session_token_t token;
-    uint32_t playback_id, stream, frames, bytes;
+    uint32_t playback_id, stream, frames, bytes, sample_position;
+    uint64_t observed_ms;
     uint32_t presentation_sequence;
     esp_err_t error;
 } playback_event_t;
@@ -300,13 +302,20 @@ done:
     memset(decoded,0,3001); free(decoded); return result;
 }
 
+bool brain_secure_live_turns(void) {
+    portENTER_CRITICAL(&s_lock);
+    bool enabled=s.authenticated && s.active && s.live_session;
+    portEXIT_CRITICAL(&s_lock);
+    return enabled;
+}
+
 void brain_secure_update(const bot_runtime_snapshot_t *state) {
     if (!state) return;
     portENTER_CRITICAL(&s_lock);
     s.active=state->audio_session_requested; s.utterance=state->utterance_active;
     s.activation=state->activation; s.desired=state->token;
     s.pcm_permitted=state->audio_uplink_permitted;
-    s.followup_armed=state->followup_armed;
+    s.followup_armed=state->followup_armed; s.supplement_turn=state->supplement_turn;
     s.spoken_answers=state->voice_settings.spoken_answers;
     s.voice_settings=state->voice_settings;s.voice_settings_open=state->settings_open;
     s.remote_volume_request_id=state->remote_volume_request_id;
@@ -369,6 +378,7 @@ void brain_secure_audio_event(const bot_audio_event_t *event) {
         (event->playback_id==s.playback_id || (!s.playback_id && s.phase==PLAYBACK_PENDING));
     playback_event_t copied={.kind=event->kind,.token=token,.playback_id=event->playback_id,
         .stream=s.playback_stream,.frames=s.playback_sequence,.bytes=s.playback_received,.error=event->error,
+        .sample_position=event->written_samples,.observed_ms=(uint64_t)(event->observed_us/1000),
         .presentation_sequence=event->presentation_managed?s.segment_generation:0};
     portEXIT_CRITICAL(&s_lock);
     if (current && xQueueSend(s_playback_events,&copied,0)!=pdTRUE)
@@ -630,7 +640,8 @@ static void presentation_segment(cJSON *root, bot_session_token_t token) {
           !strcmp(pid->valuestring,s.presentation_id) && !strcmp(lease->valuestring,s.output_lease_id) &&
           now-s.presentation_started_us<120000000) ||
          (s.presentation_valid && seq==1 && index==s.presentation_index+1 &&
-          (s.playback_purpose==BOT_PLAYBACK_TASK_ACK || s.playback_purpose==BOT_PLAYBACK_PROGRESS) &&
+          (s.playback_purpose==BOT_PLAYBACK_TASK_ACK || s.playback_purpose==BOT_PLAYBACK_PROGRESS ||
+           (s.live_session && s.playback_purpose==BOT_PLAYBACK_CONTENT)) &&
           strcmp(pid->valuestring,s.presentation_id) && strcmp(lease->valuestring,s.output_lease_id)));
     if (valid) {
         if (!s.presentation_valid || index!=s.presentation_index) {
@@ -676,6 +687,8 @@ static void text_message(const char *data,size_t n) {
             bool audio_supported=array_has_string(cJSON_GetObjectItemCaseSensitive(root,"capabilities"),"audio.reply.v1");
             portENTER_CRITICAL(&s_lock); s.authenticated=true; s.silent_supported=supported;
             s.audio_supported=audio_supported;
+            s.live_available=array_has_string(cJSON_GetObjectItemCaseSensitive(root,"capabilities"),"conversation.live.v1");
+            s.live_session=false;
             s.presentation_supported=array_has_string(cJSON_GetObjectItemCaseSensitive(root,"capabilities"),"presentation.segments.v1");
             s.phase=READY; portEXIT_CRITICAL(&s_lock);
             link_event(true); ESP_LOGI(TAG,"Authenticated Mac gateway connected");
@@ -778,7 +791,10 @@ static void text_message(const char *data,size_t n) {
                 !array_has_string(cJSON_GetObjectItemCaseSensitive(output,"cards"),"text")) {
                 finish_with_message(current,"请更新 Mac 小呆服务",false);
             } else {
-                portENTER_CRITICAL(&s_lock); if (s.phase==OPENING) s.phase=OPEN; portEXIT_CRITICAL(&s_lock);
+                bool live=cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(output,"live_turns"));
+                portENTER_CRITICAL(&s_lock);
+                if (s.phase==OPENING) {s.phase=OPEN; s.live_session=s.live_available && live;}
+                portEXIT_CRITICAL(&s_lock);
             }
         } else if (fresh && cJSON_IsTrue(ok) && beginning) {
             cJSON *payload=cJSON_GetObjectItemCaseSensitive(root,"payload");
@@ -856,6 +872,24 @@ static void text_message(const char *data,size_t n) {
         portENTER_CRITICAL(&s_lock); bool fresh=s.authenticated&&s.active&&same(s.desired,s.remote); token=s.remote; phase_t phase=s.phase; portEXIT_CRITICAL(&s_lock);
         if (!strcmp(event->valuestring,"presentation.segment") && fresh) {
             presentation_segment(root,token);
+        } else if (!strcmp(event->valuestring,"presentation.end") && fresh) {
+            cJSON *p=cJSON_GetObjectItemCaseSensitive(root,"payload");
+            cJSON *plan=cJSON_GetObjectItemCaseSensitive(p,"presentation_id");
+            cJSON *lease=cJSON_GetObjectItemCaseSensitive(p,"output_lease_id");
+            uint32_t index=0,seq=0; bot_session_token_t returned;
+            if (!json_token(cJSON_GetObjectItemCaseSensitive(root,"runtime"),&returned) ||
+                !presentation_id_valid(plan) || !presentation_id_valid(lease) ||
+                !json_uint(cJSON_GetObjectItemCaseSensitive(p,"presentation_index"),64,&index) ||
+                !json_uint(cJSON_GetObjectItemCaseSensitive(p,"seq"),64,&seq)) goto done;
+            portENTER_CRITICAL(&s_lock);
+            bool sealed=s.live_session && s.active && s.authenticated && same(s.desired,returned) &&
+                same(s.remote,returned) && s.phase==COMMITTED && s.presentation_valid && !s.segment_active &&
+                !s.segment_failed && !s.playback_id && s.playback_purpose==BOT_PLAYBACK_CONTENT &&
+                index==s.presentation_index && seq==s.presentation_sequence &&
+                !strcmp(plan->valuestring,s.presentation_id) && !strcmp(lease->valuestring,s.output_lease_id);
+            if (sealed) s.phase=WAIT_NEXT;
+            portEXIT_CRITICAL(&s_lock);
+            if (sealed) command(BOT_COMMAND_PRESENTATION_DONE,returned,NULL);
         } else if (!strcmp(event->valuestring,"turn.accepted") && fresh && phase==COMMITTED) {
             bot_session_token_t returned;
             if (cJSON_IsString(id) && json_token(cJSON_GetObjectItemCaseSensitive(root,"runtime"),&returned) && same(returned,token)) {
@@ -1192,9 +1226,9 @@ static bool playback_report(const playback_event_t *event, const char *status, c
     char id[24],runtime[180],message[480];
     request_id(id,sizeof(id));runtime_json(runtime,sizeof(runtime),event->token);
     int n=snprintf(message,sizeof(message),
-        "{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"audio.playback.report\",\"payload\":{\"runtime\":%s,\"stream_id\":%lu,\"status\":\"%s\",\"frames\":%lu,\"bytes\":%lu,\"code\":\"%s\"}}",
+        "{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"audio.playback.report\",\"payload\":{\"runtime\":%s,\"stream_id\":%lu,\"status\":\"%s\",\"frames\":%lu,\"bytes\":%lu,\"sample_position\":%lu,\"device_monotonic_ms\":%llu,\"code\":\"%s\"}}",
         id,runtime,(unsigned long)event->stream,status,(unsigned long)event->frames,
-        (unsigned long)event->bytes,code?code:"");
+        (unsigned long)event->bytes,(unsigned long)event->sample_position,(unsigned long long)event->observed_ms,code?code:"");
     return n>0 && (size_t)n<sizeof(message) && send_text(message);
 }
 static bool playback_event_poll(void) {
@@ -1578,6 +1612,7 @@ static bool send_packet(const pcm_frame_t *packet,uint32_t stream,uint32_t seque
 }
 static void secure_task(void *unused) {
     (void)unused;
+    bool pause_sent=false;
     bool heard=false, ending=false, diagnostic_paused=false;
     int64_t ending_us=0, started_us=0, diagnostic_started_us=0;
     image_download_t download={0};
@@ -1646,7 +1681,7 @@ static void secure_task(void *unused) {
             char id[24], runtime[180], msg[1100]; request_id(id,sizeof(id)); runtime_json(runtime,sizeof(runtime),state.desired);
             const char *activation=state.activation==BOT_ACTIVATION_WAKE_WORD?"wake_word":"touch";
             bool spoken=state.spoken_answers && state.audio_supported;
-            snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"session.open\",\"payload\":{\"activation\":\"%s\",\"keyword\":\"小呆小呆\",\"runtime\":%s,\"output\":{\"version\":1,\"audio\":%s,\"cards\":[\"text\",\"image\"],\"image\":{\"mime\":\"image/jpeg\",\"max_width\":480,\"max_height\":272,\"max_bytes\":65536},\"presentation\":{\"version\":1,\"max_segments\":64,\"max_duration_ms\":120000,\"frame_ack\":true},\"video\":{\"mime\":\"video/x-motion-jpeg\",\"transport\":\"jpeg_frames\",\"max_width\":480,\"max_height\":272,\"max_frame_bytes\":65536,\"max_fps\":5,\"max_duration_ms\":15000}}}}",id,activation,runtime,spoken?"true":"false");
+            snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"session.open\",\"payload\":{\"activation\":\"%s\",\"keyword\":\"小呆小呆\",\"runtime\":%s,\"output\":{\"version\":1,\"audio\":%s,\"cards\":[\"text\",\"image\"],\"image\":{\"mime\":\"image/jpeg\",\"max_width\":480,\"max_height\":272,\"max_bytes\":65536},\"presentation\":{\"version\":1,\"max_segments\":64,\"max_duration_ms\":120000,\"frame_ack\":true},\"live_turns\":true,\"video\":{\"mime\":\"video/x-motion-jpeg\",\"transport\":\"jpeg_frames\",\"max_width\":480,\"max_height\":272,\"max_frame_bytes\":65536,\"max_fps\":5,\"max_duration_ms\":15000}}}}",id,activation,runtime,spoken?"true":"false");
             portENTER_CRITICAL(&s_lock); s.remote=state.desired;s.session_spoken=spoken;s.cancel_before_next=false;snprintf(s.open_id,sizeof(s.open_id),"%s",id);s.phase=OPENING;portEXIT_CRITICAL(&s_lock);
             if (state.spoken_answers && !state.audio_supported) ESP_LOGW(TAG,"Mac lacks audio.reply.v1; continuing with text/image replies");
             if (!send_text(msg)) fail_operation(state.desired,"Could not open secure session");
@@ -1661,7 +1696,8 @@ static void secure_task(void *unused) {
             capture_event(state.remote,false);
             plain_close();flush_pcm();
             if (!(state.phase==WAIT_NEXT && state.followup_armed && !state.cancel_before_next)) {
-                if (!cancel_request("assistant.cancel",state.remote)) {vTaskDelay(pdMS_TO_TICKS(30));continue;}
+                const char *method=state.live_session && state.supplement_turn ? "assistant.supplement" : "assistant.cancel";
+                if (!cancel_request(method,state.remote)) {vTaskDelay(pdMS_TO_TICKS(30));continue;}
             }
             portENTER_CRITICAL(&s_lock);s.remote=state.desired;s.audio_allowed=false;s.cancel_before_next=false;s.phase=OPEN;portEXIT_CRITICAL(&s_lock);
             heard=false;ending=false;
@@ -1671,7 +1707,7 @@ static void secure_task(void *unused) {
             snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"audio.begin\",\"payload\":{\"stream_id\":%lu,\"format\":\"pcm_s16le\",\"sample_rate\":16000,\"channels\":1,\"transport\":\"plain_tcp_v1\",\"runtime\":%s}}",id,(unsigned long)stream,runtime);
             portENTER_CRITICAL(&s_lock);s.stream=stream;s.sequence=0;snprintf(s.begin_id,sizeof(s.begin_id),"%s",id);s.phase=BEGINNING;portEXIT_CRITICAL(&s_lock);
             if (!send_text(msg)) fail_operation(state.remote,"Could not start secure audio");
-            heard=false;ending=false;started_us=0;
+            heard=false;ending=false;started_us=0;pause_sent=false;
         } else if (state.phase==PLAIN_CONNECTING) {
             if (!plain_connect(&state)) fail_operation(state.remote,"Plain audio connection failed");
             else {
@@ -1703,12 +1739,23 @@ static void secure_task(void *unused) {
                 }
                 memset(&packet,0,sizeof(packet));
             }
+            if (state.live_session && ending && !pause_sent && uxQueueMessagesWaiting(s_pcm)==0) {
+                char id[24],runtime[180],message[370]; uint32_t frames;
+                portENTER_CRITICAL(&s_lock); frames=s.sequence; portEXIT_CRITICAL(&s_lock);
+                if (frames) {
+                    request_id(id,sizeof(id)); runtime_json(runtime,sizeof(runtime),state.remote);
+                    snprintf(message,sizeof(message),"{\"v\":3,\"type\":\"request\",\"method\":\"audio.pause\",\"id\":\"%s\",\"payload\":{\"stream_id\":%lu,\"frames\":%lu,\"runtime\":%s}}",
+                             id,(unsigned long)state.stream,(unsigned long)frames,runtime);
+                    pause_sent=true;
+                    (void)send_text(message);
+                }
+            }
             if (started_us && esp_timer_get_time()-started_us>29000000) { fail_operation(state.remote,"Speech capture timed out"); }
             else if (ending && esp_timer_get_time()-ending_us>200000 && uxQueueMessagesWaiting(s_pcm)==0) {
                 char id[24],runtime[180],msg[400];request_id(id,sizeof(id));runtime_json(runtime,sizeof(runtime),state.remote);
                 uint32_t frames;
                 portENTER_CRITICAL(&s_lock);frames=s.sequence;portEXIT_CRITICAL(&s_lock);
-                snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"audio.commit\",\"payload\":{\"stream_id\":%lu,\"frames\":%lu,\"runtime\":%s}}",id,(unsigned long)state.stream,(unsigned long)frames,runtime);
+                snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"audio.commit\",\"payload\":{\"stream_id\":%lu,\"frames\":%lu,\"runtime\":%s,\"device_monotonic_ms\":%llu,\"vad_end_ms\":%llu}}",id,(unsigned long)state.stream,(unsigned long)frames,runtime,(unsigned long long)(esp_timer_get_time()/1000),(unsigned long long)(ending_us/1000));
                 portENTER_CRITICAL(&s_lock);
                 bool current=s.authenticated && s.active && s.phase==CAPTURING &&
                     same(s.desired,state.remote) && same(s.remote,state.remote);

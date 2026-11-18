@@ -25,7 +25,7 @@ bool bot_voice_settings_equal(const bot_voice_settings_t *a, const bot_voice_set
 
 bool bot_voice_command_valid(bot_voice_command_t command)
 {
-    return command >= BOT_VOICE_COMMAND_VOLUME_UP && command <= BOT_VOICE_COMMAND_UNMUTE;
+    return command >= BOT_VOICE_COMMAND_VOLUME_UP && command <= BOT_VOICE_COMMAND_SUPPLEMENT;
 }
 
 const char *bot_voice_command_name(bot_voice_command_t command)
@@ -40,6 +40,7 @@ const char *bot_voice_command_name(bot_voice_command_t command)
     case BOT_VOICE_COMMAND_HAPPY: return "happy";
     case BOT_VOICE_COMMAND_REPEAT: return "repeat";
     case BOT_VOICE_COMMAND_UNMUTE: return "unmute";
+    case BOT_VOICE_COMMAND_SUPPLEMENT: return "supplement";
     default: return "none";
     }
 }

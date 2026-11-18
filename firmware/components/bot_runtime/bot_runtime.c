@@ -243,7 +243,7 @@ static void end_session(bot_runtime_t *runtime, uint32_t now_ms, session_end_rea
     derive_permissions(runtime);
 }
 
-static bool begin_turn(bot_runtime_t *runtime, uint32_t now_ms)
+static bool begin_turn_with_intent(bot_runtime_t *runtime, uint32_t now_ms, bool supplement)
 {
     bot_session_token_t old = runtime->state.token;
     runtime->state.wait_stage = BOT_WAIT_NONE;
@@ -263,6 +263,7 @@ static bool begin_turn(bot_runtime_t *runtime, uint32_t now_ms)
     runtime->state.playback_id = 0;
     runtime->state.local_response_active = false;
     runtime->state.followup_armed = false;
+    runtime->state.supplement_turn = supplement;
     runtime->state.capture_ready = runtime->state.transport_ready = false;
     runtime->response = NULL;
     runtime->response_playback_done = false;
@@ -275,6 +276,11 @@ static bool begin_turn(bot_runtime_t *runtime, uint32_t now_ms)
     reset_expression(runtime);
     derive_permissions(runtime);
     return true;
+}
+
+static bool begin_turn(bot_runtime_t *runtime, uint32_t now_ms)
+{
+    return begin_turn_with_intent(runtime, now_ms, false);
 }
 
 static bool arm_followup(bot_runtime_t *runtime, uint32_t now_ms)
@@ -303,6 +309,7 @@ static bool arm_followup(bot_runtime_t *runtime, uint32_t now_ms)
     runtime->waiting_for_approval = false;
     runtime->state.caption[0] = '\0';
     runtime->state.last_interaction_ms = now_ms;
+    runtime->state.supplement_turn = false;
     runtime->state.followup_armed = true;
     runtime->state.conversation = BOT_CONVERSATION_WAITING;
     reset_expression(runtime);
@@ -334,6 +341,7 @@ static bool begin_session(bot_runtime_t *runtime, uint32_t now_ms)
     runtime->state.playback_id = 0;
     runtime->state.local_response_active = false;
     runtime->state.sound_preview_active = false;
+    runtime->state.supplement_turn = false;
     runtime->state.followup_armed = false;
     runtime->state.capture_ready = runtime->state.transport_ready = false;
     runtime->response = NULL;
@@ -534,6 +542,11 @@ static void apply_local_command(bot_runtime_t *runtime, bot_voice_command_t comm
         end_session(runtime, now_ms, SESSION_DISMISSED);
         return;
     }
+    if (command == BOT_VOICE_COMMAND_SUPPLEMENT) {
+        dismiss_result(state);
+        begin_turn_with_intent(runtime,now_ms,true);
+        return;
+    }
     /* Recognition consumed this utterance locally. Revoke the old remote turn
      * before applying an action, even when the Mac is unavailable. */
     const bot_session_token_t old = state->token;
@@ -699,7 +712,7 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
                 (state->conversation!=BOT_CONVERSATION_SUBMITTED && state->conversation!=BOT_CONVERSATION_THINKING &&
                  state->conversation!=BOT_CONVERSATION_SPEAKING)) { state->rejected_events++; break; }
             dismiss_result(state);
-            if (begin_turn(runtime,now_ms)) state->activation=BOT_ACTIVATION_TOUCH;
+            if (begin_turn_with_intent(runtime,now_ms,event->data.touch.supplement)) state->activation=BOT_ACTIVATION_TOUCH;
             break;
         }
         if (state->critical_fault && runtime->overflow_fault && event->data.touch.intentional) {
@@ -827,8 +840,10 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
             !token_matches(runtime, &event->token, false) ||
             (state->conversation != BOT_CONVERSATION_LISTENING &&
              state->conversation != BOT_CONVERSATION_WAITING &&
-             !(event->data.local_command.command == BOT_VOICE_COMMAND_STOP && !state->playback_id &&
+             !((event->data.local_command.command == BOT_VOICE_COMMAND_STOP || event->data.local_command.command == BOT_VOICE_COMMAND_SUPPLEMENT) && !state->playback_id &&
                (state->conversation == BOT_CONVERSATION_THINKING || state->conversation == BOT_CONVERSATION_SUBMITTED))) ||
+            (event->data.local_command.command == BOT_VOICE_COMMAND_SUPPLEMENT &&
+             state->conversation != BOT_CONVERSATION_THINKING && state->conversation != BOT_CONVERSATION_SUBMITTED) ||
             !bot_voice_command_valid(event->data.local_command.command) ||
             !isfinite(event->data.local_command.score) || event->data.local_command.score < 0 ||
             event->data.local_command.score > 1) {
@@ -848,7 +863,7 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         /* Retire output/capture leases before returning to listening. The old
          * AFE onset is never relabelled; only subsequent fence-cleared audio
          * belongs to the new turn. Server task ownership stays server-side. */
-        begin_turn(runtime,now_ms);
+        begin_turn_with_intent(runtime,now_ms,true);
         break;
     case BOT_EVENT_UTTERANCE_STARTED:
         if (!is_active(runtime) || state->critical_fault || state->settings_open ||

@@ -29,13 +29,17 @@
 typedef struct { bot_voice_command_t id; const char *phrase; } local_phrase_t;
 static bool command_allowed(bot_keyword_policy_t policy, bot_voice_command_t id)
 {
-    return policy == BOT_KEYWORD_COMMANDS || (policy == BOT_KEYWORD_STOP_ONLY && id == BOT_VOICE_COMMAND_STOP);
+    if (policy == BOT_KEYWORD_WAIT_CONTROLS)
+        return id == BOT_VOICE_COMMAND_STOP || id == BOT_VOICE_COMMAND_SUPPLEMENT;
+    if (policy == BOT_KEYWORD_COMMANDS) return id != BOT_VOICE_COMMAND_SUPPLEMENT;
+    return policy == BOT_KEYWORD_STOP_ONLY && id == BOT_VOICE_COMMAND_STOP;
 }
 static const local_phrase_t s_commands[] = {
     {BOT_VOICE_COMMAND_VOLUME_UP, "sheng yin da yi dian"},
     {BOT_VOICE_COMMAND_VOLUME_DOWN, "sheng yin xiao yi dian"},
     {BOT_VOICE_COMMAND_QUIET, "an jing yi dian"},
     {BOT_VOICE_COMMAND_STOP, "ting zhi"},
+    {BOT_VOICE_COMMAND_SUPPLEMENT, "bu yi ju"},
     {BOT_VOICE_COMMAND_SLEEP, "wan an"},
     {BOT_VOICE_COMMAND_THEME_BLUE, "huan cheng lan se"},
     {BOT_VOICE_COMMAND_HAPPY, "kai xin yi dian"},

@@ -74,6 +74,7 @@ typedef struct {
     bool confidence_available;   /* MultiNet native score only; false for WakeNet */
     float confidence;            /* uncalibrated model score, NOT measured accuracy */
     uint32_t playback_id;
+    uint32_t written_samples; /* mono samples successfully written to the codec for this playback */
     bot_audio_playback_source_t playback_source; /* playback events only */
     bot_playback_purpose_t playback_purpose;
     bool presentation_managed; /* completion waits for all segment receipts */
@@ -127,6 +128,7 @@ typedef struct {
     bool retain_start;            /* explicit post-wake, same-token RAM capture */
     bool waiting_for_followup;    /* stricter VAD onset; no implicit token change */
     bool local_commands;          /* fixed local commands only in an active listening session */
+    bool allow_wait_supplement;  /* negotiated local control while the speaker is idle */
     bool stop_only;               /* submitted/quiet wait: local keyword only, never VAD or PCM */
 } bot_audio_session_options_t;
 

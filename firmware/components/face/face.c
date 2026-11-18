@@ -27,7 +27,7 @@ struct face_view {
     char result_value[384];
     char result_status_value[384], result_image_notice_value[384];
     lv_obj_t *gear_button, *gear_icon;
-    lv_obj_t *stop_button, *stop_icon, *replace_button, *replace_label, *wait_status;
+    lv_obj_t *stop_button, *stop_icon, *replace_button, *replace_label, *supplement_button, *supplement_label, *wait_status;
     char wait_text[80];
     face_settings_t *settings;
     const face_theme_t *theme;
@@ -87,6 +87,8 @@ static void paint_chrome(face_view_t *f) {
     lv_obj_set_style_text_color(f->stop_icon, lv_color_hex(t->chrome_text), 0);
     lv_obj_set_style_bg_color(f->replace_button,lv_color_hex(t->subtitle_bg),0);
     lv_obj_set_style_text_color(f->replace_label,lv_color_hex(t->chrome_text),0);
+    lv_obj_set_style_bg_color(f->supplement_button,lv_color_hex(t->subtitle_bg),0);
+    lv_obj_set_style_text_color(f->supplement_label,lv_color_hex(t->chrome_text),0);
     lv_obj_set_style_text_color(f->wait_status,lv_color_hex(t->subtitle_text),0);
     if (f->result_panel) {
         lv_obj_set_style_bg_color(f->result_panel, lv_color_hex(t->subtitle_bg), 0);
@@ -133,6 +135,7 @@ static void draw_face(face_view_t *f) {
     lv_obj_align(f->gear_button, LV_ALIGN_TOP_RIGHT, -24, 22);
     lv_obj_align(f->stop_button, LV_ALIGN_TOP_LEFT, 24, 16);
     lv_obj_align(f->replace_button, LV_ALIGN_TOP_LEFT, 132, 16);
+    lv_obj_align(f->supplement_button, LV_ALIGN_TOP_LEFT, 268, 16);
     lv_obj_align(f->wait_status, LV_ALIGN_TOP_MID, 0, h*72/100);
     if (f->settings && (w != f->last_layout_w || h != f->last_layout_h)) {
         face_settings_layout(f->settings, w, h);
@@ -213,7 +216,8 @@ static void tap_face(lv_event_t *event) {
 }
 
 static void ask_again(lv_event_t *event) {
-    emit(lv_event_get_user_data(event), FACE_EVENT_ASK_AGAIN);
+    face_view_t *f=lv_event_get_user_data(event);
+    emit(f,lv_event_get_target(event)==f->supplement_button ? FACE_EVENT_SUPPLEMENT : FACE_EVENT_ASK_AGAIN);
 }
 
 static void stop_pressed(lv_event_t *event) {
@@ -391,15 +395,20 @@ face_view_t *face_create(lv_obj_t *parent) {
     lv_label_set_text(f->stop_icon, "停止");
     lv_obj_center(f->stop_icon);
     visible(f->stop_button, false);
-    f->replace_button = lv_button_create(f->root);
-    lv_obj_set_size(f->replace_button,124,50);
-    lv_obj_set_style_radius(f->replace_button,LV_RADIUS_CIRCLE,0);
-    lv_obj_set_style_shadow_width(f->replace_button,0,0);
-    f->replace_label=lv_label_create(f->replace_button);
-    lv_obj_set_style_text_font(f->replace_label,&xiaodai_font_sc_30,0);
-    lv_label_set_text(f->replace_label,"重新说"); lv_obj_center(f->replace_label);
-    lv_obj_add_event_cb(f->replace_button,ask_again,LV_EVENT_CLICKED,f);
-    visible(f->replace_button,false);
+    for (unsigned i=0;i<2;++i) {
+        lv_obj_t *button=lv_button_create(f->root);
+        lv_obj_set_size(button,124,50);
+        lv_obj_set_style_radius(button,LV_RADIUS_CIRCLE,0);
+        lv_obj_set_style_shadow_width(button,0,0);
+        lv_obj_t *label=lv_label_create(button);
+        lv_obj_set_style_text_font(label,&xiaodai_font_sc_30,0);
+        lv_label_set_text(label,i?"补一句":"重新说");
+        lv_obj_center(label);
+        lv_obj_add_event_cb(button,ask_again,LV_EVENT_CLICKED,f);
+        visible(button,false);
+        if (i) {f->supplement_button=button;f->supplement_label=label;}
+        else {f->replace_button=button;f->replace_label=label;}
+    }
 
     f->settings = face_settings_create(f->root, applied_from_settings, f);
     if (!f->settings) {
@@ -660,9 +669,10 @@ void face_on_event(face_view_t *f, face_event_cb_t callback, void *context) {
     f->on_event = callback;
     f->event_context = context;
 }
-void face_set_turn_controls(face_view_t *f,bool replace,const char *status) {
+void face_set_turn_controls(face_view_t *f,bool replace,bool supplement,const char *status) {
     if (!f) return;
     visible(f->replace_button,replace);
+    visible(f->supplement_button,supplement);
     if (!status) status="";
     if (!strcmp(f->wait_text,status)) return;
     lv_strlcpy(f->wait_text,status,sizeof(f->wait_text));

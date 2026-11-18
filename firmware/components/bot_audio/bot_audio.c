@@ -121,7 +121,7 @@ struct bot_audio {
     bool playback_requested, playback_cancelled, playback_end_enqueued;
     bool echo_reset_pending;
     uint32_t echo_discard_frames;
-    uint32_t next_playback_id;
+    uint32_t next_playback_id, written_samples;
     bot_audio_token_t playback_token;
     int64_t playback_begin_us, last_queued_us, echo_tail_until_us, last_wake_us;
 };
@@ -960,8 +960,9 @@ static bool fetch_frame(bot_audio_t *a)
     bool graph_allowed = a->status.session_open &&
         epoch != 0 && epoch == detection_gate && !a->status.rx_discard_frames &&
         !a->status.command_consumed && !a->buffer_overflow_latched;
+    const bool wait_supplement = a->session_options.allow_wait_supplement;
     bot_keyword_policy_t command_mode = !graph_allowed ? BOT_KEYWORD_WAKE_ONLY :
-        a->session_options.stop_only ? BOT_KEYWORD_STOP_ONLY :
+        a->session_options.stop_only ? (wait_supplement ? BOT_KEYWORD_WAIT_CONTROLS : BOT_KEYWORD_STOP_ONLY) :
         a->session_options.local_commands ? BOT_KEYWORD_COMMANDS : BOT_KEYWORD_WAKE_ONLY;
     bool wake_cooldown_clear =
         (!a->last_wake_us || now - a->last_wake_us >= (int64_t)a->config.wake_debounce_ms * 1000);
@@ -1016,11 +1017,12 @@ static bool fetch_frame(bot_audio_t *a)
         (a->session_options.retain_start || a->session_options.deliver_pcm || a->session_options.local_commands);
     const bool waiting_for_followup = a->waiting_for_followup;
     bool command_allowed = detected >= BOT_VOICE_COMMAND_VOLUME_UP &&
-        detected <= BOT_VOICE_COMMAND_UNMUTE && detection_gate == a->gate_epoch && epoch == detection_gate &&
+        detected <= BOT_VOICE_COMMAND_SUPPLEMENT && detection_gate == a->gate_epoch && epoch == detection_gate &&
         a->run && a->capture_good && a->status.session_open && !a->status.command_consumed && !echo_block &&
         same_token(&a->session, &token) &&
         ((command_mode == BOT_KEYWORD_COMMANDS && vad_allowed && a->session_options.local_commands) ||
-         (command_mode == BOT_KEYWORD_STOP_ONLY && a->session_options.stop_only && detected == BOT_VOICE_COMMAND_STOP));
+         (a->session_options.stop_only && (command_mode == BOT_KEYWORD_STOP_ONLY || command_mode == BOT_KEYWORD_WAIT_CONTROLS) &&
+          (detected == BOT_VOICE_COMMAND_STOP || (detected == BOT_VOICE_COMMAND_SUPPLEMENT && a->session_options.allow_wait_supplement))));
     bool wake_allowed = wake && a->run && a->capture_good &&
         a->status.wake_status == BOT_AUDIO_WAKE_READY && detection_gate == a->gate_epoch && !echo_block &&
         (!a->last_wake_us || now - a->last_wake_us >= (int64_t)a->config.wake_debounce_ms * 1000);
@@ -1135,9 +1137,10 @@ static void finish_playback(bot_audio_t *a, uint32_t id, bot_audio_token_t token
             set_reason_locked(a, error, "Local playback failed; amplifier gated off");
         }
     }
+    uint32_t written = a->written_samples;
     UNLOCK(a);
     xSemaphoreGive(a->command_lock);
-    emit(a, (bot_audio_event_t){.kind = kind, .token = token, .playback_id = id,
+    emit(a, (bot_audio_event_t){.kind = kind, .token = token, .playback_id = id, .written_samples = written,
         .playback_source = source, .playback_purpose = purpose, .presentation_managed = managed,
         .error = error, .reason = error == ESP_OK ? NULL : "Local playback or DMA drain failed"});
 }
@@ -1223,6 +1226,7 @@ static void playback_worker(void *context)
         for (size_t i = 0; i < frame.count; ++i)
             for (unsigned channel=0;channel<a->codec_channels;channel++)
                 stereo[i*a->codec_channels+channel]=muted?0:frame.samples[i];
+        const uint32_t written_count = frame.count;
         esp_err_t err = esp_codec_dev_write(a->codec, stereo, frame.count * a->codec_channels * sizeof(int16_t));
         clear_audio(&frame, sizeof(frame));
         clear_audio(stereo,BOT_AUDIO_PLAYBACK_SAMPLES*a->codec_channels*sizeof(int16_t));
@@ -1230,9 +1234,11 @@ static void playback_worker(void *context)
         LOCK(a);
         current = a->run && a->playback_requested && !a->playback_cancelled && a->status.playback_id == id;
         if (err == ESP_OK) {
+            a->written_samples += written_count;
             a->status.last_playback_us = written_us;
             if (!started) a->status.last_playback_started_us = written_us;
         }
+        const uint32_t sample_position = a->written_samples;
         UNLOCK(a);
         if (err != ESP_OK) {
             finish_playback(a, id, token, BOT_AUDIO_EVENT_PLAYBACK_FAILED, err);
@@ -1240,12 +1246,12 @@ static void playback_worker(void *context)
             if (!started) {
                 last_progress_us = written_us;
                 emit(a, (bot_audio_event_t){.kind = BOT_AUDIO_EVENT_PLAYBACK_STARTED,
-                    .observed_us = written_us, .token = token, .playback_id = id, .playback_source = source,
+                    .observed_us = written_us, .token = token, .playback_id = id, .written_samples = sample_position, .playback_source = source,
                     .playback_purpose = purpose, .presentation_managed = managed});
             } else if (written_us - last_progress_us >= PLAYBACK_PROGRESS_US) {
                 last_progress_us = written_us;
                 emit(a, (bot_audio_event_t){.kind = BOT_AUDIO_EVENT_PLAYBACK_PROGRESS,
-                    .observed_us = written_us, .token = token, .playback_id = id, .playback_source = source,
+                    .observed_us = written_us, .token = token, .playback_id = id, .written_samples = sample_position, .playback_source = source,
                     .playback_purpose = purpose, .presentation_managed = managed});
             }
         }
@@ -1551,7 +1557,8 @@ esp_err_t bot_audio_set_session_ex(bot_audio_t *a, const bot_audio_token_t *toke
         a->session_options.deliver_pcm == next.deliver_pcm &&
         a->session_options.retain_start == next.retain_start &&
         a->session_options.waiting_for_followup == next.waiting_for_followup &&
-        a->session_options.local_commands == next.local_commands && a->session_options.stop_only == next.stop_only;
+        a->session_options.local_commands == next.local_commands && a->session_options.stop_only == next.stop_only &&
+        a->session_options.allow_wait_supplement == next.allow_wait_supplement;
     if (unchanged) {
         UNLOCK(a);
         return ESP_OK;
@@ -1559,7 +1566,7 @@ esp_err_t bot_audio_set_session_ex(bot_audio_t *a, const bot_audio_token_t *toke
     bot_audio_token_t old_token = a->session;
     bool was_ready = a->status.capture_ready;
     bool capture_requested = next.retain_start || next.deliver_pcm || next.local_commands;
-    if (!same_session || a->session_options.stop_only != next.stop_only) {
+    if (!same_session || a->session_options.stop_only != next.stop_only || a->session_options.allow_wait_supplement != next.allow_wait_supplement) {
         /* Drop frames from before the wait policy changed. In particular a
          * word in the submitted question cannot stop the pending answer. */
         if (++a->gate_epoch == 0) ++a->gate_epoch;
@@ -1624,6 +1631,7 @@ static esp_err_t playback_begin(bot_audio_t *a, const bot_audio_token_t *token,
     if (allowed) {
         if (++a->next_playback_id == 0) ++a->next_playback_id;
         a->status.playback_id = a->next_playback_id;
+        a->written_samples = 0;
         a->status.playback_source = source;
         a->status.playback_purpose = purpose;
         a->status.presentation_managed = presentation_managed;

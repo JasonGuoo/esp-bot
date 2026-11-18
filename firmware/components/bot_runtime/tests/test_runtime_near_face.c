@@ -895,7 +895,7 @@ static void test_managed_playback_does_not_arm_followup(bool completion_arrives_
     bot_runtime_destroy(runtime);
 }
 
-static void test_wait_feedback_and_interruption(bool replace)
+static void test_wait_feedback_and_interruption(bool replace, bool supplement, bool spoken)
 {
     bot_bus_t bus = {0};
     bot_runtime_t *runtime = NULL;
@@ -926,14 +926,19 @@ static void test_wait_feedback_and_interruption(bool replace)
     bot_runtime_get_snapshot(runtime,&state);
     assert(state.wait_stage==BOT_WAIT_MODEL && !strcmp(state.caption,"苹果怎么说") && state.wait_started_ms==1060);
     assert(!state.audio_uplink_permitted && state.conversation==BOT_CONVERSATION_THINKING);
-    if (replace) {
+    if (replace || supplement) {
         bus.command=(bot_command_t){.kind=BOT_COMMAND_PRESENTATION_SEGMENT,.received_ms=1110,.token=token,
             .presentation_sequence=1,.data.caption="旧回答"};
         bus.has_command=true; bot_runtime_step(runtime,1110);
         bot_runtime_get_snapshot(runtime,&state);
         assert(state.reading_token.turn_id==token.turn_id);
-        post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,.source=BOT_SOURCE_LOCAL_UI,
-            .observed_ms=1120,.token=token,.data.touch={.intentional=true}});
+        if (spoken) {
+            post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_LOCAL_COMMAND,.source=BOT_SOURCE_AUDIO,
+                .observed_ms=1120,.token=token,.data.local_command={.command=BOT_VOICE_COMMAND_SUPPLEMENT,.score=.95f}});
+        } else {
+            post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,.source=BOT_SOURCE_LOCAL_UI,
+                .observed_ms=1120,.token=token,.data.touch={.intentional=true,.supplement=supplement}});
+        }
         bus.command=(bot_command_t){.kind=BOT_COMMAND_REPLY_DONE,.received_ms=1130,.token=token,.data.caption="迟到的回答"};
         bus.has_command=true; bot_runtime_step(runtime,1130);
         post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,.source=BOT_SOURCE_LOCAL_UI,
@@ -941,6 +946,7 @@ static void test_wait_feedback_and_interruption(bool replace)
         bot_runtime_get_snapshot(runtime,&state);
         assert(state.token.turn_id==token.turn_id+1 && state.token.epoch!=token.epoch);
         assert(state.conversation==BOT_CONVERSATION_LISTENING && !*state.reading_text && !*state.caption);
+        assert(state.supplement_turn==supplement);
     } else {
         post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_LOCAL_COMMAND,.source=BOT_SOURCE_AUDIO,.observed_ms=1110,
             .token=token,.data.local_command={.command=BOT_VOICE_COMMAND_STOP,.score=.95f}});
@@ -953,8 +959,10 @@ static void test_wait_feedback_and_interruption(bool replace)
 
 int main(void)
 {
-    test_wait_feedback_and_interruption(false);
-    test_wait_feedback_and_interruption(true);
+    test_wait_feedback_and_interruption(false,false,false);
+    test_wait_feedback_and_interruption(true,false,false);
+    test_wait_feedback_and_interruption(false,true,false);
+    test_wait_feedback_and_interruption(false,true,true);
     bot_bus_t bus = {0};
     bot_runtime_t *runtime = NULL;
     bot_runtime_snapshot_t state;
