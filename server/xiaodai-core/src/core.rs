@@ -336,15 +336,25 @@ impl Core {
     /// `steer` hands the running turn to the new `Turn` (the old one ends `Cancelled` with
     /// `timings.superseded`), `interrupt` stops it and starts a new turn on the same thread.
     pub fn respond_messages(&self, messages: Vec<Message>, cancel: CancellationToken) -> Turn {
+        self.start_messages(messages, cancel, true)
+    }
+
+    /// Start a distinct question on the conversation thread, including while a previous
+    /// cancelled turn is winding down. Only explicit follow-ups should steer its output.
+    pub fn respond_fresh(&self, messages: Vec<Message>, cancel: CancellationToken) -> Turn {
+        self.start_messages(messages, cancel, false)
+    }
+
+    fn start_messages(&self, messages: Vec<Message>, cancel: CancellationToken, allow_steer: bool) -> Turn {
         let (tx, rx) = mpsc::unbounded_channel();
         let token = cancel.child_token();
         // Barge-in: reserve a still-running Codex turn for this follow-up before anything can
         // cancel it (e.g. the caller dropping the previous Turn), so it can be steered.
-        if self.codex_enabled() {
+        if allow_steer && self.codex_enabled() {
             self.codex.claim_for_followup(&token);
         }
         let guard = token.clone().drop_guard();
-        tokio::spawn(drive(self.clone(), messages, token.clone(), tx));
+        tokio::spawn(drive(self.clone(), messages, token.clone(), tx, allow_steer));
         Turn { rx, cancel: token, _guard: guard }
     }
 }
@@ -438,7 +448,7 @@ fn plan(core: &Core, degraded: bool) -> (Vec<Cand>, Vec<Stage>) {
     (cands, stages)
 }
 
-async fn drive(core: Core, messages: Vec<Message>, cancel: CancellationToken, out: mpsc::UnboundedSender<Event>) {
+async fn drive(core: Core, messages: Vec<Message>, cancel: CancellationToken, out: mpsc::UnboundedSender<Event>, allow_steer: bool) {
     let start = Instant::now();
     let ms = || start.elapsed().as_millis() as u64;
     let cfg = core.config.clone();
@@ -495,7 +505,7 @@ async fn drive(core: Core, messages: Vec<Message>, cancel: CancellationToken, ou
         let h = match &cands[i] {
             Cand::Codex => {
                 t.routes_started.push("codex".into());
-                tokio::spawn(codex::attempt(core.codex.clone(), codex_text.clone(), tok.clone(), i, tx.clone()))
+                tokio::spawn(codex::attempt(core.codex.clone(), codex_text.clone(), tok.clone(), i, tx.clone(), allow_steer))
             }
             Cand::Http(r) => {
                 t.routes_started.push(r.id.clone());

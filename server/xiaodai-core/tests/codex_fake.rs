@@ -568,6 +568,19 @@ async fn next_turn_waits_for_the_interrupted_turn_to_complete() {
 }
 
 #[tokio::test]
+async fn fresh_question_cannot_steer_a_previous_speakers_turn() {
+    let (c, log) = core(EngineMode::CodexOnly, OK, None, 1000);
+    c.warmup_codex().await;
+    let mut previous = c.respond("steerable", CancellationToken::new());
+    until_sentence(&mut previous).await;
+    let mut fresh = c.respond_fresh(vec![fast_responder::Message::user("新的问题")], CancellationToken::new());
+    assert!(matches!(finish(&mut previous).await, Event::Cancelled { .. }));
+    assert!(matches!(finish(&mut fresh).await, Event::Done { .. }));
+    assert_eq!(count(&log, "turn/steer"), 0);
+    assert_eq!(count(&log, "turn/interrupt"), 1);
+}
+
+#[tokio::test]
 async fn followup_steers_the_running_turn_and_takes_over_its_output() {
     let (c, log) = core(EngineMode::CodexOnly, OK, None, 1000);
     c.warmup_codex().await;

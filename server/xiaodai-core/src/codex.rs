@@ -1139,7 +1139,7 @@ impl CodexEngine {
     /// One user utterance. Steers into a running turn (policy `steer`), or interrupts it (policy
     /// `interrupt`) and starts a new turn on the same thread. Sends Token/Reasoning, then
     /// Finished/Failed (unless cancelled) or Superseded (a later utterance took over).
-    async fn turn(&self, text: String, cancel: CancellationToken, idx: usize, tx: mpsc::UnboundedSender<(usize, AttemptMsg)>) {
+    async fn turn(&self, text: String, cancel: CancellationToken, idx: usize, tx: mpsc::UnboundedSender<(usize, AttemptMsg)>, allow_steer: bool) {
         let mut gate = self.inner.gate.lock().await;
         let conn = match self.ensure_ready().await {
             Ok(c) => c,
@@ -1153,7 +1153,7 @@ impl CodexEngine {
             if a.live() {
                 let tid = self.thread_id().unwrap_or_default();
                 match (self.inner.cfg.barge_in, a.turn_id.clone()) {
-                    (BargeIn::Steer, Some(turn_id)) if !cancel.is_cancelled() => {
+                    (BargeIn::Steer, Some(turn_id)) if allow_steer && !cancel.is_cancelled() => {
                         if self.steer(&conn, &a, &tid, &turn_id, &text, &cancel, idx, &tx).await {
                             drop(gate);
                             a.done.cancelled().await;
@@ -1382,11 +1382,11 @@ async fn run_turn(
 
 /// Attempt wrapper for the core: returns as soon as `cancel` fires (the turn task keeps running
 /// in the background just long enough to send `turn/interrupt` and see `turn/completed`).
-pub(crate) async fn attempt(engine: CodexEngine, text: String, cancel: CancellationToken, idx: usize, tx: mpsc::UnboundedSender<(usize, AttemptMsg)>) {
+pub(crate) async fn attempt(engine: CodexEngine, text: String, cancel: CancellationToken, idx: usize, tx: mpsc::UnboundedSender<(usize, AttemptMsg)>, allow_steer: bool) {
     let (done_tx, done_rx) = oneshot::channel::<()>();
     let c = cancel.clone();
     tokio::spawn(async move {
-        engine.turn(text, c, idx, tx).await;
+        engine.turn(text, c, idx, tx, allow_steer).await;
         let _ = done_tx.send(());
     });
     tokio::select! {
