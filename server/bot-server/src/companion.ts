@@ -1080,6 +1080,8 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     inputValue("#cc-local-python", models.python); inputValue("#cc-local-script", models.script);
     inputValue("#cc-local-model-dir", models.model_dir); inputValue("#cc-local-voice", models.voice); inputValue("#cc-local-timeout", models.request_timeout_seconds);
     inputValue("#cc-asr-backend", string(models.asr_backend, "whisper"));
+    inputValue("#cc-tts-backend", string(models.tts_backend, "auto")); inputValue("#cc-kokoro-threads", models.kokoro_threads ?? 4);
+    inputValue("#cc-kokoro-model-dir", models.kokoro_model_dir); inputValue("#cc-tts-python", models.tts_python);
     inputValue("#cc-rma-qwen-python", models.rma_qwen_python); inputValue("#cc-rma-qwen-worker", models.rma_qwen_worker); inputValue("#cc-rma-qwen-model", models.rma_qwen_model);
     inputValue("#cc-provider-network", string(harness.provider_network, "system"));
     inputValue("#cc-tools-inherit", harness.inherit_config);
@@ -1096,6 +1098,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     inputValue("#cc-opencode-path", harness.executable); inputValue("#cc-opencode-mode", string(harness.mode, "managed"));
     checkValue("#cc-auto-start", config.auto_start === true);
     checkValue("#cc-default-speak", conversation.default_speak !== false);
+    checkValue("#cc-name-from-voice", conversation.name_from_voice !== false);
     inputValue("#cc-reply-limit", conversation.max_reply_characters); inputValue("#cc-session-idle", conversation.idle_session_seconds);
     inputValue("#cc-media-hosts", list(conversation.media_hosts).map((host) => string(host)).join("\n"));
     if (!dirtyConfigurationForms.has("cc-route-form")) populateRouteForm(true);
@@ -1333,7 +1336,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     }, "cc-route-form");
   });
   form("#cc-local-form", "正在保存本地模型环境…", async () => {
-    const update = { diarization_model: optionalPath("#cc-diarization-model"), speaker_python: optionalPath("#cc-speaker-python"), python: formInput("#cc-local-python"), script: optionalPath("#cc-local-script"), model_dir: optionalPath("#cc-local-model-dir"), voice: formInput("#cc-local-voice") || null, request_timeout_seconds: formNumber("#cc-local-timeout", 1, 600), asr_backend: formInput("#cc-asr-backend"), rma_qwen_python: optionalPath("#cc-rma-qwen-python"), rma_qwen_worker: optionalPath("#cc-rma-qwen-worker"), rma_qwen_model: optionalPath("#cc-rma-qwen-model") };
+    const update = { diarization_model: optionalPath("#cc-diarization-model"), speaker_python: optionalPath("#cc-speaker-python"), python: formInput("#cc-local-python"), script: optionalPath("#cc-local-script"), model_dir: optionalPath("#cc-local-model-dir"), voice: formInput("#cc-local-voice") || null, request_timeout_seconds: formNumber("#cc-local-timeout", 1, 600), asr_backend: formInput("#cc-asr-backend"), rma_qwen_python: optionalPath("#cc-rma-qwen-python"), rma_qwen_worker: optionalPath("#cc-rma-qwen-worker"), rma_qwen_model: optionalPath("#cc-rma-qwen-model"), tts_backend: formInput("#cc-tts-backend") || "auto", kokoro_threads: formNumber("#cc-kokoro-threads", 1, 16), kokoro_model_dir: optionalPath("#cc-kokoro-model-dir"), tts_python: optionalPath("#cc-tts-python") };
     if (update.asr_backend === "rma_qwen" && (!update.rma_qwen_python || !update.rma_qwen_worker || !update.rma_qwen_model)) throw new Error("使用 RMA Qwen 时，请填写 RMA Python、Worker 和模型目录。");
     await patchConfiguration((config) => { config.models = { ...object(config.models), ...update }; }, "cc-local-form");
     latestModelHealth = null; renderCapabilities(container); $("#cc-models-json").textContent = "本地环境已改变，请重新检查能力状态。";
@@ -1363,7 +1366,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   form("#cc-preferences-form", "正在保存启动与对话偏好…", async () => {
     const executable = formInput("#cc-opencode-path"), mode = $<HTMLSelectElement>("#cc-opencode-mode").value;
     const autoStart = $<HTMLInputElement>("#cc-auto-start").checked;
-    const conversation = { default_speak: $<HTMLInputElement>("#cc-default-speak").checked, max_reply_characters: formNumber("#cc-reply-limit", 100, 4000), idle_session_seconds: formNumber("#cc-session-idle", 30, 1800), media_hosts: [...new Set($<HTMLTextAreaElement>("#cc-media-hosts").value.split(/[\n,]+/).map((host) => host.trim().toLowerCase()).filter(Boolean))] };
+    const conversation = { default_speak: $<HTMLInputElement>("#cc-default-speak").checked, name_from_voice: $<HTMLInputElement>("#cc-name-from-voice").checked, max_reply_characters: formNumber("#cc-reply-limit", 100, 4000), idle_session_seconds: formNumber("#cc-session-idle", 30, 1800), media_hosts: [...new Set($<HTMLTextAreaElement>("#cc-media-hosts").value.split(/[\n,]+/).map((host) => host.trim().toLowerCase()).filter(Boolean))] };
     await patchConfiguration((config) => { config.auto_start = autoStart; config.harness = { ...object(config.harness), executable, mode }; config.conversation = { ...object(config.conversation), ...conversation }; }, "cc-preferences-form");
   });
   for (const id of ["cc-route-form", "cc-local-form", "cc-tools-form", "cc-native-form", "cc-gateway-form", "cc-preferences-form"]) {
