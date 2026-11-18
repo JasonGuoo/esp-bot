@@ -5,6 +5,17 @@ HC-14/#27. No ESP-IDF build, model inference, flashing, real-board audio/display
 run or CI was performed in this delivery environment. Regression cases were
 added to the existing optional runtime test source; they have not been run.
 
+## Live spoken turns on the paired Mac
+
+On November 18 the installed App and the S31 exercised the live protocol over their paired connection. The gateway advertises `conversation.live.v1`. The device requests `output.live_turns` with segmented presentation and requires the server to confirm it. An older peer continues to use the existing presentation protocol.
+
+- `audio.pause` names the current stream, runtime token and count of drained PCM frames. The device keeps a bounded, same-token microphone prefix during the 200 ms final drain. A resumed utterance invalidates the speculative ASR result. Only `audio.commit` starts a turn.
+- Each independent sentence may arrive as an immutable content segment while the producer is still working. New plan indices advance only after segment completion. A final segment, or `presentation.end` naming the last completed plan, lease, index, sequence and runtime token, releases the device for follow-up. A progress acknowledgement can precede the first content segment.
+- `assistant.supplement` retires the previous output and reserves its generating Luna turn when available. Only the immediately succeeding microphone token in that activation can use the reservation. The touchscreen exposes 补一句, 重新说 and 停止. The waiting-mode MultiNet graph also includes 补一句 while output is silent.
+- `audio.playback.report` distinguishes received frames and bytes from `sample_position`, the number of samples successfully written to the codec. Device monotonic timestamps at VAD release, commit and first write support end-to-end timing without synchronizing clocks. Only a fully played narrated sentence contributes to the spoken-answer context.
+
+The [installed-App and S31 acceptance record](../docs/review-live-turns-2026-11-18.md) includes timings and the acoustic command result.
+
 ## Single owner and cancellation
 
 `bot_audio` remains the sole ES8389/I2S input/output owner. `bot_runtime` owns

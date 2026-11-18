@@ -2,6 +2,14 @@
 
 **2026-11-15 real-room check: NOT PASSED.** After the user announced lights-off, the 21:18–21:28 observation still reported IDLE and non-black frames. Valid camera luma was 38–107 (median 78), above the provisional entry threshold. The 22:30 scheduled transition was outside this observation. See [the measured result and serial-reset limitation](night-light-check-2026-11-15.md); source policy and simulated tests are not real-room acceptance.
 
+**Owner decision, 2026-11-18 (design only, not implemented):** 小呆 may speak first in limited
+cases: a morning hello, dated events, family-set reminders, and a "missed you" after a long absence.
+It may also call people by name after a confident voice match. Speaking first never opens the
+microphone session or uploads pre-wake audio, and never happens at night, in quiet hours or during
+another activity. See the guardrails in [the UX review, §12](review-ux-2026-11-18.md). The
+2026-11-08 rule below still governs listening and conversation start until this design is
+implemented.
+
 **Updated user direction, 2026-11-08:** lively when it is light, occasionally drowsy and then awake again; rest at night or after the room stays dark. It never starts a conversation merely because a face, gaze, sound or brighter room is detected. Full **小呆小呆** and deliberate touch/manual input remain the interaction triggers.
 
 **Authority:** bot_runtime/behavior_policy owns transitions. audio owns continuous keyword recognition; face owns animation; bot_platform owns display sleep and camera power; attention_manager may choose a target only under runtime policy. Full wake phrase requirements: [wake-word.md](wake-word.md).
