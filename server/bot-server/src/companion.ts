@@ -4,7 +4,7 @@ import { LocalCamera, PcmRecorder, base64ToBuffer, readImageFile, readWavFile, t
 import { CONSOLE_PANELS, consoleTemplate, type ConsolePanel } from "./console-layout";
 import { mountVoiceAlbum } from "./voice-album";
 import { mountHousehold, readArtifactContent } from "./household";
-import { deviceDeliveryText, deviceReplyMetrics, renderActivity, renderCapabilities, renderDeviceStatus, renderRuntimeMetrics, renderTurnTimings, turnStageMetric, harnessTimingMetric, type DeviceDisplayReport } from "./console-presenters";
+import { deviceDeliveryText, deviceReplyMetrics, renderActivity, renderBrainCore, renderCapabilities, renderDeviceStatus, renderRuntimeMetrics, renderTurnTimings, turnStageMetric, harnessTimingMetric, type DeviceDisplayReport } from "./console-presenters";
 import "./companion.css";
 import "./console.css";
 
@@ -911,7 +911,8 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       pill.classList.toggle("ready", serviceReady && !modelSetupNeeded);
       $("#cc-service-dot").classList.toggle("ready", serviceReady);
       $("#cc-service-dot").classList.toggle("error", value.ready === false || (serviceRunning && !serviceReady));
-      $("#cc-service-caption").textContent = `OpenCode ${string(harness.version, string(harness.source_version, "版本待读取"))} · Mac 本机`;
+      const brainCore = object(value.brain_core);
+      $("#cc-service-caption").textContent = `${brainCore.enabled === true ? "小呆大脑 + " : ""}OpenCode ${string(harness.version, string(harness.source_version, "版本待读取"))} · Mac 本机`;
       $("#cc-updated-at").textContent = `更新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })} · 每 15 秒刷新`;
       $("#cc-status-summary").textContent = value.ready === false ? string(value.error, "配置未完成")
         : `${serviceReady ? (modelSetupNeeded ? "尚无可用模型，请启用路线并提供密钥" : "可以开始对话") : gatewayListening ? "设备入口已监听；可点击启动服务重试对话引擎" : serviceRunning ? "对话服务未就绪，可停止后重试" : "对话服务未启动，可在左下角启动"} · OpenCode ${string(harness.version, string(harness.source_version, "版本待读取"))} · ${string(harness.mode, "managed")}`;
@@ -923,6 +924,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
         : `本地后台整理模型尚未就绪 · 待处理 ${pending} 条。`;
       renderKeySettings(list(harness.routes));
       renderRoutes(list(harness.routes));
+      renderBrainCore(container, value.brain_core);
       renderDeviceStatus(container, value);
       renderSpeakerControls(value);
       renderRuntimeMetrics(container, value);

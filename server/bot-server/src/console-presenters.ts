@@ -42,13 +42,56 @@ const find = (root: HTMLElement, selector: string): HTMLElement => {
 
 const TIMING_LABELS: Record<string, string> = {
   memory_register: "会话登记", asr: "语音识别", speaker_identification: "声纹匹配",
-  memory_enqueue: "记忆排队", memory_context: "记忆检索", harness: "OpenCode 回复",
+  memory_enqueue: "记忆排队", memory_context: "记忆检索", brain_core: "小呆大脑回复", harness: "OpenCode 回复",
   image_prepare: "图片准备", tts: "语音合成", history: "会话保存",
 };
 const TIMING_SKIP_LABELS: Record<string, string> = {
   text_input: "文字输入", no_enrolled_speakers: "尚未登记声纹", audio_under_3_seconds: "录音不足 3 秒",
   enrollment_lookup_failed: "登记信息读取失败", no_device_image: "本轮无需设备图片", output_disabled: "未开启语音输出",
+  tool_request: "需要工具，交给 OpenCode", private_scope: "私密成员对话，交给 OpenCode", pending_task_input: "补充任务信息，交给 OpenCode",
+  core_disabled: "小呆大脑已关闭",
 };
+const BRAIN_REASONS: Record<string, string> = {
+  ...TIMING_SKIP_LABELS, core_requested: "小呆大脑转交 OpenCode", core_failed: "小呆大脑不可用，改由 OpenCode 回答", core_timeout: "小呆大脑超时，改由 OpenCode 回答",
+};
+const ms = (value: unknown): string => typeof value === "number" && Number.isFinite(value) && value >= 0 ? `${Math.round(value).toLocaleString("zh-CN")} ms` : "—";
+
+/** Which brain answered, with first-text timing and every engine attempt. */
+export function brainSummary(value: unknown): string[] {
+  const brain = object(value);
+  if (brain.engine === "opencode") return [`由 OpenCode 回答 · ${BRAIN_REASONS[text(brain.reason)] ?? text(brain.reason, "原因待确认")}`];
+  if (brain.engine !== "xiaodai-core") return [];
+  const lines = [`小呆大脑 · ${text(brain.winner, "未知引擎")} · 首字 ${ms(brain.first_text_ms)} · 首句 ${ms(brain.first_sentence_ms)}${text(brain.luna) ? ` · Luna ${text(brain.luna) === "preferred" ? "优先" : text(brain.luna)}` : ""}`];
+  for (const item of list(brain.attempts).map(object))
+    lines.push(`${text(item.route)} · ${text(item.outcome, "未判定")} · 开始 ${ms(item.started_ms)} · 首字 ${ms(item.ttft_ms)}${text(item.network) ? ` · ${text(item.network)}` : ""}${text(item.error) ? ` · ${text(item.error)}` : ""}`);
+  return lines;
+}
+
+const OUTCOME_LABELS: Record<string, string> = { ok: "正常", lost: "被抢先", failed: "失败", timeout: "超时" };
+
+/** Engine status and rolling latency log for the models page. */
+export function renderBrainCore(root: HTMLElement, value: unknown): void {
+  const status = object(value), health = object(status.health), luna = object(status.luna);
+  const state = find(root, "#cc-brain-core-state"), host = find(root, "#cc-brain-core");
+  host.replaceChildren();
+  if (!Object.keys(status).length) { state.textContent = "未读取"; return; }
+  state.textContent = status.enabled !== true ? "已关闭 · 全部由 OpenCode 回答"
+    : `${text(status.mode, "dual")} · ${text(status.codex, "Luna")} · ${luna.state === "degraded" ? `已降级：${text(luna.reason)}` : "Luna 优先"}${status.codex_thread === true ? " · 线程已就绪" : ""}`;
+  const routes = list(status.routes).map((route) => text(route)).filter(Boolean);
+  const routeRow = node("div", "cc-manage-row");
+  routeRow.append(node("strong", "", "可用 HTTP 路线"), node("span", "cc-caption", routes.length ? routes.join(" → ") : "没有可用密钥，只能使用 Luna"));
+  host.append(routeRow);
+  for (const engine of list(health.engines).map(object)) {
+    const row = node("div", "cc-manage-row");
+    const outcome = OUTCOME_LABELS[text(engine.last_outcome)] ?? "—";
+    row.append(node("strong", "", text(engine.key) === "codex" ? `Luna（${text(engine.route)}）` : text(engine.route, text(engine.key))),
+      node("span", "cc-caption", `中位首字 ${ms(engine.median_ttft_ms)} · 最近 ${ms(engine.last_ttft_ms)}（${outcome}）· ${engine.samples ?? 0} 次，失败 ${engine.failures ?? 0}，被抢先 ${engine.lost ?? 0}`));
+    host.append(row);
+  }
+  const last = brainSummary(status.last_turn);
+  if (last.length) { const row = node("div", "cc-manage-row"); row.append(node("strong", "", "最近一轮"), node("span", "cc-caption", last[0])); host.append(row); }
+  if (text(health.log_path)) host.append(node("p", "cc-caption", `延迟日志：${text(health.log_path)}`));
+}
 
 export function turnStageMetric(value: unknown): string {
   const stage = object(value);
@@ -84,13 +127,14 @@ export function renderTurnTimings(value: unknown): HTMLElement | null {
   const total = typeof timing.total_ms === "number" && Number.isFinite(timing.total_ms) && timing.total_ms >= 0
     ? ` · ${(timing.total_ms / 1000).toFixed(1)} 秒` : "";
   details.append(node("summary", "cc-caption", `查看 Mac 分段耗时${total}`));
+  for (const line of brainSummary(timing.brain)) details.append(node("p", "cc-caption", line));
   for (const [stage, label] of Object.entries(TIMING_LABELS)) {
     const metric = turnStageMetric({ stage, elapsed_ms: stages[stage] });
     if (metric) details.append(node("p", "cc-caption", metric));
     else if (TIMING_SKIP_LABELS[text(skipped[stage])])
       details.append(node("p", "cc-caption", `${label} · 已跳过：${TIMING_SKIP_LABELS[text(skipped[stage])]}`));
   }
-  details.append(node("p", "cc-caption", "OpenCode 耗时包含模型、工具、路线回退及人工确认等待；不包含设备判停、上传和屏幕绘制。"));
+  details.append(node("p", "cc-caption", "小呆大脑耗时含 Luna 与 HTTP 路线竞速及边出句边合成语音；OpenCode 耗时包含模型、工具、路线回退及人工确认等待；均不包含设备判停、上传和屏幕绘制。"));
   return details;
 }
 
