@@ -475,6 +475,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
     let mut audio_clock=interval(Duration::from_millis(20));
     audio_clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut heartbeat=interval(Duration::from_secs(15)); heartbeat.tick().await;
+    let mut closing_clock=interval(Duration::from_millis(500));
     let mut last_packet=Instant::now();
     loop {
         if let Some((capture,_))=audio.as_mut(){capture.start_candidate(&brain.models);}
@@ -690,6 +691,16 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                     clip.sent_complete=true;
                     if !clip.hardware_receipts {playback=None;}
                     if send(&mut socket, Message::Text(complete.to_string())).await.is_err(){break;}
+                }
+            },
+            // After a goodbye's sign-off has played, return to idle instead of waiting
+            // out the follow-up window.
+            _=closing_clock.tick(), if active.is_none() && playback.is_none() && delivery.is_none() && engagement.is_some()=>{
+                if engagement.as_ref().is_some_and(|e|brain.closing.take_due(&e.conversation_id)) {
+                    let token=audio.as_ref().map(|(_,token)|*token).or_else(||engagement.as_ref().map(|session|session.token));
+                    supplement=None;engagement=None;audio=None;plain=None;display_result=None;
+                    brain.emit("device.session_closed",None,json!({"device_id":device_id,"reason":"goodbye"}));
+                    if send(&mut socket, Message::Text(json!({"v":3,"type":"event","event":"session.expired","runtime":token,"code":"goodbye"}).to_string())).await.is_err(){break;}
                 }
             },
             _=heartbeat.tick()=>{
