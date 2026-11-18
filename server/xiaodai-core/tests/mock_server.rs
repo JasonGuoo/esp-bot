@@ -278,3 +278,23 @@ async fn zero_width_tokens_do_not_win_the_race() {
 fn quiet() -> fast_responder::HealthConfig {
     fast_responder::HealthConfig { log_path: None, ..Default::default() }
 }
+
+#[tokio::test]
+async fn caller_supplied_keys_enable_a_route_without_the_environment() {
+    let (a, sa) = spawn_mock(fast(&["有钥匙。"])).await;
+    let mut r = route("keyed", &a);
+    r.api_key_env = "XIAODAI_TEST_KEY_NEVER_SET_7F3A".into();
+    let c = core(vec![r], 1000);
+    assert!(c.available_routes().is_empty(), "no env key -> route unavailable");
+    let evs = collect(&c, "hi").await;
+    assert!(matches!(evs.last(), Some(Event::Error { .. })), "{evs:?}");
+    let keyed = c.with_keys([("XIAODAI_TEST_KEY_NEVER_SET_7F3A", "test-value")]);
+    assert_eq!(keyed.available_routes(), vec!["keyed"]);
+    let evs = collect(&keyed, "hi").await;
+    let Some(Event::Done { text, .. }) = evs.last() else { panic!("{evs:?}") };
+    assert_eq!(text, "有钥匙。");
+    assert_eq!(sa.requests.load(Ordering::SeqCst), 1);
+    assert!(!format!("{evs:?}").contains("test-value"), "key never appears in events");
+    let removed = keyed.with_keys([("XIAODAI_TEST_KEY_NEVER_SET_7F3A", "")]);
+    assert!(removed.available_routes().is_empty());
+}

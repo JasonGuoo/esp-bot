@@ -1036,6 +1036,33 @@ impl CodexEngine {
         Ok((tid, ts, prime_ms))
     }
 
+    /// Forget the conversation thread, e.g. because the caller deleted context it had sent or a
+    /// new conversation day began. The next turn starts on a new thread. With `prime`, and a live
+    /// app-server, a primed thread is prepared now in the background (same cost as warmup's).
+    /// The probe thread is unaffected.
+    pub async fn reset_thread(&self, prime: bool) {
+        let conn = {
+            let mut st = self.inner.state.lock().await;
+            st.thread = None;
+            st.thread_turns = 0;
+            st.conn.clone().filter(|c| c.is_alive())
+        };
+        let (true, Some(conn)) = (prime, conn) else { return };
+        let me = self.clone();
+        tokio::spawn(async move {
+            let mut st = me.inner.state.lock().await;
+            if st.thread.is_some() {
+                return;
+            }
+            let (m, e) = (st.model.clone().unwrap_or_default(), st.effort.clone().unwrap_or_default());
+            if let Ok((id, _, _)) = me.new_thread(&conn, &m, &e, true).await {
+                st.thread = Some(id);
+                st.thread_turns = 0;
+                st.threads_started += 1;
+            }
+        });
+    }
+
     /// The conversation thread for the next turn (rotates only if `max_turns_per_thread` > 0).
     async fn thread_for_turn(&self, conn: &Arc<RpcConn>) -> Result<(String, String, String), String> {
         let mut st = self.inner.state.lock().await;

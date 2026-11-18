@@ -169,6 +169,29 @@ impl Core {
         &self.config
     }
 
+    /// Same client, Codex engine and latency history, with route keys supplied by the caller
+    /// instead of (or on top of) the process environment. `keys` maps a route's `api_key_env`
+    /// name to its value; an empty value removes that route's key. Values are never logged.
+    pub fn with_keys<I, K, V>(&self, keys: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let mut map = (*self.keys).clone();
+        for (name, value) in keys {
+            let value = value.as_ref().trim();
+            for r in self.config.routes.iter().filter(|r| !r.api_key_env.is_empty() && r.api_key_env == name.as_ref()) {
+                if value.is_empty() {
+                    map.remove(&r.id);
+                } else {
+                    map.insert(r.id.clone(), Secret::new(value.to_owned()));
+                }
+            }
+        }
+        Self { keys: Arc::new(map), ..self.clone() }
+    }
+
     /// The shared Codex engine (cold-start report, interrupt stats, approval audit).
     pub fn codex(&self) -> &CodexEngine {
         &self.codex
@@ -425,6 +448,13 @@ async fn drive(core: Core, messages: Vec<Message>, cancel: CancellationToken, ou
         return;
     }
     let last_user = messages.iter().rev().find(|m| m.role == "user").map(|m| m.content.clone()).unwrap_or_default();
+    // Per-turn context supplied by the caller as `system` messages (e.g. a brain's memory recall).
+    // HTTP routes receive them as system messages after the configured prompt; the Codex thread
+    // only takes one text input per turn, so the context is prefixed to the user text there.
+    let codex_text = {
+        let context: Vec<&str> = messages.iter().filter(|m| m.role == "system" && !m.content.trim().is_empty()).map(|m| m.content.as_str()).collect();
+        if context.is_empty() { last_user.clone() } else { format!("{}\n\n{}", context.join("\n"), last_user) }
+    };
     let label = |c: &Cand| match c {
         Cand::Codex => core.codex.label(),
         Cand::Http(r) => r.id.clone(),
@@ -454,7 +484,7 @@ async fn drive(core: Core, messages: Vec<Message>, cancel: CancellationToken, ou
         let h = match &cands[i] {
             Cand::Codex => {
                 t.routes_started.push("codex".into());
-                tokio::spawn(codex::attempt(core.codex.clone(), last_user.clone(), tok.clone(), i, tx.clone()))
+                tokio::spawn(codex::attempt(core.codex.clone(), codex_text.clone(), tok.clone(), i, tx.clone()))
             }
             Cand::Http(r) => {
                 t.routes_started.push(r.id.clone());

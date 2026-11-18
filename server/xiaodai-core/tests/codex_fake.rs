@@ -887,3 +887,38 @@ async fn delegation_note_reaches_thread_instructions_only_when_enabled() {
         assert_eq!(di.contains("/x/cli/grokbot"), enabled);
     }
 }
+
+#[tokio::test]
+async fn caller_context_messages_prefix_the_codex_turn_text() {
+    use fast_responder::Message;
+    let (c, log) = core(EngineMode::CodexOnly, OK, None, 1000);
+    c.warmup_codex().await;
+    let msgs = vec![Message { role: "system".into(), content: "家庭记忆：小王喜欢猫。".into() }, Message::user("stream")];
+    let mut turn = c.respond_messages(msgs, CancellationToken::new());
+    while let Some(e) = turn.next().await { if e.is_terminal() { break; } }
+    let inputs = log.turn_inputs.lock().unwrap().clone();
+    let text = inputs.last().unwrap()["input"][0]["text"].as_str().unwrap().to_owned();
+    assert!(text.starts_with("家庭记忆：小王喜欢猫。"), "{text}");
+    assert!(text.ends_with("stream"), "{text}");
+    // Without context messages the text is unchanged.
+    collect(&c, "stream").await;
+    let inputs = log.turn_inputs.lock().unwrap().clone();
+    assert_eq!(inputs.last().unwrap()["input"][0]["text"], "stream");
+}
+
+#[tokio::test]
+async fn reset_thread_starts_a_new_conversation_thread() {
+    let (c, log) = core(EngineMode::CodexOnly, OK, None, 1000);
+    c.warmup_codex().await;
+    collect(&c, "stream").await;
+    let first = c.codex().thread_id().unwrap();
+    c.codex().reset_thread(false).await;
+    assert_eq!(c.codex().thread_id(), None);
+    collect(&c, "stream").await;
+    let second = c.codex().thread_id().unwrap();
+    assert_ne!(first, second);
+    assert_eq!(log.methods.lock().unwrap().iter().filter(|m| *m == "thread/start").count(), 2);
+    // Primed reset prepares the next thread in the background.
+    c.codex().reset_thread(true).await;
+    assert!(wait_for(|| c.codex().thread_id().is_some_and(|t| t != second), 3000).await);
+}
