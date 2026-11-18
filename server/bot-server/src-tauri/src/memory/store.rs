@@ -810,6 +810,33 @@ mod background_tests {
     use super::*;
 
     #[test]
+    fn voice_context_uses_only_completed_speech_and_preserves_the_generated_archive() {
+        use crate::memory::JournalInput;
+        let dir=std::env::temp_dir().join(format!("xiaodai-receipts-{}",Uuid::new_v4()));
+        let store=Store::open(dir.clone(),MemoryConfig::default()).unwrap();
+        store.update_household_settings(&json!({"history_enabled":true,"allow_cloud":true})).unwrap();
+        let source=JournalInput{turn_id:"speech-turn".into(),activation_id:"test-visit".into(),utterance_id:None,
+            text:"讲个故事".into(),occurred_at_ms:now_ms(),input_kind:"audio".into(),speaker_person_id:None,
+            private_profile_id:None,allow_cloud:true,metadata:json!({})};
+        let journal=store.journal_input(&source).unwrap();
+        store.journal_finish(&source.turn_id,"running",None,json!({"spoken_device":true})).unwrap();
+        store.journal_finish(&source.turn_id,"completed",Some("第一句。第二句。"),json!({})).unwrap();
+        let context=||store.household_recent_context(&journal.daily_conversation_id,true).unwrap()[0].clone();
+        assert_eq!(context()["assistant_delivered"],"");
+        for (id,kind,status,speech) in [("r1","audio","finished","第一句。"),("r2","audio","started","第二句。"),
+            ("r3","presentation","completed","第二句。"),("r4","audio","cancelled","第二句。")] {
+            store.journal_receipt(&source.turn_id,kind,json!({"status":status,"rendered_text":speech}),id).unwrap();
+        }
+        assert_eq!(context()["assistant_delivered"],"第一句。");
+        assert!(context().get("assistant_generated").is_none());
+        let archived:String=store.connection().unwrap().query_row("SELECT assistant_text FROM household_turns WHERE id=?1",
+            [&journal.conversation_turn_id],|row|row.get(0)).unwrap();
+        assert_eq!(archived,"第一句。第二句。");
+        drop(store);
+        let _=std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn anonymous_derived_fact_does_not_claim_self_reported_identity() {
         use crate::memory::{HouseholdExtraction, JournalInput};
         let dir = std::env::temp_dir().join(format!("xiaodai-anonymous-{}", Uuid::new_v4()));

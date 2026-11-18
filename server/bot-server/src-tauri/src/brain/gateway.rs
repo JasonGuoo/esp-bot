@@ -150,6 +150,20 @@ fn lan_peer(ip: std::net::IpAddr) -> bool {
 #[serde(deny_unknown_fields)]
 struct RuntimeToken { epoch:u32, session_id:u32, turn_id:u32, focus_generation:u32 }
 
+impl RuntimeToken {
+    fn directly_follows(self, previous: Self) -> bool {
+        self.session_id == previous.session_id && previous.turn_id.checked_add(1) == Some(self.turn_id)
+            && previous.epoch.checked_add(1) == Some(self.epoch)
+    }
+}
+
+struct FirstSpeech {
+    token: RuntimeToken,
+    admitted: Instant,
+    device_commit_ms: Option<u64>,
+    vad_end_ms: Option<u64>,
+}
+
 struct Engagement {
     conversation_id:String,
     token:RuntimeToken,
@@ -159,7 +173,7 @@ struct Engagement {
 }
 
 #[derive(Clone, Debug)]
-struct DeviceOutput { images:bool, audio:bool, presentation:bool }
+struct DeviceOutput { images:bool, audio:bool, presentation:bool, live:bool }
 
 impl DeviceOutput {
     fn negotiate(payload: &Value) -> Result<Option<Self>, String> {
@@ -178,7 +192,8 @@ impl DeviceOutput {
             && image["max_bytes"].as_u64().is_some_and(|n|n>=65536);
         let presentation=output.pointer("/presentation/version").and_then(Value::as_u64)==Some(1)
             && output.pointer("/presentation/frame_ack").and_then(Value::as_bool)==Some(true);
-        Ok(Some(Self {images,audio,presentation}))
+        let live = presentation && output["live_turns"] == true;
+        Ok(Some(Self {images,audio,presentation,live}))
     }
 
     fn confirmed(&self) -> Value {
@@ -188,6 +203,7 @@ impl DeviceOutput {
             json!({"version":1,"audio":self.audio,"cards":["text"]})
         };
         if self.presentation {value["presentation"]=json!({"version":1,"max_segments":64,"max_duration_ms":120000,"frame_ack":true});}
+        if self.live { value["live_turns"] = json!(true); }
         value
     }
 }
@@ -259,7 +275,12 @@ impl Engagement {
 #[serde(deny_unknown_fields)]
 struct RequestFrame {v:u8,#[serde(rename="type")]kind:String,id:String,method:String,#[serde(default)]payload:Value}
 
-struct Completed {
+pub(super) enum TurnUpdate {
+    Sentence { turn_id:String, plan:super::presentation::PresentationPlan, segment:Box<super::orchestration::PreparedSegment>, acknowledgement:bool },
+    Completed(Box<Completed>),
+}
+
+pub(super) struct Completed {
     id: String,
     turn_id: String,
     token: RuntimeToken,
@@ -335,6 +356,7 @@ fn device_audio_counts(payload:&Value, sent_frames:u32, sent_bytes:usize)->Resul
 }
 struct ActivePeer {
     turn_id:String, request_id:String, token:RuntimeToken, task:TurnTask,
+    prefix:Vec<String>, acknowledgement_sent:bool,
     progress_seq:u32, last_stage:Option<FeedbackStage>, last_progress:Instant,
 }
 
@@ -406,12 +428,16 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
     let _volume_peer=VolumePeer{brain:Arc::clone(&brain),device:device_id.clone(),connection:volume_connection.clone()};
     let mut cancellations=brain.cancellations();
     let mut progress=brain.progress();
-    send(&mut socket, Message::Text(json!({"v":3,"type":"welcome","device_id":device_id,"capabilities":["assistant.text","audio.pcm16","speaker.candidate","scene.cards",DISPLAY_REPLY_CAPABILITY,AUDIO_REPLY_CAPABILITY,"presentation.segments.v1"],"sample_rate":16000,"max_audio_seconds":30,"requires_activation":true}).to_string())).await.map_err(|_|"ws_write_failed")?;
+    send(&mut socket, Message::Text(json!({"v":3,"type":"welcome","device_id":device_id,"capabilities":["assistant.text","audio.pcm16","speaker.candidate","scene.cards",DISPLAY_REPLY_CAPABILITY,AUDIO_REPLY_CAPABILITY,"presentation.segments.v1","conversation.live.v1"],"sample_rate":16000,"max_audio_seconds":30,"requires_activation":true}).to_string())).await.map_err(|_|"ws_write_failed")?;
     let mut engagement:Option<Engagement>=None;
+    let mut supplement:Option<(RuntimeToken,super::Supplement)>=None;
+    let mut first_speech:Option<FirstSpeech>=None;
+    let mut last_ack:Option<Instant>=None;
+    let mut context:Option<super::LiveTurnContext>=None;
     let mut audio:Option<(media::AudioInput,RuntimeToken)>=None;
     let mut plain:Option<plain_audio::PlainAudio>=None;
     let mut recent_ids:VecDeque<String>=VecDeque::new();
-    let (completion_tx,mut completion_rx)=mpsc::channel::<Completed>(1);
+    let (completion_tx,mut completion_rx)=mpsc::channel::<TurnUpdate>(2);
     let mut active:Option<ActivePeer>=None;
     let mut playback:Option<Playback>=None;
     let mut playback_receipt:Option<PlaybackReceipt>=None;
@@ -425,7 +451,8 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
     let mut heartbeat=interval(Duration::from_secs(15)); heartbeat.tick().await;
     let mut last_packet=Instant::now();
     loop {
-        let phase=if active.is_some(){"thinking"}else if playback.is_some(){"speaking"}else if delivery.as_ref().is_some_and(|d|!d.tasks.is_empty()){"waiting_task"}else if delivery.is_some(){"presenting"}else if audio.is_some(){"listening"}else{"idle"};
+        if let Some((capture,_))=audio.as_mut(){capture.start_candidate(&brain.models);}
+        let phase=if playback.is_some(){"speaking"}else if active.is_some(){"thinking"}else if delivery.as_ref().is_some_and(|d|!d.tasks.is_empty()){"waiting_task"}else if delivery.is_some(){"presenting"}else if audio.is_some(){"listening"}else{"idle"};
         brain.device_activity(&device_id,json!({"phase":phase,"conversation_id":engagement.as_ref().map(|e|&e.conversation_id),
             "turn_id":active.as_ref().map(|a|a.turn_id.as_str()).or_else(||delivery.as_ref().map(|d|d.turn_id.as_str())).or_else(||playback.as_ref().map(|p|p.turn_id.as_str())),
             "cancellable":phase!="idle","runtime":engagement.as_ref().map(|e|e.token)}));
@@ -435,6 +462,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                     if send(&mut socket,Message::Text(event.to_string())).await.is_err(){break;}audio_clock.reset();},
                 Ok(None)=>{},Err(error)=>{
                     let token=state.token;let activation=state.activation_id.clone();
+                    if active.as_ref().is_some_and(|a|a.turn_id==state.turn_id) {active.take();}
                     brain.emit("device.presentation.failed",Some(&state.turn_id),json!({"code":error}));
                     let _=brain.tasks.revoke_outputs(Some(&activation));delivery=None;playback=None;plain=None;display_result=None;
                     if send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.cancelled","runtime":token,"code":error}).to_string())).await.is_err(){break;}
@@ -582,8 +610,11 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                         playback=None;plain=None;display_result=None;
                     }
                 }
+                if supplement.as_ref().is_some_and(|(_,s)|cancellation.matches_turn(&s.previous,conversation)) {
+                    supplement=None;
+                }
                 if close_session {
-                    audio=None;plain=None;engagement=None;display_result=None;delivery=None;
+                    context=None;first_speech=None;supplement=None;audio=None;plain=None;engagement=None;display_result=None;delivery=None;
                 }
             },
             _=audio_clock.tick(), if playback.is_some()=>{
@@ -639,16 +670,51 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                 if last_packet.elapsed()>Duration::from_secs(50){break;}
                 if active.is_none() && playback.is_none() && delivery.is_none() && engagement.as_ref().is_some_and(|e|e.last_user.elapsed().as_secs()>brain.config.conversation.idle_session_seconds){
                     let token=audio.as_ref().map(|(_,token)|*token).or_else(||engagement.as_ref().map(|session|session.token));
-                    engagement=None;audio=None;plain=None;display_result=None;
+                    supplement=None;engagement=None;audio=None;plain=None;display_result=None;
                     if send(&mut socket, Message::Text(json!({"v":3,"type":"event","event":"session.expired","runtime":token}).to_string())).await.is_err(){break;}
                 }
                 if audio.as_ref().is_some_and(|(a,_)|a.sequence>0 && a.started.elapsed().as_secs()>35){audio=None;plain=None;}
                 if send(&mut socket, Message::Ping(Vec::new())).await.is_err(){break;}
             },
-            Some(completed)=completion_rx.recv()=>{
+            Some(update)=completion_rx.recv(), if !delivery.as_ref().is_some_and(|d|
+                d.live_content && (d.current.is_some() || !d.pending.is_empty()))=>{
+                let completed = match update {
+                    TurnUpdate::Sentence { turn_id, plan, segment, acknowledgement } => {
+                        let Some(turn) = active.as_mut().filter(|a| a.turn_id == turn_id) else { continue };
+                        let Some(session) = engagement.as_ref() else { continue };
+                        let index = turn.prefix.len() as u32 + u32::from(turn.acknowledgement_sent) + 1;
+                        if index > 1 { brain.tasks.revoke_outputs(Some(&session.conversation_id))?; }
+                        let speech = segment.scene.speech.clone();
+                        let mut next = match segments::Delivery::new(&brain, &device_id, &session.conversation_id,
+                            turn.token, turn_id, plan, vec![*segment], vec![], true, index) {
+                            Ok(next) => next,
+                            Err(error) => {
+                                let token=turn.token;
+                                brain.emit("device.presentation.failed",Some(&turn.turn_id),json!({"code":error}));
+                                active.take();delivery=None;playback=None;plain=None;display_result=None;
+                                send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.cancelled",
+                                    "runtime":token,"code":error}).to_string())).await?;
+                                continue;
+                            }
+                        };
+                        if acknowledgement {
+                            turn.acknowledgement_sent=true;
+                            last_ack=Some(Instant::now());
+                            next.progress_only=true;
+                        } else {
+                            turn.prefix.push(speech);
+                        }
+                        next.live_content = true;
+                        next.total_sent = index - 1;
+                        next.request_id = turn.request_id.clone();
+                        delivery = Some(next);
+                        continue;
+                    }
+                    TurnUpdate::Completed(done) => *done,
+                };
                 // A cancel clears active; stale completion is discarded.
                 if active.as_ref().is_some_and(|turn|completed.turn_id==turn.turn_id) {
-                    active=None;
+                    let turn = active.take().expect("matching active turn");
                     match completed.result {
                         Ok(mut output)=>{
                             if engagement.as_ref().and_then(|e|e.output.as_ref()).is_some_and(|o|o.presentation) {
@@ -656,9 +722,42 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                 brain.emit("device.turn.completed",Some(&completed.turn_id),json!({"device_id":device_id,"transcript":output.transcript,
                                     "scene":output.scene,"presentation_id":output.presentation.presentation_id,"task_ids":output.task_ids,
                                     "timings":output.timings,"outcome":output.device_outcome,"delivery_pending":true}));
+                                let index = turn.prefix.len() as u32 + u32::from(turn.acknowledgement_sent) + 1;
+                                if turn.acknowledgement_sent && turn.prefix.is_empty() {
+                                    brain.tasks.revoke_outputs(Some(&activation))?;
+                                    delivery=None;
+                                }
+                                if !turn.prefix.is_empty() {
+                                    let state = delivery.as_ref().ok_or("live_presentation_missing")?;
+                                    let matches = output.prepared_segments.iter().map(|s| &s.scene.speech)
+                                        .take(turn.prefix.len()).eq(turn.prefix.iter());
+                                    if !matches || output.provider_id != super::fast_core::PROVIDER_ID
+                                        || !brain.tasks.output_active(&state.lease_id)?
+                                        || !brain.tasks.source_current(&state.plan.context.conversation_turn_id)? {
+                                        brain.tasks.revoke_outputs(Some(&activation))?;
+                                        send(&mut socket, Message::Text(json!({"v":3,"type":"event","event":"session.cancelled",
+                                            "runtime":completed.token,"code":"live_presentation_changed"}).to_string())).await?;
+                                        delivery=None; playback=None; plain=None; display_result=None;
+                                        continue;
+                                    }
+                                    output.prepared_segments.drain(..turn.prefix.len());
+                                    if output.prepared_segments.is_empty() {
+                                        // Its last immutable sentence already has its actual hardware/display receipt.
+                                        let end = json!({"v":3,"type":"event","event":"presentation.end","runtime":completed.token,
+                                            "payload":{"presentation_id":state.plan.presentation_id,"output_lease_id":state.lease_id,
+                                                "presentation_index":state.index,"seq":state.current_seq}});
+                                        let response=json!({"v":3,"type":"response","id":completed.id,"ok":true,
+                                            "runtime":completed.token,"payload":{"presentation_pending":true}});
+                                        send(&mut socket, Message::Text(response.to_string())).await?;
+                                        send(&mut socket, Message::Text(end.to_string())).await?;
+                                        delivery=None; plain=None; context=None;
+                                        continue;
+                                    }
+                                    brain.tasks.revoke_outputs(Some(&activation))?;
+                                }
                                 let next=segments::Delivery::new(&brain,&device_id,&activation,completed.token,completed.turn_id.clone(),output.presentation,
-                                    output.prepared_segments,output.task_ids,completed.audio_requested,1);
-                                match next {Ok(mut next)=>{next.request_id=completed.id.clone();delivery=Some(next);
+                                    output.prepared_segments,output.task_ids,completed.audio_requested,index);
+                                match next {Ok(mut next)=>{next.total_sent=index-1;next.request_id=completed.id.clone();delivery=Some(next);
                                     let response=json!({"v":3,"type":"response","id":completed.id,"ok":true,"runtime":completed.token,"payload":{"presentation_pending":true}});
                                     if send(&mut socket,Message::Text(response.to_string())).await.is_err(){break;}
                                 },Err(error)=>{if send(&mut socket,Message::Text(response_error(&completed.id,&error))).await.is_err(){break;}}}
@@ -716,6 +815,12 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                             }
                         },
                         Err(error)=>{
+                            if turn.acknowledgement_sent || !turn.prefix.is_empty() {
+                                if let Some(session)=&engagement {brain.tasks.revoke_outputs(Some(&session.conversation_id))?;}
+                                send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.cancelled",
+                                    "runtime":completed.token,"code":"live_answer_interrupted"}).to_string())).await?;
+                                delivery=None;playback=None;plain=None;display_result=None;
+                            }
                             brain.emit("device.turn.failed",Some(&completed.turn_id),json!({"device_id":device_id,"code":error.split(':').next().unwrap_or("turn_failed")}));
                             if send(&mut socket, Message::Text(response_error(&completed.id,&error))).await.is_err(){break;}
                         },
@@ -779,29 +884,64 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     let output=DeviceOutput::negotiate(&frame.payload)?;
                                     let conversation_id=format!("device-{}-{}",device_id,uuid::Uuid::new_v4().simple());
                                     let mut response=json!({"conversation_id":conversation_id,"runtime":token});
-                                    if let Some(options)=&output { response["output"]=options.confirmed(); }
+                                    if let Some(options)=&output {
+                                        response["output"]=options.confirmed();
+                                        if options.audio && options.live && brain.listening_ack.get().is_none() {
+                                            let brain=Arc::clone(&brain);
+                                            tokio::spawn(async move {
+                                                let _=brain.listening_ack.get_or_try_init(||async {
+                                                    brain.models.call("tts",json!({"text":super::fast_core::LISTENING_ACK,"voice":brain.models.voice()})).await
+                                                }).await;
+                                            });
+                                        }
+                                    }
+                                    context=None;first_speech=None;supplement=None;
                                     engagement=Some(Engagement{conversation_id:conversation_id.clone(),token,last_turn:None,last_user:Instant::now(),output});
                                     Ok(response)
                                 },
-                                "assistant.cancel"|"session.close"=>{
+                                "assistant.supplement"|"assistant.cancel"|"session.close"=>{
+                                    let is_supplement=frame.method=="assistant.supplement";
+                                    if is_supplement {
+                                        let session=engagement.as_ref().ok_or("explicit_session_required")?;
+                                        let token=parse_runtime(&frame.payload)?;
+                                        if !session.output.as_ref().is_some_and(|o|o.live) || session.token!=token ||
+                                            session.last_turn!=Some(token.turn_id) ||
+                                            !(active.as_ref().is_some_and(|a|a.token==token) || delivery.as_ref().is_some_and(|d|d.token==token)
+                                                || playback.as_ref().is_some_and(|p|p.token==token)) {return Err("stale_supplement".into());}
+                                    }
                                     // Older clients omit runtime and use ordered WSS. A tagged stop must
                                     // match exactly; never revoke the next question because of a late tap.
                                     if frame.payload.get("runtime").is_some() {
                                         let token=parse_runtime(&frame.payload)?;
                                         if engagement.as_ref().is_none_or(|e| e.token!=token) {return Err("stale_runtime".into());}
                                     }
+                                    supplement=if is_supplement {
+                                        let session=engagement.as_ref().expect("validated session");
+                                        let previous=format!("{}-{}",session.conversation_id,session.token.turn_id);
+                                        Some((session.token,super::Supplement{reservation:brain.fast.reserve_followup(&previous),live:context.take(),previous}))
+                                    } else {None};
                                     if let Some(mut turn)=active.take(){
                                         // Abort/join only the local producer. Dropping its guards retires
                                         // the owned OpenCode session and schedules its exact interrupt;
                                         // a slow provider must not occupy the device control socket.
                                         turn.task.stop().await;
-                                        brain.emit("turn.cancelled",Some(&turn.turn_id),json!({"code":"device_stop"}));
+                                        brain.emit("turn.cancelled",Some(&turn.turn_id),json!({"code":if is_supplement {"supplemented"} else {"device_stop"}}));
                                         send(&mut socket,Message::Text(cancelled_response(&turn))).await?;
                                     }
                                     if let Some(session)=&engagement{brain.tasks.revoke_outputs(Some(&session.conversation_id))?;}
                                     audio=None;playback=None;plain=None;display_result=None;delivery=None;
+                                    context=None;first_speech=None;
                                     if frame.method=="session.close"{engagement=None;}
                                     Ok(json!({"cancelled":true}))
+                                },
+                                "audio.pause"=>{
+                                    let session=engagement.as_ref().ok_or("explicit_session_required")?;
+                                    let (capture,token)=audio.as_mut().ok_or("audio_session_required")?;
+                                    if !session.output.as_ref().is_some_and(|o|o.live) || parse_runtime(&frame.payload)?!=*token ||
+                                        stream_id(&frame.payload)?!=capture.stream_id {return Err("audio_session_mismatch".into());}
+                                    let frames=frame.payload["frames"].as_u64().filter(|n|*n<=48000).ok_or("audio_frame_count_required")? as u32;
+                                    capture.note_pause(frames);
+                                    Ok(json!({"accepted":true}))
                                 },
                                 "audio.begin"=>{
                                     let session=engagement.as_mut().ok_or("explicit_session_required")?;
@@ -819,6 +959,9 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         None=>{plain=None;None},
                                         _=>return Err("audio_transport_unsupported".into()),
                                     };
+                                    if supplement.as_ref().is_some_and(|(previous,_)|!token.directly_follows(*previous)) {
+                                        supplement=None;
+                                    }
                                     audio=Some((media::AudioInput::new(stream),token));
                                     session.token=token;
                                     session.last_user=Instant::now();
@@ -849,6 +992,11 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     let clip=playback.as_mut().filter(|clip|clip.hardware_receipts && clip.current(token,stream))
                                         .ok_or("audio_playback_stale")?;
                                     let (frames,bytes)=device_audio_counts(&frame.payload,clip.sequence,clip.offset)?;
+                                    let written=frame.payload.get("sample_position").map(|v|v.as_u64()
+                                        .filter(|n|*n<=clip.offset as u64/2).ok_or("audio_playback_position_invalid")).transpose()?;
+                                    if status=="finished" && written.is_some_and(|n|n!=clip.pcm.len() as u64/2) {
+                                        return Err("audio_playback_incomplete".into());
+                                    }
                                     if status=="started" {
                                         if !clip.ready || clip.sequence==0 {return Err("audio_playback_not_sent".into());}
                                         if clip.hardware_started {return Ok(json!({"recorded":true,"duplicate":true}));}
@@ -859,12 +1007,36 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                             return Err("audio_playback_incomplete".into());
                                         }
                                     }
+                                    let observed=frame.payload["device_monotonic_ms"].as_u64();
+                                    let content=delivery.as_ref().is_none_or(|d|d.current_spoken.is_some() && d.tasks.is_empty() && !d.progress_only);
+                                    let ack_ms=if status=="started" && delivery.as_ref().is_some_and(|d|d.live_content && d.progress_only) {
+                                        first_speech.as_ref().filter(|clock|clock.token==token)
+                                            .and_then(|clock|observed?.checked_sub(clock.device_commit_ms?))
+                                    } else {None};
+                                    let first=if status=="started" && content {
+                                        first_speech.take_if(|clock|clock.token==token).map(|clock| {
+                                            let elapsed=|from:Option<u64>|observed?.checked_sub(from?).filter(|ms|*ms<240_000);
+                                            json!({"server_commit_to_report_ms":clock.admitted.elapsed().as_millis(),
+                                                "device_commit_to_write_ms":elapsed(clock.device_commit_ms),
+                                                "device_vad_end_to_write_ms":elapsed(clock.vad_end_ms)})
+                                        })
+                                    } else {None};
                                     let code=frame.payload["code"].as_str().filter(|code|!code.is_empty() && code.len()<=40 &&
                                         code.bytes().all(|byte|byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte==b'_'));
                                     brain.emit("device.audio",Some(&clip.turn_id),json!({"device_id":device_id,
                                         "stream_id":stream,"status":status,"code":code,"runtime":token,
-                                        "frames_sent":clip.sequence,"pcm_bytes":clip.pcm.len(),"frames_reported":frames,"bytes_reported":bytes}));
-                                    let _=brain.memory.journal_receipt(&clip.turn_id,"audio",json!({"stream_id":stream,"status":status,"frames":frames,"bytes":bytes,"code":code}),
+                                        "frames_sent":clip.sequence,"pcm_bytes":clip.pcm.len(),"frames_reported":frames,"bytes_reported":bytes,"written_samples":written,"first_speech":first,"device_commit_to_ack_ms":ack_ms,"device_monotonic_ms":observed}));
+                                    if status=="finished" {
+                                        if let (Some(current),Some(text))=(&context,delivery.as_ref().filter(|d|!d.progress_only).and_then(|d|d.current_spoken.as_deref())) {
+                                            if let Ok(mut current)=current.lock() {
+                                                let room=650usize.saturating_sub(current.delivered.chars().count());
+                                                current.delivered.extend(text.chars().take(room));
+                                            }
+                                        }
+                                    }
+                                    let _=brain.memory.journal_receipt(&clip.turn_id,"audio",json!({"stream_id":stream,"status":status,"frames":frames,"bytes":bytes,"code":code,
+                                        "sample_position":written,"device_monotonic_ms":observed,"first_speech":first,"device_commit_to_ack_ms":ack_ms,
+                                        "rendered_text":if status=="finished"{delivery.as_ref().filter(|d|!d.progress_only).and_then(|d|d.current_spoken.as_deref())}else{None}}),
                                         &format!("audio-{}-{stream}-{status}",clip.turn_id));
                                     if let Some(state)=delivery.as_mut(){
                                         state.record_hardware(&brain,match status{"started"=>"audio_started","finished"=>"audio_completed","failed"=>"failed",_=>"cancelled"},
@@ -882,12 +1054,15 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     let finished=match state.report(&brain,&frame.payload){
                                         Ok(done)=>done,
                                         Err(error) if matches!(error.as_str(),"presentation_segment_failed"|"presentation_lease_revoked")=>{
-                                            let token=state.token;let activation=state.activation_id.clone();let _=brain.tasks.revoke_outputs(Some(&activation));delivery=None;playback=None;plain=None;display_result=None;
+                                            let token=state.token;let activation=state.activation_id.clone();
+                                            if active.as_ref().is_some_and(|a|a.turn_id==state.turn_id) {active.take();}
+                                            let _=brain.tasks.revoke_outputs(Some(&activation));delivery=None;playback=None;plain=None;display_result=None;
                                             send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.cancelled","runtime":token,"code":error}).to_string())).await?;
                                             return Err(error);
                                         },Err(error)=>return Err(error),
                                     };
-                                    if finished {delivery=None;plain=None;}
+                                    let finished = finished && !state.live_content;
+                                    if finished {delivery=None;plain=None;context=None;}
                                     Ok(json!({"recorded":true,"finished":finished}))
                                 },
                                 "display.asset.read"=>{
@@ -923,6 +1098,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     if active.is_some() || playback.is_some() || delivery.is_some(){return Err("session_busy".into());}
                                     let token=parse_runtime(&frame.payload)?;session.check_token(token)?;
                                     display_result=None;
+                                    let mut candidate=None;
                                     let (text,wav)=if frame.method=="assistant.text"{
                                         if audio.is_some(){return Err("audio_capture_in_progress".into());}
                                         (Some(frame.payload.get("text").and_then(Value::as_str).ok_or("text_required")?.to_owned()),None)
@@ -934,7 +1110,8 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                                 .and_then(|n|u32::try_from(n).ok()).ok_or("audio_frame_count_required")?;
                                             finish_plain_input(transport,capture,expected).await?;
                                         }
-                                        let (capture,_)=audio.take().ok_or("audio_session_required")?;
+                                        let (mut capture,_)=audio.take().ok_or("audio_session_required")?;
+                                        candidate=capture.candidate.take();
                                         (None,Some(capture.wav_base64()?))
                                     };
                                     session.token=token;session.last_turn=Some(token.turn_id);session.last_user=Instant::now();
@@ -944,17 +1121,25 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     let audio_requested=input.speak.unwrap_or(false);
                                     let turn_brain=Arc::clone(&brain);let tx=completion_tx.clone();let request_id=frame.id.clone();
                                     let completion_id=id.clone();
+                                    let live_output=session.output.as_ref().filter(|o|o.live && o.audio).map(|_|tx.clone());
+                                    first_speech=Some(FirstSpeech{token,admitted:Instant::now(),
+                                        device_commit_ms:frame.payload["device_monotonic_ms"].as_u64(),vad_end_ms:frame.payload["vad_end_ms"].as_u64()});
+                                    let supplement=supplement.take().filter(|(previous,_)|token.directly_follows(*previous)).map(|(_,item)|item);
+                                    context=session.output.as_ref().filter(|o|o.live).map(|_|super::LiveTurnContext::default());
+                                    let shared_context=context.clone();
+                                    let acknowledge=live_output.is_some() && frame.method=="audio.commit" &&
+                                        last_ack.is_none_or(|when|when.elapsed()>=Duration::from_secs(20));
                                     let task=tokio::spawn(async move {
                                         let started = Instant::now();
-                                        let result = turn_brain.turn(input, false).await;
-                                        let _ = tx.send(Completed {
+                                        let result = turn_brain.turn_with(input, false, super::DeviceWork { output:live_output, candidate, supplement, acknowledge, context:shared_context, spoken_device:audio_requested && compact }).await;
+                                        let _ = tx.send(TurnUpdate::Completed(Box::new(Completed {
                                             id: request_id, turn_id: completion_id, token, compact, audio_requested,
                                             processing_time: started.elapsed(), result,
-                                        }).await;
+                                        }))).await;
                                     });
                                     brain.emit("device.turn.started",Some(&id),json!({"device_id":device_id}));
                                     active=Some(ActivePeer{turn_id:id,request_id:frame.id.clone(),token,task:TurnTask(task),
-                                        progress_seq:0,last_stage:None,last_progress:Instant::now()});
+                                        prefix:Vec::new(),acknowledgement_sent:false,progress_seq:0,last_stage:None,last_progress:Instant::now()});
                                     // Acknowledges admission, not success. The device may
                                     // show "thinking" while the actual result is pending.
                                     send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"turn.accepted","id":frame.id.clone(),"runtime":token}).to_string())).await?;
@@ -1078,6 +1263,10 @@ mod tests {
         assert!(session.check_token(first).is_err());
         let next = RuntimeToken { epoch: 8, turn_id: 2, ..first };
         assert!(session.check_token(next).is_ok());
+        assert!(next.directly_follows(first));
+        assert!(!RuntimeToken {turn_id:3,..next}.directly_follows(first));
+        assert!(!RuntimeToken {epoch:9,..next}.directly_follows(first));
+        assert!(!RuntimeToken {session_id:13,..next}.directly_follows(first));
         assert!(session.check_token(RuntimeToken { epoch: 7, ..next }).is_err());
         assert!(session.check_token(RuntimeToken { session_id: 13, ..next }).is_err());
         session.token = next;

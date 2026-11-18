@@ -8,6 +8,9 @@ pub(super) struct Delivery {
     pub pending:VecDeque<PreparedSegment>,pub current:Option<String>,pub tasks:VecDeque<String>,
     pub audio_requested:bool,pub started:Instant,pub last_progress:Instant,pub preparing_task:bool,
     pub request_id:String,pub progress_seq:u64,pub progress_only:bool,
+    /// The producer can still add speech. A segment receipt alone cannot finish this turn.
+    pub live_content:bool,
+    pub(super) current_spoken:Option<String>,
     receipt_sequence:u64,current_rendered:Option<String>,current_visual_unavailable:bool,
 }
 impl Delivery {
@@ -20,7 +23,7 @@ impl Delivery {
             expires_at_ms:crate::time::now_ms() as i64+120_000,revoked:false})?;
         let playback_id=brain.tasks.begin_playback(&plan,&lease_id)?;
         Ok(Self{plan,token,turn_id,activation_id:activation.into(),lease_id,playback_id,index,current_seq:0,total_sent:0,pending:segments.into(),current:None,
-            tasks:tasks.into(),audio_requested:audio,started:Instant::now(),last_progress:Instant::now(),preparing_task:false,request_id:String::new(),progress_seq:1000,progress_only:false,receipt_sequence:0,current_rendered:None,current_visual_unavailable:false})
+            tasks:tasks.into(),audio_requested:audio,started:Instant::now(),last_progress:Instant::now(),preparing_task:false,request_id:String::new(),progress_seq:1000,progress_only:false,live_content:false,receipt_sequence:0,current_spoken:None,current_rendered:None,current_visual_unavailable:false})
     }
     pub fn next(&mut self,brain:&Brain)->Result<Option<(Value,Option<Playback>,DisplayResult)>,String>{
         if !brain.memory.pending_household_cleanup()?.is_empty(){return Err("source_cleanup_pending".into());}
@@ -30,7 +33,7 @@ impl Delivery {
         if self.started.elapsed()>Duration::from_secs(120){return Err("presentation_expired".into());}
         if self.total_sent>=64{return Err("presentation_turn_segment_budget".into());}
         self.total_sent+=1;self.current_seq+=1;self.current=Some(segment.segment_id.clone());
-        let final_segment=!self.progress_only&&self.pending.is_empty()&&self.tasks.is_empty();
+        let final_segment=!self.live_content && !self.progress_only&&self.pending.is_empty()&&self.tasks.is_empty();
         let purpose=if self.progress_only{"progress"}else if final_segment{"final"}else if self.index==1&&!self.tasks.is_empty(){"task_ack"}else if self.pending.is_empty()&&!self.tasks.is_empty(){"progress"}else{"content"};
         let pcm=if self.audio_requested {segment.audio.as_ref().and_then(|v|v["wav_base64"].as_str()).map(media::decode_output).transpose()?}else{None};
         let stream_id=u32::from_le_bytes(uuid::Uuid::new_v4().as_bytes()[..4].try_into().map_err(|_|"stream_id")?).max(1);
@@ -47,9 +50,10 @@ impl Delivery {
         while speech.len()>DEVICE_CAPTION_BYTES {speech.pop();}
         // The retained caption remains readable after a voice-only answer. The
         // hardware's actual playback and display receipts still gate follow-up.
-        let voice_only=final_segment && spoken.is_some() && image.is_none() && segment.scene.cards.is_empty()
+        let voice_only=spoken.is_some() && image.is_none() && segment.scene.cards.is_empty()
             && segment.media_kind.is_none() && frozen.visual["kind"]=="none" && !frozen.wait_for_first_frame;
         let hold_ms=if voice_only {0} else {segment.dwell_ms.min(30_000)};
+        self.current_spoken=spoken.clone();
         self.current_rendered=Some(spoken.unwrap_or_else(||speech.clone()));
         let mut payload=json!({"presentation_id":self.plan.presentation_id,"presentation_index":self.index,"output_lease_id":self.lease_id,
             "segment_id":segment.segment_id,"seq":self.current_seq,"purpose":purpose,"final":final_segment,
@@ -94,7 +98,7 @@ impl Delivery {
             state:status.into(),device_monotonic_ms:payload["device_monotonic_ms"].as_u64(),sample_position:payload["sample_position"].as_u64(),detail:json!({"code":payload["code"],"visual_unavailable":self.current_visual_unavailable})})?;
         let _=brain.memory.journal_receipt(&self.turn_id,"presentation",json!({"presentation_id":self.plan.presentation_id,
             "segment_id":segment,"status":status,"code":payload["code"],"visual_unavailable":self.current_visual_unavailable,"rendered_text":if status=="completed"{self.current_rendered.as_deref()}else{None}}),&format!("{}_{}",self.playback_id,self.current_seq));
-        self.current=None;self.current_rendered=None;
+        self.current=None;self.current_rendered=None;self.current_spoken=None;
         if !current{return Err("presentation_lease_revoked".into());}
         if status=="failed" {self.pending.clear();return Err("presentation_segment_failed".into());}
         Ok(self.pending.is_empty()&&self.tasks.is_empty())

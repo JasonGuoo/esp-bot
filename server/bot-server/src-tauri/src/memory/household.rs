@@ -292,8 +292,18 @@ impl Store {
     /// legally shareable source versions are supplied to a fresh model session.
     pub fn household_recent_context(&self,daily:&str,allow_cloud:bool)->Result<Value,String>{
         self.purge_household_expired()?;
-        let db=self.connection()?;let mut stmt=db.prepare("SELECT t.id,t.input_text,t.assistant_text,t.source_revision,t.status FROM household_turns t JOIN household_episodes e ON e.id=t.episode_id WHERE e.daily_id=?1 AND t.forgotten=0 AND t.source_expired=0 AND t.private_profile_id IS NULL AND NOT EXISTS(SELECT 1 FROM household_tombstones x WHERE x.scope='derived_source' AND x.target_id=t.id) AND (?2=0 OR t.allow_cloud=1) ORDER BY t.occurred_at_ms DESC,t.recorded_at_ms DESC LIMIT 12").map_err(db_error)?;
-        let rows=stmt.query_map(params![daily,allow_cloud],|r|Ok(json!({"conversation_turn_id":r.get::<_,String>(0)?,"user":r.get::<_,String>(1)?,"assistant_generated":r.get::<_,String>(2)?,"source_revision":r.get::<_,u64>(3)?,"status":r.get::<_,String>(4)?}))).map_err(db_error)?;
+        let db=self.connection()?;let mut stmt=db.prepare("SELECT t.id,t.input_text,t.assistant_text,t.source_revision,t.status,t.external_turn_id,
+            COALESCE(json_extract(t.metadata_json,'$.spoken_device'),0),
+            (SELECT group_concat(speech,' ') FROM (SELECT json_extract(r.payload_json,'$.rendered_text') AS speech
+                FROM household_receipts r WHERE r.turn_id=t.id AND r.kind='audio' AND json_extract(r.payload_json,'$.status')='finished'
+                ORDER BY r.at_ms,r.rowid LIMIT 64)) FROM household_turns t JOIN household_episodes e ON e.id=t.episode_id WHERE e.daily_id=?1 AND t.forgotten=0 AND t.source_expired=0 AND t.private_profile_id IS NULL AND NOT EXISTS(SELECT 1 FROM household_tombstones x WHERE x.scope='derived_source' AND x.target_id=t.id) AND (?2=0 OR t.allow_cloud=1) ORDER BY t.occurred_at_ms DESC,t.recorded_at_ms DESC LIMIT 12").map_err(db_error)?;
+        let rows=stmt.query_map(params![daily,allow_cloud],|r|{
+            let mut row=json!({"conversation_turn_id":r.get::<_,String>(0)?,"turn_id":r.get::<_,String>(5)?,
+                "user":r.get::<_,String>(1)?,"source_revision":r.get::<_,u64>(3)?,"status":r.get::<_,String>(4)?});
+            if r.get::<_,bool>(6)? {row["assistant_delivered"]=json!(r.get::<_,Option<String>>(7)?.unwrap_or_default());}
+            else {row["assistant_generated"]=json!(r.get::<_,String>(2)?);}
+            Ok(row)
+        }).map_err(db_error)?;
         let mut values=rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;values.reverse();Ok(json!(values))
     }
 

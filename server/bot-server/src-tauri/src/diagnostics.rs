@@ -85,9 +85,14 @@ pub fn event(event: &Value) {
             entry[key] = json!(value);
         }
     }
-    for key in ["elapsed_ms", "prepare_ms", "attempt", "safe_to_fallback"] {
+    for key in ["elapsed_ms", "prepare_ms", "device_commit_to_ack_ms", "attempt", "safe_to_fallback"] {
         let value = if !event[key].is_null() { &event[key] } else { &event["payload"][key] };
         if value.is_u64() || value.is_boolean() { entry[key] = value.clone(); }
+    }
+    for key in ["server_commit_to_report_ms","device_commit_to_write_ms","device_vad_end_to_write_ms"] {
+        if let Some(ms)=event.pointer(&format!("/payload/first_speech/{key}")).and_then(Value::as_u64) {
+            entry[key]=json!(ms);
+        }
     }
     // Timing schemas are numeric. Never serialize any sibling payload fields.
     for key in ["asr_ms", "speaker_ms", "llm_ms", "image_ms", "tts_ms", "total_ms"] {

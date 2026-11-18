@@ -72,6 +72,30 @@ pub struct TurnOutput {
     #[serde(skip)] pub(crate) device_outcome: String,
 }
 
+#[derive(Clone,Default)]
+struct SpokenTurn {
+    source:String,
+    question:String,
+    delivered:String,
+}
+type LiveTurnContext=Arc<StdMutex<SpokenTurn>>;
+
+struct Supplement {
+    previous:String,
+    live:Option<LiveTurnContext>,
+    reservation:Option<fast_core::Reservation>,
+}
+
+#[derive(Default)]
+struct DeviceWork {
+    supplement:Option<Supplement>,
+    spoken_device:bool,
+    acknowledge:bool,
+    context:Option<LiveTurnContext>,
+    candidate:Option<media::CandidateAsr>,
+    output:Option<tokio::sync::mpsc::Sender<gateway::TurnUpdate>>,
+}
+
 struct ActiveTurn { id: String, conversation_id: String, cancelled: watch::Sender<bool> }
 
 #[derive(Clone, Debug)]
@@ -152,6 +176,7 @@ pub struct Brain {
     device_states: StdMutex<HashMap<String,Value>>,
     device_volumes: device_volume::DeviceVolumes,
     progress_audio: Mutex<HashMap<String,Value>>,
+    listening_ack: tokio::sync::OnceCell<Value>,
     pub(super) graphiti: Arc<memory::graphiti::GraphitiClient>,
     accepting: AtomicBool,
     cancellation_events: broadcast::Sender<Cancellation>,
@@ -196,7 +221,7 @@ impl Brain {
         let tasks = tasks::TaskService::open(runtime_dir.join("tasks"), config.tasks.clone(), Arc::clone(&sink))?;
         let graphiti=Arc::new(memory::graphiti::GraphitiClient::new(&config.memory.graphiti,graphiti_script));
         let brain = Arc::new(Self { models: ModelWorker::new(config.models.clone(), config_dir.clone()), config, config_dir,
-            harness, fast, memory, credentials, sink, turn_gate:AsyncRwLock::new(()), active:StdMutex::new(HashMap::new()), identity_jobs:StdMutex::new(HashMap::new()), tasks, device_states:StdMutex::new(HashMap::new()), device_volumes:Default::default(), progress_audio:Mutex::new(HashMap::new()), graphiti, accepting:AtomicBool::new(false),
+            harness, fast, memory, credentials, sink, turn_gate:AsyncRwLock::new(()), active:StdMutex::new(HashMap::new()), identity_jobs:StdMutex::new(HashMap::new()), tasks, device_states:StdMutex::new(HashMap::new()), device_volumes:Default::default(), progress_audio:Mutex::new(HashMap::new()), listening_ack:Default::default(), graphiti, accepting:AtomicBool::new(false),
             cancellation_events, progress_events, foreground_generation, background:Mutex::new(None), memory_script, gateway:Mutex::new(None) });
         brain.install_task_handlers()?;
         Ok(brain)
@@ -324,6 +349,10 @@ impl Brain {
     pub fn foreground_busy(&self) -> bool { self.active.lock().map(|a|!a.is_empty()).unwrap_or(true) }
 
     pub async fn turn(self: &Arc<Self>, input: TurnInput, trusted_console: bool) -> Result<TurnOutput, String> {
+        self.turn_with(input, trusted_console, DeviceWork::default()).await
+    }
+
+    async fn turn_with(self: &Arc<Self>, input: TurnInput, trusted_console: bool, work:DeviceWork) -> Result<TurnOutput, String> {
         if !self.accepting.load(Ordering::Acquire) { return Err("brain_not_started: start the service from the console".into()); }
         if !valid_turn_id(&input.turn_id) || !valid_turn_id(&input.conversation_id) { return Err("turn_or_conversation_id_invalid".into()); }
         if !trusted_console && input.profile_id.is_some() { return Err("profile_requires_local_console".into()); }
@@ -347,7 +376,7 @@ impl Brain {
         let result = tokio::select! {
             biased;
             _ = cancellation.changed() => Err("cancelled".into()),
-            result = self.execute(&input, trusted_console) => result,
+            result = self.execute(&input, trusted_console, work) => result,
         };
         let result={
             // cancel_scoped sends while holding this same membership lock.

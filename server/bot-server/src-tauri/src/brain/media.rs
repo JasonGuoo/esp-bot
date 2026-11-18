@@ -6,17 +6,47 @@ pub const MAX_INPUT_PCM: usize = 30 * SAMPLE_RATE as usize * 2;
 pub const MAX_OUTPUT_PCM: usize = 120 * SAMPLE_RATE as usize * 2;
 pub const HEADER: usize = 20;
 
+pub(super) struct CandidateAsr(tokio::task::JoinHandle<Result<serde_json::Value,String>>);
+
+impl CandidateAsr {
+    pub async fn result(mut self) -> Option<serde_json::Value> {
+        (&mut self.0).await.ok()?.ok()
+    }
+}
+impl Drop for CandidateAsr {
+    fn drop(&mut self) { self.0.abort(); }
+}
+
 pub struct AudioInput {
     pub stream_id: u32,
     pub sequence: u32,
     pub last_capture_ms: u64,
     pub pcm: Vec<u8>,
     pub started: std::time::Instant,
+    pause_at: Option<u32>,
+    attempted: bool,
+    pub(super) candidate: Option<CandidateAsr>,
 }
 
 impl AudioInput {
     pub fn new(stream_id: u32) -> Self {
-        Self { stream_id, sequence:0, last_capture_ms:0, pcm:Vec::new(), started:std::time::Instant::now() }
+        Self { stream_id, sequence:0, last_capture_ms:0, pcm:Vec::new(), started:std::time::Instant::now(),pause_at:None,attempted:false,candidate:None }
+    }
+
+    /// The pause arrives on WSS, potentially before its last PCM frame on TCP.
+    /// A capture gets one speculative request; a resumed utterance invalidates it.
+    pub(super) fn note_pause(&mut self, frames:u32) {
+        if !self.attempted && self.pause_at.is_none() && frames>=self.sequence && frames>0 {
+            self.pause_at=Some(frames);
+        }
+    }
+
+    pub(super) fn start_candidate(&mut self, worker:&std::sync::Arc<super::ModelWorker>) {
+        if self.attempted || self.pause_at!=Some(self.sequence) || self.pcm.len()<1600 {return;}
+        self.attempted=true;
+        let worker=std::sync::Arc::clone(worker);
+        let wav=STANDARD.encode(pcm_wav(&self.pcm));
+        self.candidate=Some(CandidateAsr(tokio::spawn(async move {worker.transcribe_if_idle(wav).await})));
     }
 
     pub fn push(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -33,6 +63,10 @@ impl AudioInput {
         // the user reads. The recording budget begins with actual PCM.
         if self.sequence == 0 { self.started = std::time::Instant::now(); }
         self.pcm.extend_from_slice(pcm); self.sequence += 1; self.last_capture_ms = capture_ms;
+        if self.pause_at.is_some_and(|at|self.sequence>at) {
+            self.candidate.take();
+            self.pause_at=None;
+        }
         Ok(())
     }
 
@@ -77,4 +111,31 @@ pub fn output_frame(stream: u32, sequence: u32, pcm: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(HEADER + pcm.len()); frame.extend(b"XDAI");
     frame.extend(stream.to_le_bytes()); frame.extend(sequence.to_le_bytes());
     frame.extend((sequence as u64 * 20).to_le_bytes()); frame.extend(pcm); frame
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn resumed_pcm_retires_the_exact_pause_candidate() {
+        let mut capture=AudioInput::new(7);
+        capture.note_pause(2); // control and PCM may arrive on different sockets
+        capture.push(&output_frame(7,0,&[0;960])).unwrap();
+        assert_ne!(capture.pause_at,Some(capture.sequence));
+        capture.push(&output_frame(7,1,&[0;960])).unwrap();
+        assert_eq!(capture.pause_at,Some(capture.sequence));
+        capture.attempted=true;
+        let job=tokio::spawn(std::future::pending());
+        let handle=job.abort_handle();
+        capture.candidate=Some(CandidateAsr(job));
+        capture.push(&output_frame(7,2,&[1;960])).unwrap();
+        tokio::task::yield_now().await;
+        assert!(handle.is_finished());
+        assert!(capture.candidate.is_none());
+        capture.note_pause(3);
+        assert_eq!(capture.pause_at,None);
+        assert_eq!(capture.pcm.len(),2880);
+    }
 }

@@ -121,12 +121,22 @@ impl ModelWorker {
     pub fn generation(&self) -> u64 { *self.cancel.borrow() }
 
     pub async fn call_at_generation(&self, op:&str, payload:Value, generation:u64) -> Result<Value,String> {
+        self.exchange(op,payload,generation,false).await
+    }
+
+    pub(super) async fn transcribe_if_idle(&self, wav:String) -> Result<Value,String> {
+        self.exchange("transcribe",json!({"wav_base64":wav,"language":"zh"}),self.generation(),true).await
+    }
+
+    async fn exchange(&self, op:&str, payload:Value, generation:u64, speculative:bool) -> Result<Value,String> {
         let mut cancelled = self.cancel.subscribe();
         if *cancelled.borrow() != generation { return Err("cancelled".into()); }
-        let mut slot = tokio::select! {
+        let mut slot = if speculative {
+            self.lane(op).try_lock().map_err(|_|"local_worker_lane_busy")?
+        } else { tokio::select! {
             slot = timeout(Duration::from_secs(15), self.lane(op).lock()) => slot.map_err(|_| "local_worker_lane_busy")?,
             _ = cancelled.changed() => return Err("cancelled".into()),
-        };
+        }};
         if self.generation() != generation { return Err("cancelled".into()); }
         if slot.is_none() { *slot = Some(self.spawn(op)?); }
         let request_id = uuid::Uuid::new_v4().to_string();
