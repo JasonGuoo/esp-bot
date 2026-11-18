@@ -14,6 +14,10 @@ pub struct TurnTimings {
     pub stages_ms: BTreeMap<String, u64>,
     pub skipped: BTreeMap<String, String>,
     pub input_audio_ms: Option<u64>,
+    /// Milestones from the Mac's receipt of the turn: asr_done, memory_context_ready,
+    /// first_sentence and first_tts_audio. Device-side marks arrive in receipts.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub marks_ms: BTreeMap<String, u64>,
     /// Which brain answered: the Xiaodai core (winner route, time to first text/sentence,
     /// every engine attempt, Luna state) or OpenCode with the routing reason. Content-free.
     #[serde(skip_serializing_if = "Option::is_none")]

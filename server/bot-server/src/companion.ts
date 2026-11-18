@@ -924,7 +924,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
         : `本地后台整理模型尚未就绪 · 待处理 ${pending} 条。`;
       renderKeySettings(list(harness.routes));
       renderRoutes(list(harness.routes));
-      renderBrainCore(container, value.brain_core);
+      renderBrainCore(container, value.brain_core, value.latency);
       renderDeviceStatus(container, value);
       renderSpeakerControls(value);
       renderRuntimeMetrics(container, value);

@@ -181,6 +181,8 @@ struct FirstSpeech {
     admitted: Instant,
     device_commit_ms: Option<u64>,
     vad_end_ms: Option<u64>,
+    /// The first sound (ack or answer) of this turn was already recorded.
+    sound_recorded: bool,
 }
 
 struct Engagement {
@@ -1054,12 +1056,21 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     let observed=frame.payload["device_monotonic_ms"].as_u64();
                                     let content=delivery.as_ref().is_none_or(|d|d.current_spoken.is_some() && d.tasks.is_empty() && !d.progress_only);
                                     let ack_ms=if status=="started" && delivery.as_ref().is_some_and(|d|d.live_content && d.progress_only) {
-                                        first_speech.as_ref().filter(|clock|clock.token==token)
-                                            .and_then(|clock|observed?.checked_sub(clock.device_commit_ms?))
+                                        first_speech.as_mut().filter(|clock|clock.token==token).and_then(|clock|{
+                                            if !clock.sound_recorded {
+                                                clock.sound_recorded=true;
+                                                if let Some(ms)=observed.and_then(|o|o.checked_sub(clock.vad_end_ms?)).filter(|ms|*ms<240_000) {brain.latency.record("first_sound_ms",ms);}
+                                            }
+                                            observed?.checked_sub(clock.device_commit_ms?)
+                                        })
                                     } else {None};
                                     let first=if status=="started" && content {
                                         first_speech.take_if(|clock|clock.token==token).map(|clock| {
                                             let elapsed=|from:Option<u64>|observed?.checked_sub(from?).filter(|ms|*ms<240_000);
+                                            if let Some(ms)=elapsed(clock.vad_end_ms) {
+                                                brain.latency.record("first_word_ms",ms);
+                                                if !clock.sound_recorded {brain.latency.record("first_sound_ms",ms);}
+                                            }
                                             json!({"server_commit_to_report_ms":clock.admitted.elapsed().as_millis(),
                                                 "device_commit_to_write_ms":elapsed(clock.device_commit_ms),
                                                 "device_vad_end_to_write_ms":elapsed(clock.vad_end_ms)})
@@ -1167,7 +1178,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     let completion_id=id.clone();
                                     let live_output=session.output.as_ref().filter(|o|o.live && o.audio).map(|_|tx.clone());
                                     first_speech=Some(FirstSpeech{token,admitted:Instant::now(),
-                                        device_commit_ms:frame.payload["device_monotonic_ms"].as_u64(),vad_end_ms:frame.payload["vad_end_ms"].as_u64()});
+                                        device_commit_ms:frame.payload["device_monotonic_ms"].as_u64(),vad_end_ms:frame.payload["vad_end_ms"].as_u64(),sound_recorded:false});
                                     let supplement=supplement.take().filter(|(previous,_)|token.directly_follows(*previous)).map(|(_,item)|item);
                                     context=session.output.as_ref().filter(|o|o.live).map(|_|super::LiveTurnContext::default());
                                     let shared_context=context.clone();

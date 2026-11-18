@@ -6,7 +6,7 @@
 //! sentences become the frozen presentation segments, so delivery, receipts and the daily
 //! record stay exactly as for OpenCode replies. OpenCode remains the harness for tools,
 //! durable tasks, private scopes, pending task inputs and anything the core hands back.
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::{Mutex, RwLock}, time::Duration};
+use std::{collections::{BTreeMap, HashMap}, path::{Path, PathBuf}, sync::{Mutex, RwLock}, time::Duration};
 use fast_responder as xd;
 use std::sync::{Arc, Weak};
 use tokio::sync::OwnedMutexGuard;
@@ -324,17 +324,26 @@ pub(super) struct LiveSpeech<'a> {
     pub acknowledge:bool,
     pub supplement:bool,
     reservation:Option<Reservation>,
+    /// The turn's start, for content-free milestones (first sentence, first TTS audio).
+    pub origin: std::time::Instant,
+    pub marks: BTreeMap<&'static str,u64>,
 }
 
 impl<'a> LiveSpeech<'a> {
     pub fn new(output: Option<tokio::sync::mpsc::Sender<super::gateway::TurnUpdate>>,
                context: super::presentation::PlanContext, sources: &'a [String], reservation:Option<Reservation>) -> Self {
-        Self { output, context, sources, sent:0, spoken:Vec::new(), acknowledge:false, supplement:false, reservation }
+        Self { output, context, sources, sent:0, spoken:Vec::new(), acknowledge:false, supplement:false, reservation,
+            origin:std::time::Instant::now(), marks:BTreeMap::new() }
     }
 
     /// Before anything was said the turn escalates. After that, the answer ends
     /// gracefully: the spoken sentences plus a short in-character apology, so the
     /// device never goes silent mid-story or shows a technical error.
+    fn mark(&mut self, name:&'static str) {
+        let elapsed=self.origin.elapsed().as_millis() as u64;
+        self.marks.entry(name).or_insert(elapsed);
+    }
+
     fn escalate(&self, reason: &'static str, turn_id: &str, audio: &HashMap<String,Value>) -> Result<FastResult, String> {
         if self.sent == 0 { return Ok(FastResult::Escalate(reason)); }
         let apology=super::voice_lines::partial_apology(reason,turn_id);
@@ -453,6 +462,7 @@ impl Brain {
                         let (tag,text)=super::emotion::take(&text);
                         if text.is_empty() { pending_tag=tag.or(pending_tag); continue; } // a tag on its own line
                         let expression=tag.or(pending_tag.take()).unwrap_or_else(||super::emotion::from_keywords(&text));
+                        live.mark("first_sentence");
                         self.emit("brain.sentence", Some(turn_id), json!({"index":index,"elapsed_ms":ms,"chars":text.chars().count(),
                             "expression":expression,"tagged":tag.is_some()}));
                         prefetch_prefix &= sentences.len()<self.config.presentation.max_segments
@@ -484,6 +494,7 @@ impl Brain {
                 },
                 Some((sentence, expression, result)) = tts.next(), if !tts.is_empty() => {
                     if let Ok(value)=result {
+                        live.mark("first_tts_audio");
                         live.ready(self,turn_id,&sentence,expression,&value).await?;
                         audio.insert(sentence,value);
                     } else { live.output=None; }

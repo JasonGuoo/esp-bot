@@ -70,7 +70,23 @@ export function brainSummary(value: unknown): string[] {
 const OUTCOME_LABELS: Record<string, string> = { ok: "正常", lost: "被抢先", failed: "失败", timeout: "超时" };
 
 /** Engine status and rolling latency log for the models page. */
-export function renderBrainCore(root: HTMLElement, value: unknown): void {
+/** Rolling p50/p95 per stage against the responsiveness budgets. */
+export function latencyLines(value: unknown): string[] {
+  const lines: string[] = [];
+  for (const metric of list(object(value).metrics).map(object)) {
+    if (!(typeof metric.samples === "number" && metric.samples > 0)) continue;
+    const budget = [metric.budget_p50_ms, metric.budget_p95_ms].some((b) => typeof b === "number")
+      ? ` · 目标 p50 ≤ ${ms(metric.budget_p50_ms)}${typeof metric.budget_p95_ms === "number" ? `，p95 ≤ ${ms(metric.budget_p95_ms)}` : ""} · ${metric.within_budget === true ? "达标" : "未达标"}` : "";
+    lines.push(`${LATENCY_LABELS[text(metric.metric)] ?? text(metric.label)} · p50 ${ms(metric.p50_ms)} · p95 ${ms(metric.p95_ms)}（${metric.samples} 轮）${budget}`);
+  }
+  return lines;
+}
+const LATENCY_LABELS: Record<string, string> = {
+  first_sound_ms: "说完到第一声", first_word_ms: "说完到第一句回答", asr_ms: "语音识别", memory_context_ms: "记忆准备",
+  first_sentence_ms: "收到到首句文字", first_tts_audio_ms: "收到到首句语音",
+};
+
+export function renderBrainCore(root: HTMLElement, value: unknown, latency?: unknown): void {
   const status = object(value), health = object(status.health), luna = object(status.luna);
   const state = find(root, "#cc-brain-core-state"), host = find(root, "#cc-brain-core");
   host.replaceChildren();
@@ -90,6 +106,7 @@ export function renderBrainCore(root: HTMLElement, value: unknown): void {
   }
   const last = brainSummary(status.last_turn);
   if (last.length) { const row = node("div", "cc-manage-row"); row.append(node("strong", "", "最近一轮"), node("span", "cc-caption", last[0])); host.append(row); }
+  for (const line of latencyLines(latency)) { const row = node("div", "cc-manage-row"); row.append(node("strong", "", "延迟"), node("span", "cc-caption", line)); host.append(row); }
   if (text(health.log_path)) host.append(node("p", "cc-caption", `延迟日志：${text(health.log_path)}`));
 }
 
@@ -134,6 +151,10 @@ export function renderTurnTimings(value: unknown): HTMLElement | null {
     else if (TIMING_SKIP_LABELS[text(skipped[stage])])
       details.append(node("p", "cc-caption", `${label} · 已跳过：${TIMING_SKIP_LABELS[text(skipped[stage])]}`));
   }
+  const marks = object(timing.marks_ms);
+  const MARKS: Record<string, string> = { asr_done: "听懂", memory_context_ready: "记忆就绪", first_sentence: "首句文字", first_tts_audio: "首句语音" };
+  const timeline = Object.entries(MARKS).filter(([key]) => typeof marks[key] === "number").map(([key, label]) => `${label} ${ms(marks[key])}`);
+  if (timeline.length) details.append(node("p", "cc-caption", `时间线（Mac 收到后）· ${timeline.join(" → ")}`));
   details.append(node("p", "cc-caption", "小呆大脑耗时含 Luna 与 HTTP 路线竞速及边出句边合成语音；OpenCode 耗时包含模型、工具、路线回退及人工确认等待；均不包含设备判停、上传和屏幕绘制。"));
   return details;
 }

@@ -22,6 +22,7 @@ mod orchestration;
 pub mod fast_core;
 mod emotion;
 mod voice_lines;
+mod latency;
 mod acceptance;
 
 use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex as StdMutex, RwLock, atomic::{AtomicBool, Ordering}}, time::Instant};
@@ -180,6 +181,7 @@ pub struct Brain {
     progress_audio: Mutex<HashMap<String,Value>>,
     listening_ack: tokio::sync::OnceCell<Value>,
     failure_audio: Mutex<HashMap<String,Value>>,
+    pub(super) latency: latency::Latency,
     pub(super) graphiti: Arc<memory::graphiti::GraphitiClient>,
     accepting: AtomicBool,
     cancellation_events: broadcast::Sender<Cancellation>,
@@ -224,7 +226,7 @@ impl Brain {
         let tasks = tasks::TaskService::open(runtime_dir.join("tasks"), config.tasks.clone(), Arc::clone(&sink))?;
         let graphiti=Arc::new(memory::graphiti::GraphitiClient::new(&config.memory.graphiti,graphiti_script));
         let brain = Arc::new(Self { models: ModelWorker::new(config.models.clone(), config_dir.clone()), config, config_dir,
-            harness, fast, memory, credentials, sink, turn_gate:AsyncRwLock::new(()), active:StdMutex::new(HashMap::new()), identity_jobs:StdMutex::new(HashMap::new()), tasks, device_states:StdMutex::new(HashMap::new()), device_volumes:Default::default(), progress_audio:Mutex::new(HashMap::new()), listening_ack:Default::default(), failure_audio:Mutex::new(HashMap::new()), graphiti, accepting:AtomicBool::new(false),
+            harness, fast, memory, credentials, sink, turn_gate:AsyncRwLock::new(()), active:StdMutex::new(HashMap::new()), identity_jobs:StdMutex::new(HashMap::new()), tasks, device_states:StdMutex::new(HashMap::new()), device_volumes:Default::default(), progress_audio:Mutex::new(HashMap::new()), listening_ack:Default::default(), failure_audio:Mutex::new(HashMap::new()), latency:Default::default(), graphiti, accepting:AtomicBool::new(false),
             cancellation_events, progress_events, foreground_generation, background:Mutex::new(None), memory_script, gateway:Mutex::new(None) });
         brain.install_task_handlers()?;
         Ok(brain)
@@ -285,7 +287,7 @@ impl Brain {
         let memory_ready=self.memory_script.as_ref().is_some_and(|p|p.is_file()) &&
             ["config.json","model.safetensors","chat_template.jinja"].iter().all(|name|memory_model.join(name).is_file());
         let task_states=self.tasks.list(None,None,50).unwrap_or_default().into_iter().map(|task|json!({"task_id":task.task_id,"capability":task.capability,"state":task.state,"stage":task.stage})).collect::<Vec<_>>();
-        json!({"ready":true,"accepting_turns":self.accepting.load(Ordering::Acquire),"active_turn":active.first(),"active_turns":active,"tasks":task_states,"contract":contracts::capabilities(),"harness":self.harness.status().await,"brain_core":self.fast.status(),
+        json!({"ready":true,"accepting_turns":self.accepting.load(Ordering::Acquire),"active_turn":active.first(),"active_turns":active,"tasks":task_states,"contract":contracts::capabilities(),"harness":self.harness.status().await,"brain_core":self.fast.status(),"latency":self.latency.snapshot(),
             "models_configured":self.models.configured(),"memory":self.memory.status().unwrap_or_else(|e|json!({"error":e})),
             "background_memory_model_ready":memory_ready,
             "device_activity":self.device_states.lock().map(|s|s.values().cloned().collect::<Vec<_>>()).unwrap_or_default(),
