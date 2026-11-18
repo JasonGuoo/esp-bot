@@ -205,13 +205,16 @@ impl Brain {
         match route {
             Ok(())=>{
                 let zone=settings["timezone"].as_str().and_then(|z|z.parse::<chrono_tz::Tz>().ok()).unwrap_or(chrono_tz::Tz::UTC);
-                let now=chrono::DateTime::from_timestamp_millis(crate::time::now_ms() as i64).unwrap_or_default().with_timezone(&zone).format("%Y-%m-%d %H:%M %A").to_string();
+                let local=chrono::DateTime::from_timestamp_millis(crate::time::now_ms() as i64).unwrap_or_default().with_timezone(&zone);
+                let now=local.format("%Y-%m-%d %H:%M %A").to_string();
+                let evening={use chrono::Timelike; let hour=local.hour(); !(6..21).contains(&hour)};
                 let mut context=fast_core::context_text(&now,&format!("{}\n{}",legacy.text,family),&bounded_recent,self.config.brain_core.memory_context_chars);
                 if let Some(note)=&supplement_note {context.push_str("\n");context.push_str(note);}
                 let plan_context=PlanContext { household_id:journal.household_id.clone(), daily_conversation_id:journal.daily_conversation_id.clone(),
                     conversation_turn_id:journal.conversation_turn_id.clone(), task_id:None };
                 let mut speech=fast_core::LiveSpeech::new(work.output, plan_context, &source_refs, work.supplement.take().and_then(|s|s.reservation));
                 speech.acknowledge=work.acknowledge;
+                speech.evening=evening;
                 speech.supplement=supplement_note.is_some();
                 speech.origin=started;
                 let result=self.timed_stage(&input.turn_id,"brain_core",&mut timings,self.fast_turn(&input.turn_id,&transcript,context,speak,&mut speech)).await;

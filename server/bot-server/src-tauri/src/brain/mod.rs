@@ -23,6 +23,7 @@ pub mod fast_core;
 mod emotion;
 mod voice_lines;
 mod latency;
+mod acks;
 pub mod persona;
 mod acceptance;
 
@@ -180,7 +181,7 @@ pub struct Brain {
     device_states: StdMutex<HashMap<String,Value>>,
     device_volumes: device_volume::DeviceVolumes,
     progress_audio: Mutex<HashMap<String,Value>>,
-    listening_ack: tokio::sync::OnceCell<Value>,
+    acks: acks::Acks,
     failure_audio: Mutex<HashMap<String,Value>>,
     pub(super) latency: latency::Latency,
     pub(super) graphiti: Arc<memory::graphiti::GraphitiClient>,
@@ -227,7 +228,7 @@ impl Brain {
         let tasks = tasks::TaskService::open(runtime_dir.join("tasks"), config.tasks.clone(), Arc::clone(&sink))?;
         let graphiti=Arc::new(memory::graphiti::GraphitiClient::new(&config.memory.graphiti,graphiti_script));
         let brain = Arc::new(Self { models: ModelWorker::new(config.models.clone(), config_dir.clone()), config, config_dir,
-            harness, fast, memory, credentials, sink, turn_gate:AsyncRwLock::new(()), active:StdMutex::new(HashMap::new()), identity_jobs:StdMutex::new(HashMap::new()), tasks, device_states:StdMutex::new(HashMap::new()), device_volumes:Default::default(), progress_audio:Mutex::new(HashMap::new()), listening_ack:Default::default(), failure_audio:Mutex::new(HashMap::new()), latency:Default::default(), graphiti, accepting:AtomicBool::new(false),
+            harness, fast, memory, credentials, sink, turn_gate:AsyncRwLock::new(()), active:StdMutex::new(HashMap::new()), identity_jobs:StdMutex::new(HashMap::new()), tasks, device_states:StdMutex::new(HashMap::new()), device_volumes:Default::default(), progress_audio:Mutex::new(HashMap::new()), acks:Default::default(), failure_audio:Mutex::new(HashMap::new()), latency:Default::default(), graphiti, accepting:AtomicBool::new(false),
             cancellation_events, progress_events, foreground_generation, background:Mutex::new(None), memory_script, gateway:Mutex::new(None) });
         brain.install_task_handlers()?;
         Ok(brain)

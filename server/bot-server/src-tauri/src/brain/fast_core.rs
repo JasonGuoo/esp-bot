@@ -320,7 +320,6 @@ pub(crate) fn summary(t: &xd::Timings, outcome: &str) -> Value {
 
 /// Emit only a contiguous prefix. If the device falls behind, the ordinary frozen
 /// presentation delivers the remaining sentences after that prefix's receipts.
-pub(super) const LISTENING_ACK: &str = "听到了。";
 
 /// Endings the core's sentence splitter (`xiaodai-core/src/splitter.rs`) treats as
 /// boundaries: hard stops, the closers it attaches (。” ！」 ……) and its soft splits.
@@ -345,6 +344,8 @@ pub(super) struct LiveSpeech<'a> {
     /// Sentences already handed to the device, with their expressions.
     spoken: Vec<(String,&'static str)>,
     pub acknowledge:bool,
+    /// Late evening (21:00–06:00 household time): a softer acknowledgement.
+    pub evening:bool,
     pub supplement:bool,
     reservation:Option<Reservation>,
     /// The turn's start, for content-free milestones (first sentence, first TTS audio).
@@ -355,7 +356,7 @@ pub(super) struct LiveSpeech<'a> {
 impl<'a> LiveSpeech<'a> {
     pub fn new(output: Option<tokio::sync::mpsc::Sender<super::gateway::TurnUpdate>>,
                context: super::presentation::PlanContext, sources: &'a [String], reservation:Option<Reservation>) -> Self {
-        Self { output, context, sources, sent:0, spoken:Vec::new(), acknowledge:false, supplement:false, reservation,
+        Self { output, context, sources, sent:0, spoken:Vec::new(), acknowledge:false, evening:false, supplement:false, reservation,
             origin:std::time::Instant::now(), marks:BTreeMap::new() }
     }
 
@@ -419,10 +420,12 @@ impl<'a> LiveSpeech<'a> {
         Ok(true)
     }
 
-    async fn confirm_listening(&self, brain:&Brain, turn_id:&str) {
-        if let (Some(output),Some(audio))=(&self.output,brain.listening_ack.get()) {
-            let scene=super::scene::normalize(LISTENING_ACK,None,80,&[]);
-            let _=self.publish(brain,turn_id,LISTENING_ACK,audio,true,scene,output).await;
+    async fn confirm_listening(&self, brain:&Brain, turn_id:&str, transcript:&str) {
+        if let Some(output)=&self.output {
+            let Some((text,audio))=brain.acks.pick(transcript,self.evening) else {return};
+            let mut scene=super::scene::normalize(text,None,80,&[]);
+            scene.expression=if text.contains('？')||text.contains('！'){"curious"}else{"thinking"}.into();
+            let _=self.publish(brain,turn_id,text,&audio,true,scene,output).await;
         }
     }
 }
@@ -524,7 +527,7 @@ impl Brain {
                 }
                 _ = &mut ack_delay, if live.acknowledge && done.is_none() && sentences.is_empty() => {
                     live.acknowledge=false;
-                    live.confirm_listening(self,turn_id).await;
+                    live.confirm_listening(self,turn_id,transcript).await;
                 }
                 _ = &mut deadline => {
                     turn.cancel();
@@ -666,10 +669,10 @@ mod tests {
         let (output,mut events)=tokio::sync::mpsc::channel(1);
         let mut speech=LiveSpeech::new(Some(output),context,&[],None);
         let wav=json!({"wav_base64":STANDARD.encode(media::pcm_wav(&[0;640])),"duration_ms":20});
-        brain.listening_ack.set(wav.clone()).unwrap();
-        speech.confirm_listening(&brain,"example").await;
+        for (text,_) in super::super::acks::POOL {brain.acks.insert(text,wav.clone());}
+        speech.confirm_listening(&brain,"example","给我讲个故事").await;
         let TurnUpdate::Sentence{segment,acknowledgement:true,..}=events.try_recv().unwrap() else {panic!("missing wait acknowledgement")};
-        assert_eq!(segment.scene.speech,LISTENING_ACK);
+        assert!(super::super::acks::POOL.iter().any(|p|p.0==segment.scene.speech && p.1==super::super::acks::Kind::Story));
         assert_eq!(speech.sent,0);
         assert!(matches!(speech.escalate("core_failed","example",&HashMap::new()),Ok(FastResult::Escalate(_))));
         speech.ready(&brain,"example","小猫找到了帽子。","excited",&wav).await.unwrap();

@@ -190,8 +190,13 @@ struct Engagement {
     token:RuntimeToken,
     last_turn:Option<u32>,
     last_user:Instant,
+    /// When the explicit wake opened the session; the device plays its own wake reply then.
+    opened:Instant,
     output:Option<DeviceOutput>,
 }
+
+/// A spoken acknowledgement is skipped this soon after the device's wake reply.
+const ACK_AFTER_WAKE: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 struct DeviceOutput { images:bool, audio:bool, presentation:bool, live:bool }
@@ -932,17 +937,24 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     let mut response=json!({"conversation_id":conversation_id,"runtime":token});
                                     if let Some(options)=&output {
                                         response["output"]=options.confirmed();
-                                        if options.audio && options.live && brain.listening_ack.get().is_none() {
+                                        if options.audio && options.live && !brain.acks.missing().is_empty() {
+                                            // Pre-synthesise the acknowledgement pool once per App run, one line
+                                            // at a time and only while no turn is using the voice.
                                             let brain=Arc::clone(&brain);
                                             tokio::spawn(async move {
-                                                let _=brain.listening_ack.get_or_try_init(||async {
-                                                    brain.models.call("tts_first",json!({"text":super::fast_core::LISTENING_ACK,"voice":brain.models.voice()})).await
-                                                }).await;
+                                                for (index,text) in brain.acks.missing().into_iter().enumerate() {
+                                                    for _ in 0..240 { if !brain.foreground_busy() {break;} tokio::time::sleep(Duration::from_millis(500)).await; }
+                                                    let lane=if index==0 {"tts_first"} else {"tts"};
+                                                    match brain.models.call(lane,json!({"text":text,"voice":brain.models.voice()})).await {
+                                                        Ok(audio)=>brain.acks.insert(text,audio),
+                                                        Err(_)=>break,
+                                                    }
+                                                }
                                             });
                                         }
                                     }
                                     context=None;first_speech=None;supplement=None;
-                                    engagement=Some(Engagement{conversation_id:conversation_id.clone(),token,last_turn:None,last_user:Instant::now(),output});
+                                    engagement=Some(Engagement{conversation_id:conversation_id.clone(),token,last_turn:None,last_user:Instant::now(),opened:Instant::now(),output});
                                     Ok(response)
                                 },
                                 "assistant.supplement"|"assistant.cancel"|"session.close"=>{
@@ -1182,7 +1194,9 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     let supplement=supplement.take().filter(|(previous,_)|token.directly_follows(*previous)).map(|(_,item)|item);
                                     context=session.output.as_ref().filter(|o|o.live).map(|_|super::LiveTurnContext::default());
                                     let shared_context=context.clone();
+                                    // No spoken ack right after the device's own wake reply said the same thing.
                                     let acknowledge=live_output.is_some() && frame.method=="audio.commit" &&
+                                        session.opened.elapsed()>=ACK_AFTER_WAKE &&
                                         last_ack.is_none_or(|when|when.elapsed()>=Duration::from_secs(20));
                                     let task=tokio::spawn(async move {
                                         let started = Instant::now();
@@ -1311,7 +1325,7 @@ mod tests {
     #[test]
     fn runtime_leases_advance_without_reopening_the_conversation() {
         let first = RuntimeToken { epoch: 7, session_id: 12, turn_id: 1, focus_generation: 0 };
-        let mut session = Engagement { conversation_id: "device-test".into(), token: first,
+        let mut session = Engagement { conversation_id: "device-test".into(), token: first, opened: Instant::now(),
             last_turn: None, last_user: Instant::now(), output: None };
         assert!(session.check_token(first).is_ok());
         session.last_turn = Some(1);
@@ -1332,7 +1346,7 @@ mod tests {
     #[test]
     fn silent_output_is_explicit_and_caption_respects_utf8_boundary() {
         let token = RuntimeToken { epoch: 7, session_id: 12, turn_id: 1, focus_generation: 0 };
-        let mut session = Engagement { conversation_id: "device-test".into(), token,
+        let mut session = Engagement { conversation_id: "device-test".into(), token, opened: Instant::now(),
             last_turn: None, last_user: Instant::now(), output: None };
         assert_eq!(device_turn_input(&session,"old".into(),Some("hello".into()),None).speak,Some(true));
         session.output=DeviceOutput::negotiate(&json!({"output":{"version":1,"audio":true,"cards":["text"]}})).unwrap();
