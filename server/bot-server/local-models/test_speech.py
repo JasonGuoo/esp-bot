@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import Mock, patch
 import wave
 
-from worker import ServiceError, Worker
+from worker import ServiceError, Worker, resample_to_16k
 
 
 @unittest.skipUnless(sys.platform == "darwin", "Requires the installed macOS say tool")
@@ -46,6 +46,33 @@ class SpeechTests(unittest.TestCase):
             self.assertEqual((wav.getnchannels(), wav.getsampwidth(), wav.getframerate()), (1, 2, 16000))
             self.assertGreater(wav.getnframes(), 1600)
             self.assertTrue(any(wav.readframes(wav.getnframes())))
+
+
+class KokoroTests(unittest.TestCase):
+    def test_resampling_keeps_speech_band_and_removes_aliases(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy is not installed")
+        t = np.arange(24000) / 24000
+        level = lambda f: float(np.sqrt(np.mean((resample_to_16k(0.5 * np.sin(2 * np.pi * f * t), 24000)[2000:-2000] / 32767.0) ** 2)))
+        self.assertEqual(resample_to_16k(np.zeros(24000), 24000).size, 16000)
+        self.assertAlmostEqual(level(440), 0.5 / np.sqrt(2), places=2)
+        self.assertLess(level(10000), 0.01, "10 kHz would alias to 6 kHz")
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires the installed macOS say tool")
+    def test_a_broken_kokoro_model_falls_back_to_say(self):
+        broken = Path("/tmp") / "espbot-broken-kokoro"
+        broken.mkdir(exist_ok=True)
+        (broken / "model.onnx").write_bytes(b"not a model")
+        worker = Worker(Path("/tmp/espbot-unused-models"), "Tingting", 180, tts_backend="kokoro", kokoro_model_dir=str(broken))
+        with patch("worker.installed", return_value=True), patch.object(Worker, "_kokoro_engine", side_effect=RuntimeError("load")):
+            with patch.object(Worker, "voices", return_value={"voices": []}):
+                with self.assertRaises(ServiceError) as caught:
+                    worker.tts({"text": "测试"})
+        self.assertEqual(caught.exception.code, "tts_voice_unavailable", "fell through to the say path")
+        self.assertTrue(worker.kokoro_failed)
+        self.assertFalse(worker._kokoro_wanted())
 
 
 if __name__ == "__main__":

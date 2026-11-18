@@ -273,7 +273,7 @@ pub(super) async fn prepare_progress(brain:Arc<Brain>,task:crate::brain::tasks::
     };
     let cached={brain.progress_audio.lock().await.get(message).cloned()};
     let audio=if let Some(audio)=cached{audio}else{
-        let audio=tokio::time::timeout(Duration::from_secs(4),brain.models.call("tts",json!({"text":message,"voice":brain.models.voice()}))).await.map_err(|_|"progress_voice_deferred")??;
+        let audio=tokio::time::timeout(Duration::from_secs(4),brain.models.call("tts_first",json!({"text":message,"voice":brain.models.voice()}))).await.map_err(|_|"progress_voice_deferred")??;
         brain.progress_audio.lock().await.insert(message.into(),audio.clone());audio
     };
     let context=crate::brain::presentation::PlanContext{household_id:task.household_id.clone(),daily_conversation_id:task.daily_conversation_id.clone(),conversation_turn_id:task.conversation_turn_id.clone(),task_id:Some(task.task_id.clone())};

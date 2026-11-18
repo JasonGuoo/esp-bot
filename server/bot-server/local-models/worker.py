@@ -115,12 +115,37 @@ def finite_number(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def resample_to_16k(samples, rate: int):
+    """Float samples at `rate` to 16 kHz PCM16: windowed-sinc low-pass + polyphase (numpy only)."""
+    import numpy as np
+    from math import gcd
+    x = np.clip(np.asarray(samples, dtype=np.float64), -1.0, 1.0)
+    if rate != SAMPLE_RATE:
+        g = gcd(rate, SAMPLE_RATE)
+        up, down = SAMPLE_RATE // g, rate // g
+        taps = 24 * max(up, down) + 1
+        cutoff = 0.45 / max(up, down)  # cycles/sample at the upsampled rate, below the new Nyquist
+        n = np.arange(taps) - (taps - 1) / 2
+        kernel = 2 * cutoff * np.sinc(2 * cutoff * n) * np.kaiser(taps, 8.0) * up
+        stuffed = np.zeros(x.size * up)
+        stuffed[::up] = x
+        x = np.convolve(stuffed, kernel, mode="same")[::down]
+    return (np.clip(x, -1.0, 1.0) * 32767.0).astype("<i2")
+
+
 class Worker:
     def __init__(self, model_dir: Path, default_voice: str, tts_rate: int,
                  asr_backend: str = "whisper", rma_python: str | None = None,
                  rma_worker: str | None = None, rma_model: str | None = None,
-                 diarization_model: str | None = None):
+                 diarization_model: str | None = None, tts_backend: str = "say",
+                 kokoro_model_dir: str | None = None, kokoro_threads: int = 4, kokoro_speaker: int = 3):
         self.store = ModelStore(model_dir)
+        self.tts_backend = tts_backend
+        self.kokoro_dir = Path(kokoro_model_dir).expanduser() if kokoro_model_dir else None
+        self.kokoro_threads = kokoro_threads
+        self.kokoro_speaker = kokoro_speaker
+        self.kokoro = None
+        self.kokoro_failed = False
         self.default_voice = default_voice
         self.tts_rate = tts_rate
         self.diarization_model = Path(diarization_model).expanduser() if diarization_model else None
@@ -158,14 +183,17 @@ class Worker:
         if self.rma_asr is not None:
             models["asr"] = self.rma_asr.health()
         tts_supported = sys.platform == "darwin" and Path("/usr/bin/say").is_file()
+        kokoro = self._kokoro_wanted()
         models["tts"] = {
-            "backend": "macos_say",
+            "backend": "kokoro_sherpa_onnx" if kokoro else "macos_say",
+            "fallback_backend": "macos_say" if kokoro else None,
+            "kokoro_failed": self.kokoro_failed,
             "supported": tts_supported,
             "available": tts_supported,
             "default_voice": self.default_voice,
             "voice_inventory_checked": self.voice_inventory is not None,
             "voice_count": len(self.voice_inventory) if self.voice_inventory is not None else None,
-            "loaded": False,
+            "loaded": self.kokoro is not None,
         }
         models["diarization"] = {"backend": "pyannote_community_1", "available": bool(self.diarization_model and (self.diarization_model / "config.yaml").is_file() and installed("pyannote.audio")), "loaded": self.diarization_pipeline is not None, "downloaded_by_worker": False}
         return {
@@ -478,6 +506,54 @@ class Worker:
             self.voice_inventory = voices[:500]
         return {"voices": self.voice_inventory, "installed_only": True}
 
+    def _kokoro_wanted(self) -> bool:
+        if self.tts_backend == "say" or self.kokoro_failed or self.kokoro_dir is None:
+            return False
+        model = self.kokoro_dir / "model.onnx"
+        return (model.is_file() or (self.kokoro_dir / "model.int8.onnx").is_file()) and installed("sherpa_onnx")
+
+    def _kokoro_engine(self):
+        if self.kokoro is None:
+            import sherpa_onnx
+            d = self.kokoro_dir
+            model = d / "model.onnx" if (d / "model.onnx").is_file() else d / "model.int8.onnx"
+            lexicon = ",".join(str(d / name) for name in ("lexicon-us-en.txt", "lexicon-zh.txt") if (d / name).is_file())
+            config = sherpa_onnx.OfflineTtsConfig(
+                model=sherpa_onnx.OfflineTtsModelConfig(
+                    kokoro=sherpa_onnx.OfflineTtsKokoroModelConfig(
+                        model=str(model), voices=str(d / "voices.bin"), tokens=str(d / "tokens.txt"),
+                        lexicon=lexicon, data_dir=str(d / "espeak-ng-data") if (d / "espeak-ng-data").is_dir() else "",
+                        dict_dir=str(d / "dict") if (d / "dict").is_dir() else ""),
+                    num_threads=self.kokoro_threads, provider="cpu"),
+                rule_fsts=",".join(str(d / f) for f in ("date-zh.fst", "number-zh.fst", "phone-zh.fst") if (d / f).is_file()),
+                max_num_sentences=1)
+            if not config.validate():
+                raise ServiceError("tts_failed", "The Kokoro model directory is incomplete.")
+            engine = sherpa_onnx.OfflineTts(config)
+            engine.generate("你好。", sid=self.kokoro_speaker, speed=1.0)  # warm the graph
+            self.kokoro = engine
+        return self.kokoro
+
+    def _kokoro_tts(self, text: str, rate: int) -> dict:
+        import numpy as np
+        audio = self._kokoro_engine().generate(text, sid=self.kokoro_speaker, speed=max(0.7, min(1.4, rate / 180)))
+        samples = np.asarray(audio.samples, dtype=np.float32)
+        if samples.size == 0:
+            raise ServiceError("tts_failed", "Kokoro produced no audio.")
+        pcm16 = resample_to_16k(samples, int(audio.sample_rate))
+        if pcm16.size > MAX_TTS_SECONDS * SAMPLE_RATE:
+            fail("tts_output_too_large", "Split this reply into shorter speech segments.")
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as out:
+            out.setnchannels(1); out.setsampwidth(2); out.setframerate(SAMPLE_RATE)
+            out.writeframes(pcm16.tobytes())
+        wav = buffer.getvalue()
+        return {
+            "wav_base64": base64.b64encode(wav).decode("ascii"), "sample_rate": SAMPLE_RATE, "channels": 1,
+            "format": "pcm_s16le", "container": "wav", "duration_ms": round(pcm16.size * 1000 / SAMPLE_RATE),
+            "voice": f"kokoro:{self.kokoro_speaker}", "backend": "kokoro_sherpa_onnx", "streaming": False,
+        }
+
     def tts(self, payload: dict) -> dict:
         fields(payload, {"text", "voice", "rate"})
         text = payload.get("text")
@@ -485,6 +561,20 @@ class Worker:
             fail("tts_text_invalid", f"Supply between 1 and {MAX_TTS_CHARACTERS} text characters.")
         if any(ord(char) < 32 and char not in "\n\t\r" for char in text):
             fail("tts_text_invalid", "Speech text contains unsupported control characters.")
+        if self._kokoro_wanted():
+            rate = payload.get("rate", self.tts_rate)
+            if type(rate) is not int or rate < 100 or rate > 260:
+                fail("tts_rate_invalid", "Speech rate must be an integer between 100 and 260.")
+            try:
+                return self._kokoro_tts(text, rate)
+            except ServiceError as exc:
+                if exc.code == "tts_output_too_large":
+                    raise
+                self.kokoro_failed = True
+            except Exception:
+                # Any Kokoro failure falls back to macOS say for this worker's life.
+                self.kokoro_failed = True
+                self.kokoro = None
         # `say` has [[...]] control directives. They must be spoken literally,
         # never interpreted from a model response or an external web page.
         text = text.replace("[", "［").replace("]", "］")
@@ -696,7 +786,13 @@ def main() -> int:
     parser.add_argument("--rma-qwen-worker")
     parser.add_argument("--rma-qwen-model")
     parser.add_argument("--diarization-model")
+    parser.add_argument("--tts-backend", choices=("say", "kokoro"), default="say")
+    parser.add_argument("--kokoro-model-dir")
+    parser.add_argument("--kokoro-threads", type=int, default=4)
+    parser.add_argument("--kokoro-speaker", type=int, default=3)
     args = parser.parse_args()
+    if not 1 <= args.kokoro_threads <= 16:
+        parser.error("--kokoro-threads must be between 1 and 16")
     if not 100 <= args.tts_rate <= 260:
         parser.error("--tts-rate must be between 100 and 260")
     os.umask(0o077)
@@ -723,7 +819,8 @@ def main() -> int:
     signal.signal(signal.SIGINT, interrupted)
     try:
         worker = Worker(args.model_dir, args.tts_voice, args.tts_rate, args.asr_backend,
-                        args.rma_qwen_python, args.rma_qwen_worker, args.rma_qwen_model, args.diarization_model)
+                        args.rma_qwen_python, args.rma_qwen_worker, args.rma_qwen_model, args.diarization_model,
+                        args.tts_backend, args.kokoro_model_dir, args.kokoro_threads, args.kokoro_speaker)
     except Exception as exc:
         diagnostics.write(f"local-models startup_failed type={type(exc).__name__}\n")
         return 1

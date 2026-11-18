@@ -934,7 +934,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                             let brain=Arc::clone(&brain);
                                             tokio::spawn(async move {
                                                 let _=brain.listening_ack.get_or_try_init(||async {
-                                                    brain.models.call("tts",json!({"text":super::fast_core::LISTENING_ACK,"voice":brain.models.voice()})).await
+                                                    brain.models.call("tts_first",json!({"text":super::fast_core::LISTENING_ACK,"voice":brain.models.voice()})).await
                                                 }).await;
                                             });
                                         }

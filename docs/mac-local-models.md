@@ -45,3 +45,34 @@ Rust supervisor 必须限制请求大小、一次执行一个请求、分配 ID�
 最初交付仅为源码；2026-11-08 在本机补做了合成语音的 ASR 和 TTS 测试，具体限制见上方。
 没有真人语音准确率、内存峰值、麦克风距离或机器人端到端语音的验收结论。固定模型和版本
 来源记录在 [models.json](../server/bot-server/local-models/models.json) 与 [NOTICE](../server/bot-server/local-models/NOTICE.md)。
+
+## Kokoro TTS lane (2026-11-18)
+
+`models.tts_backend` is `auto` (default), `kokoro` or `say`. Auto uses Kokoro
+(sherpa-onnx, `kokoro-multi-lang-v1_1`, speaker `zf_001` = sid 3) only when its
+model is at `<data>/engines/kokoro-multi-lang-v1_1` (or `models.kokoro_model_dir`)
+and the TTS Python (`<data>/engines/kokoro-python/bin/python` or
+`models.tts_python`) has `requirements-kokoro.txt`. Otherwise, and after any
+Kokoro load or synthesis failure, the worker uses macOS `say`. Kokoro output
+(24 kHz) is resampled in numpy to the 16 kHz PCM the device plays.
+
+A seventh worker lane, `tts_first`, serves the listening acknowledgement,
+progress lines and each answer's first sentence, so they never queue behind
+the rest of an answer's sentences.
+
+Measured on the M4 Pro Mac, warm process, 10 Mandarin sentences (4–20 chars),
+time to the whole sentence's audio (sherpa-onnx does not stream within a sentence):
+
+| Engine | Threads | Median | Max | 听到了。 |
+|---|---|---|---|---|
+| Kokoro fp32 | 8 | 482 ms | 771 ms | 182 ms |
+| Kokoro fp32 | 4 (default) | 650–658 ms | 985–1147 ms | 250 ms |
+| Kokoro fp32 | 2 | 1058 ms | 1692 ms | 434 ms |
+| Kokoro int8 | 4 | 1381 ms | 2207 ms | — |
+| say Tingting, rate 180 | — | 707–787 ms | 935 ms | 689–844 ms |
+
+Through `worker.py` JSONL (6 sentences, fp32, 4 threads): Kokoro warm median
+477 ms (first call 1176 ms including model load and warm-up) versus the say
+path's 909 ms (first call 1325 ms). Kokoro skips the quote characters “”「」 as
+out-of-vocabulary; that drops no spoken words. CoreML is not usable: the
+CoreML EP rejects Kokoro's dynamic-shape TopK.

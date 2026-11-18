@@ -459,7 +459,8 @@ impl Brain {
                             && text.chars().count()<=self.config.presentation.max_segment_chars;
                         if speak && prefetch_prefix {
                             let (models, voice, sentence) = (std::sync::Arc::clone(&self.models), voice.clone(), text.clone());
-                            tts.push_back(async move { let r = models.call("tts", json!({"text":sentence,"voice":voice})).await; (sentence, expression, r) });
+                            let op=if sentences.is_empty() {"tts_first"} else {"tts"}; // the first sentence never queues behind the rest
+                            tts.push_back(async move { let r = models.call(op, json!({"text":sentence,"voice":voice})).await; (sentence, expression, r) });
                         }
                         sentences.push(text);
                         expressions.push(expression);

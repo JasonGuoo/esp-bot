@@ -1,0 +1,6 @@
+# Optional Kokoro TTS lane (speaker zf_001) for an isolated Python 3.12 at
+# <data>/engines/kokoro-python. Model: sherpa-onnx kokoro-multi-lang-v1_1 (fp32;
+# faster than the int8 export on Apple Silicon) unpacked to
+# <data>/engines/kokoro-multi-lang-v1_1. Without both, the worker uses macOS say.
+sherpa-onnx==2.0.1
+numpy>=2.0,<3

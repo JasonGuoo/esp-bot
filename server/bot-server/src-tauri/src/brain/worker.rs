@@ -26,12 +26,21 @@ pub struct ModelWorkerConfig {
     pub diarization_model: Option<PathBuf>,
     /// Optional isolated Python with pyannote and SpeechBrain for the voice lane.
     pub speaker_python: Option<PathBuf>,
+    /// "auto" (Kokoro when its model and Python are installed, else macOS say),
+    /// "kokoro" or "say". Any Kokoro failure falls back to say inside the worker.
+    pub tts_backend: String,
+    /// Kokoro (sherpa-onnx) model directory; auto: `<data>/engines/kokoro-multi-lang-v1_1`.
+    pub kokoro_model_dir: Option<PathBuf>,
+    /// Python with sherpa-onnx for the TTS lanes; auto: `<data>/engines/kokoro-python/bin/python`.
+    pub tts_python: Option<PathBuf>,
+    pub kokoro_threads: u8,
 }
 
 impl Default for ModelWorkerConfig {
     fn default() -> Self {
         Self { python: "python3".into(), script: None, model_dir: None, request_timeout_seconds: 120, voice: None,
-            asr_backend: "whisper".into(), rma_qwen_python: None, rma_qwen_worker: None, rma_qwen_model: None, diarization_model: None, speaker_python: None }
+            asr_backend: "whisper".into(), rma_qwen_python: None, rma_qwen_worker: None, rma_qwen_model: None, diarization_model: None, speaker_python: None,
+            tts_backend: "auto".into(), kokoro_model_dir: None, tts_python: None, kokoro_threads: 4 }
     }
 }
 
@@ -54,7 +63,9 @@ impl Drop for Process {
 pub struct ModelWorker {
     config: ModelWorkerConfig,
     data_root: PathBuf,
-    lanes: [Mutex<Option<Process>>; 6],
+    /// transcribe, voice, tts, image, other, face, and a priority TTS lane for the
+    /// listening ack, progress lines and each answer's first sentence.
+    lanes: [Mutex<Option<Process>>; 7],
     cancel: watch::Sender<u64>,
 }
 
@@ -72,7 +83,7 @@ impl ModelWorker {
     fn lane(&self, op: &str) -> &Mutex<Option<Process>> {
         &self.lanes[match op {
             "transcribe" => 0, "speaker_embed" | "diarize" | "voice_health" => 1, "face_embed" => 5,
-            "tts" => 2, "display_image" | "prepare_image" | "render_chart" => 3, _ => 4,
+            "tts" => 2, "tts_first" => 6, "display_image" | "prepare_image" | "render_chart" => 3, _ => 4,
         }]
     }
 
@@ -84,9 +95,11 @@ impl ModelWorker {
         let cache_dir = self.data_root.join("runtime/cache");
         super::settings::private_dir(&temp_dir)?;
         super::settings::private_dir(&cache_dir)?;
+        let kokoro=self.kokoro();
         let python=if matches!(op,"diarize"|"speaker_embed"|"voice_health") {
             self.config.speaker_python.as_deref().unwrap_or_else(||std::path::Path::new(&self.config.python))
-        } else {std::path::Path::new(&self.config.python)};
+        } else if let (true,Some((_,python)))=(matches!(op,"tts"|"tts_first"),&kokoro) {python.as_path()}
+        else {std::path::Path::new(&self.config.python)};
         let mut command = Command::new(python);
         // The worker may live inside the signed app bundle. Python must not
         // create __pycache__ there and invalidate the app's sealed resources.
@@ -103,6 +116,10 @@ impl ModelWorker {
             ("--diarization-model", &self.config.diarization_model)] {
             if let Some(path) = path { command.arg(flag).arg(path); }
         }
+        if let Some((dir,_))=&kokoro {
+            command.arg("--tts-backend").arg("kokoro").arg("--kokoro-model-dir").arg(dir)
+                .arg("--kokoro-threads").arg(self.config.kokoro_threads.clamp(1,16).to_string());
+        }
         // Cancellation kills say/ffmpeg descendants too, never a shell command.
         #[cfg(unix)]
         command.process_group(0);
@@ -111,6 +128,17 @@ impl ModelWorker {
         let input = child.stdin.take().ok_or("local_worker_stdin_missing")?;
         let output = BufReader::new(child.stdout.take().ok_or("local_worker_stdout_missing")?);
         Ok(Process { child, input, output })
+    }
+
+    /// The Kokoro model directory and TTS Python, when Kokoro is selected and installed.
+    fn kokoro(&self) -> Option<(PathBuf,PathBuf)> {
+        if self.config.tts_backend=="say" {return None;}
+        let engines=self.data_root.join("engines");
+        let dir=self.config.kokoro_model_dir.clone().unwrap_or_else(||engines.join("kokoro-multi-lang-v1_1"));
+        if !(dir.join("model.onnx").is_file()||dir.join("model.int8.onnx").is_file()) {return None;}
+        let python=self.config.tts_python.clone().or_else(||Some(engines.join("kokoro-python/bin/python")).filter(|p|p.is_file()))
+            .unwrap_or_else(||PathBuf::from(&self.config.python));
+        Some((dir,python))
     }
 
     /// Each lane is serialized. The Brain bounds admitted inputs; waits are bounded too.
@@ -140,7 +168,7 @@ impl ModelWorker {
         if self.generation() != generation { return Err("cancelled".into()); }
         if slot.is_none() { *slot = Some(self.spawn(op)?); }
         let request_id = uuid::Uuid::new_v4().to_string();
-        let worker_op=if op=="voice_health" {"health"}else{op};
+        let worker_op=match op {"voice_health"=>"health","tts_first"=>"tts",_=>op};
         let mut bytes = serde_json::to_vec(&json!({"id":request_id,"op":worker_op,"payload":payload})).map_err(|e| e.to_string())?;
         if bytes.len() + 1 > MAX_LINE { return Err("local_worker_request_too_large".into()); }
         bytes.push(b'\n');
@@ -235,4 +263,25 @@ async fn kill_process(child: &mut Child) {
     }
     let _ = child.kill().await;
     let _ = timeout(Duration::from_secs(3), child.wait()).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kokoro_is_used_only_when_installed_and_the_first_sentence_has_its_own_lane() {
+        let root=std::env::temp_dir().join(format!("xiaodai-kokoro-{}",uuid::Uuid::new_v4()));
+        let auto=ModelWorker::new(ModelWorkerConfig::default(),root.clone());
+        assert_eq!(auto.kokoro(),None,"auto without a model keeps macOS say");
+        let dir=root.join("engines/kokoro-multi-lang-v1_1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("model.onnx"),b"x").unwrap();
+        assert_eq!(auto.kokoro(),Some((dir.clone(),PathBuf::from("python3"))));
+        let say=ModelWorker::new(ModelWorkerConfig{tts_backend:"say".into(),..Default::default()},root.clone());
+        assert_eq!(say.kokoro(),None);
+        assert!(!std::ptr::eq(auto.lane("tts"),auto.lane("tts_first")));
+        assert!(std::ptr::eq(auto.lane("tts"),auto.lane("tts")));
+        let _=std::fs::remove_dir_all(root);
+    }
 }
