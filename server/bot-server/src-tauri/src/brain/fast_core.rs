@@ -24,10 +24,34 @@ const PERSONA: &str = "你是桌面陪伴机器人小呆，陪伴整个家庭，
 const ESCALATION: &str = "讲故事、聊天、解释道理、出主意这类不需要工具的请求由你自己回答，用户要求时可以多说几句。只有确实需要上网搜索或查实时信息、画图或展示图片、打印、准备文件或练习资料、带图的分段讲解、播放媒体、设提醒或其他需要工具和后台任务的事情，才只回复「〔转交〕」这几个字，不要说别的，会由更合适的助手接手。";
 const CODEX_EXTRA: &str = "不要调用工具，也不要读写文件；需要工具的事按上面的规则转交。";
 
-/// Words that need OpenCode's tools, tasks or presentation path. The core's own
-/// escalation reply catches what this cheap pre-route misses.
-const TOOL_WORDS: &[&str] = &["打印","画一","画个","画张","画幅","画出","帮我画","给我画","请画","绘制","绘一","图片","照片","图解","示意图","笔顺","演示","搜索","搜一下","查一下","查查","上网","网上","新闻","最新","天气","网页","网址","链接","视频","播放","资料","文档","pdf","练习纸","练习题","做一份","提醒","任务","后台",
-    "search","print","draw","picture","image","photo","weather","news","worksheet","video","remind"];
+/// Unambiguous requests that need OpenCode's tools, tasks or presentation path.
+/// Ambiguous single words (任务, 提醒, 最新, 演示, 播放, 资料…) are not here: they
+/// appear in ordinary chat ("今天的任务好难", "妈妈提醒我喝水"). The core's own
+/// 〔转交〕 escalation catches what this cheap pre-route lets through.
+const TOOL_WORDS: &[&str] = &["打印","画一","画个","画张","画幅","画出","帮我画","给我画","请画","绘制","绘一","图解","示意图","笔顺",
+    "搜索","搜一下","查一下","查查","帮我查","上网","网上查","网页","网址","链接","pdf","练习纸","练习题","做一份",
+    "提醒我","帮我提醒","设个提醒","设一个提醒","设置提醒","定个提醒","闹钟","天气预报","会下雨吗","会不会下雨",
+    "放首歌","放一首","放个歌","放音乐","放个视频","放视频","放段视频","找个视频","找视频","查资料","找资料","准备资料",
+    "search","print","draw ","picture of","image of","photo of","weather","worksheet","remind me","play a video","play some"];
+/// (anchor, any of): verb-plus-object requests whose anchor alone is ordinary chat.
+const TOOL_PATTERNS: &[(&str, &[&str])] = &[
+    ("天气", &["怎么样","如何","多少度","几度","冷不冷","热不热","查","吗","？","?"]),
+    ("新闻", &["今天","最新","有什么","播报","查","讲讲"]),
+    ("播放", &["视频","音乐","歌","动画","片"]),
+    ("图片", &["看","找","展示","发","搜"]),
+    ("照片", &["看看","找","展示","发","搜"]),
+    ("视频", &["给我看","找","播"]),
+    ("文档", &["做","写","打开","准备"]),
+];
+
+/// The cheap pre-route: does this transcript clearly need OpenCode's tools?
+fn needs_tools(transcript: &str) -> bool {
+    let text = transcript.to_lowercase();
+    // "提醒我" after another person is a report ("妈妈提醒我…"), not a request.
+    let reported = ["妈妈提醒我","爸爸提醒我","老师提醒我","奶奶提醒我","爷爷提醒我","他提醒我","她提醒我"].iter().any(|w| text.contains(w));
+    TOOL_WORDS.iter().any(|w| text.contains(w) && !(reported && *w == "提醒我"))
+        || TOOL_PATTERNS.iter().any(|(anchor, any)| text.contains(anchor) && any.iter().any(|w| text.contains(w)))
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -222,7 +246,7 @@ impl FastCore {
         if private_scope { return Err("private_scope"); }
         if pending_tasks { return Err("pending_task_input"); }
         let text = transcript.to_lowercase();
-        if self.config.escalate_to_opencode && TOOL_WORDS.iter().any(|w| text.contains(w)) { return Err("tool_request"); }
+        if self.config.escalate_to_opencode && needs_tools(&text) { return Err("tool_request"); }
         Ok(())
     }
 
@@ -593,6 +617,14 @@ mod tests {
         assert_eq!(fast.route("给我画一只小狗", false, false), Err("tool_request"));
         assert_eq!(fast.route("帮我打印这份练习纸", false, false), Err("tool_request"));
         assert_eq!(fast.route("Search the news", false, false), Err("tool_request"));
+        for chat in ["今天的任务好难","妈妈提醒我喝水","我最新的玩具是恐龙","这个视频里的恐龙好可爱","昨天的新闻里有只熊猫",
+            "今天天气真好","老师演示了一个实验","我在看资料","照片里的我好小","后台是什么意思","我画画得好吗"] {
+            assert_eq!(fast.route(chat, false, false), Ok(()), "{chat}");
+        }
+        for tool in ["提醒我明天带伞","帮我设个提醒","播放小猪佩奇的视频","放首歌给我听","今天天气怎么样","明天会下雨吗",
+            "查一下恐龙有多大","今天有什么新闻","给我看看恐龙的图片","帮我做一份练习题","what's the weather"] {
+            assert_eq!(fast.route(tool, false, false), Err("tool_request"), "{tool}");
+        }
         assert_eq!(fast.route("你好", true, false), Err("private_scope"));
         assert_eq!(fast.route("三点", false, true), Err("pending_task_input"));
         let off = FastCore::new(&FastCoreConfig { enabled: false, ..Default::default() }, &HarnessConfig::default(), &dir).unwrap();
