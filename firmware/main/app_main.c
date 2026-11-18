@@ -914,13 +914,16 @@ static void reconcile(app_t *app, uint32_t now_ms) {
         const bool pending=s->conversation==BOT_CONVERSATION_SUBMITTED || s->conversation==BOT_CONVERSATION_THINKING;
         bool replace=!s->settings_open && !s->critical_fault && (pending || s->conversation==BOT_CONVERSATION_SPEAKING);
         app->replace_token=replace?s->token:(bot_session_token_t){0};
-        static const char *const stages[]={"","正在发送","已收到","正在听懂","听懂了","在等回答","正在组织回答",
-            "正在用工具","请在 Mac 上确认","正在准备图片","正在准备语音","回答已就绪"};
+        /* In-character waits without a seconds counter. The exact stage stays in
+         * the state log below and in the Mac console's turn timings. */
+        static const char *const stages[]={"","嗯…","嗯…","我在听懂你说的","听懂啦，让我想想","让我想想","快想好了",
+            "我去查一查","要请大人在 Mac 上点一下确认","我在准备图片","快想好了","想好啦"};
         char wait[80]="";
         if (pending && s->wait_stage>BOT_WAIT_NONE && s->wait_stage<=BOT_WAIT_ANSWER) {
-            unsigned seconds=(now_ms-s->wait_started_ms)/1000U;
-            if (seconds>=3) snprintf(wait,sizeof(wait),"%s · %u 秒",stages[s->wait_stage],seconds);
-            else snprintf(wait,sizeof(wait),"%s",stages[s->wait_stage]);
+            const uint32_t waited_ms=now_ms-s->wait_started_ms;
+            const bool slow=waited_ms>=8000U && s->wait_stage!=BOT_WAIT_APPROVAL &&
+                s->wait_stage!=BOT_WAIT_TOOL && s->wait_stage!=BOT_WAIT_IMAGE && s->wait_stage!=BOT_WAIT_ANSWER;
+            snprintf(wait,sizeof(wait),"%s",slow?"网络有点慢，我还在等":stages[s->wait_stage]);
         }
         face_set_turn_controls(app->face,replace,replace && brain_secure_live_turns(),wait);
         const char *caption = s->caption;
@@ -930,14 +933,14 @@ static void reconcile(app_t *app, uint32_t now_ms) {
             if (s->capture_ready && s->transport_ready)
                 caption = s->followup_armed ? "可以继续说" : "我在听";
             else if (!s->capture_ready) caption = "正在准备收音";
-            else if (!s->link_authenticated) caption = "本地指令可用，Mac 尚未连接";
-            else caption = "正在连接 Mac，请稍等";
+            else if (!s->link_authenticated) caption = "我的大脑（Mac）还没醒，本地口令还能用";
+            else caption = "正在叫醒我的大脑，等一下下";
         }
         if (!*caption && s->wake_status != BOT_WAKE_READY && !s->settings_open &&
             (s->behavior == BOT_BEHAVIOR_IDLE || s->behavior == BOT_BEHAVIOR_BORED))
             caption = "点一下，叫醒小呆";
         if (!*caption && s->behavior == BOT_BEHAVIOR_ENGAGED && !s->link_authenticated)
-            caption = "我在这里，语音对话还没接通";
+            caption = "我在这里，我的大脑（Mac）还没醒";
         if (strcmp(app->rendered_caption, caption) != 0) {
             face_set_subtitle(app->face, caption);
             snprintf(app->rendered_caption, sizeof(app->rendered_caption), "%s", caption);

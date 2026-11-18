@@ -421,13 +421,16 @@ static const char *request_error(cJSON *root) {
     cJSON *error=cJSON_GetObjectItemCaseSensitive(root,"error");
     cJSON *code=cJSON_GetObjectItemCaseSensitive(error,"code");
     const char *name=cJSON_IsString(code)?code->valuestring:"";
-    if (!strcmp(name,"all_routes_unavailable")) return "请在 Mac 上配置可用模型";
-    if (!strcmp(name,"asr_no_speech")) return "没听清，请再说一次";
-    if (!strcmp(name,"brain_busy")) return "小呆正在处理别的事，请稍后再试";
-    if (!strcmp(name,"brain_not_started")) return "请先在 Mac 上启动小呆服务";
-    if (!strcmp(name,"display_output_unsupported")) return "请更新 Mac 小呆服务";
-    if (!strcmp(name,"turn_not_replayed")) return "执行结果不确定，请在 Mac 上检查";
-    return "连接或处理失败，请在 Mac 上检查";
+    /* In-character captions; the exact code stays in this log and the Mac console.
+     * When it can, the Mac speaks a failure itself as an ordinary short answer. */
+    ESP_LOGW(TAG,"request failed: %.48s",name);
+    if (!strcmp(name,"all_routes_unavailable")) return "我现在想不出来，请大人在 Mac 上看看我的大脑";
+    if (!strcmp(name,"asr_no_speech")) return "我没听清，再说一遍好吗？";
+    if (!strcmp(name,"brain_busy")) return "我正忙着呢，等我一下下";
+    if (!strcmp(name,"brain_not_started")) return "我的大脑（Mac）还没醒，你可以先摸摸我";
+    if (!strcmp(name,"display_output_unsupported")) return "我的大脑要更新一下啦";
+    if (!strcmp(name,"turn_not_replayed")) return "刚才那件事我不确定做完没有，请在 Mac 上看看";
+    return "哎呀，我脑袋卡住了，再说一遍好吗？";
 }
 static void finish_with_message(bot_session_token_t token, const char *message, bool reply_done) {
     portENTER_CRITICAL(&s_lock);
@@ -848,7 +851,7 @@ static void text_message(const char *data,size_t n) {
                 cJSON_IsString(ack) && !strcmp(ack->valuestring,"hardware_v1");
             if (has_audio && !valid_audio) {
                 portENTER_CRITICAL(&s_lock);s.cancel_before_next=true;portEXIT_CRITICAL(&s_lock);
-                finish_with_message(current,"Mac 回复格式有误，请更新服务",true);
+                finish_with_message(current,"我没看懂大脑的回答，请大人更新一下 Mac 服务",true);
                 goto done;
             }
             portENTER_CRITICAL(&s_lock);
@@ -1780,7 +1783,7 @@ static void secure_task(void *unused) {
         } else if (state.phase==COMMITTED && esp_timer_get_time()-state.commit_started_us>=180000000) {
             bool cancelled=cancel_request("assistant.cancel",state.remote);
             portENTER_CRITICAL(&s_lock);s.cancel_before_next=!cancelled;portEXIT_CRITICAL(&s_lock);
-            finish_with_message(state.remote,"处理超时，请再试一次",true);
+            finish_with_message(state.remote,"哎呀，我想太久了，再问我一次好吗？",true);
         } else if (state.phase==PLAYBACK_PENDING) {
             playback_prepare(&state);
             vTaskDelay(pdMS_TO_TICKS(10));
