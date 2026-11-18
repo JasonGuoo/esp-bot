@@ -4,6 +4,9 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use sha2::{Digest, Sha256};
 use presentation::{PlanContext, PresentationPlan, PresentationPlanner};
 
+/// How long a turn's context may wait for Graphiti, which starts beside the SQLite reads.
+const GRAPH_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedSegment {
     pub segment_id: String,
@@ -122,17 +125,31 @@ impl Brain {
         }else{journal.daily_conversation_id.clone()};
         self.memory.register_conversation(&conversation,input.profile_id.as_deref())?;
         self.memory.journal_finish(&input.turn_id,"running",None,json!({"model_conversation_id":conversation,"spoken_device":work.spoken_device}))?;
+        timings.marks_ms.insert("asr_done".into(),started.elapsed().as_millis() as u64);
+        // Graphiti recall runs beside the SQLite reads; the turn never waits longer
+        // than GRAPH_WAIT for it (it used to wait up to 750 ms after them).
+        let context_started=Instant::now();
+        let graph=(input.profile_id.is_none() && self.config.memory.graphiti.enabled).then(||{
+            let brain=Arc::clone(self);let query=transcript.clone();
+            tokio::spawn(async move {brain.graphiti.recall(&brain.memory,&query,true).await})
+        });
         let legacy=self.memory.context(memory::ContextRequest {profile_id:input.profile_id.clone(),profile_confirmed:trusted_console&&input.profile_id.is_some(),
             destination:memory::ContextDestination::Cloud,query:transcript.clone(),include_household:true})?;
         let mut family=self.memory.household_context(&transcript,true)?;
-        if input.profile_id.is_none() && self.config.memory.graphiti.enabled {
-            match tokio::time::timeout(std::time::Duration::from_millis(750),self.graphiti.recall(&self.memory,&transcript,true)).await {
-                Ok(Ok(hits))=>{let text=hits.to_string();if text.len()<=12000{family.push_str("\n经当前来源权限核验的图记忆：\n");family.push_str(&text);}},
+        let revision=self.context_revision(input.profile_id.as_deref())?;
+        let mut recent=self.memory.household_recent_context(&journal.daily_conversation_id,true)?;
+        if let Some(mut handle)=graph {
+            let wait=GRAPH_WAIT.saturating_sub(context_started.elapsed());
+            match tokio::time::timeout(wait,&mut handle).await {
+                Ok(Ok(Ok(hits)))=>{let text=hits.to_string();if text.len()<=12000{family.push_str("\n经当前来源权限核验的图记忆：\n");family.push_str(&text);}},
+                Err(_)=>{handle.abort();self.emit("memory.graph_fallback",Some(&input.turn_id),json!({"fallback":"sqlite_sources","reason":"late"}));},
                 _=>self.emit("memory.graph_fallback",Some(&input.turn_id),json!({"fallback":"sqlite_sources"})),
             }
         }
-        let revision=self.context_revision(input.profile_id.as_deref())?;
-        let mut recent=self.memory.household_recent_context(&journal.daily_conversation_id,true)?;
+        let context_ms=context_started.elapsed().as_millis() as u64;
+        timings.stages_ms.insert("memory_context".into(),context_ms);
+        timings.marks_ms.insert("memory_context_ready".into(),started.elapsed().as_millis() as u64);
+        self.emit("turn.stage_completed",Some(&input.turn_id),json!({"stage":"memory_context","elapsed_ms":context_ms,"status":"completed"}));
         if let Some(items)=recent.as_array_mut(){for item in items{
             if let Some(id)=item["conversation_turn_id"].as_str(){if !self.tasks.source_current(id)?{item["user"]=Value::Null;item["assistant_generated"]=Value::Null;item["assistant_delivered"]=Value::Null;}}
         }}
@@ -196,7 +213,10 @@ impl Brain {
                 let mut speech=fast_core::LiveSpeech::new(work.output, plan_context, &source_refs, work.supplement.take().and_then(|s|s.reservation));
                 speech.acknowledge=work.acknowledge;
                 speech.supplement=supplement_note.is_some();
-                match self.timed_stage(&input.turn_id,"brain_core",&mut timings,self.fast_turn(&input.turn_id,&transcript,context,speak,&mut speech)).await? {
+                speech.origin=started;
+                let result=self.timed_stage(&input.turn_id,"brain_core",&mut timings,self.fast_turn(&input.turn_id,&transcript,context,speak,&mut speech)).await;
+                for (mark,ms) in std::mem::take(&mut speech.marks) {timings.marks_ms.insert(mark.into(),ms);}
+                match result? {
                     fast_core::FastResult::Reply(reply)=>{timings.brain=Some(reply.summary.clone());fast_reply=Some(*reply);},
                     fast_core::FastResult::Escalate(reason)=>{timings.brain=Some(json!({"engine":"opencode","reason":reason}));},
                 }
@@ -283,6 +303,10 @@ impl Brain {
         self.memory.journal_finish(&input.turn_id,if outcome=="partial"{"partial"}else{"completed"},Some(&output_scene.speech),
             json!({"presentation_id":plan.presentation_id,"task_ids":task_ids,"model_conversation_id":conversation,"generated_only":true,"source_dependency_count":source_refs.len()}))?;
         timings.total_ms=started.elapsed().as_millis() as u64;
+        for (metric,value) in [("asr_ms",timings.stages_ms.get("asr")),("memory_context_ms",timings.stages_ms.get("memory_context")),
+            ("first_sentence_ms",timings.marks_ms.get("first_sentence")),("first_tts_audio_ms",timings.marks_ms.get("first_tts_audio"))] {
+            if let Some(ms)=value {self.latency.record(metric,*ms);}
+        }
         let audio=first.audio.clone();let display_image=first.display_image.clone();
         let tts_calls=if speak{prepared.len().min(255) as u8}else{0};
         let weak=Arc::downgrade(self);let compact_id=conversation;

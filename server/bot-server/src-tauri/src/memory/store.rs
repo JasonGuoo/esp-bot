@@ -837,6 +837,54 @@ mod background_tests {
     }
 
     #[test]
+    fn recent_context_hides_expired_or_unretained_turns_without_a_purge() {
+        use crate::memory::JournalInput;
+        let dir=std::env::temp_dir().join(format!("xiaodai-expiry-{}",Uuid::new_v4()));
+        let store=Store::open(dir.clone(),MemoryConfig::default()).unwrap();
+        store.update_household_settings(&json!({"history_enabled":true,"allow_cloud":true,"retention_secs":86_400})).unwrap();
+        let turn=|id:&str,at:i64|JournalInput{turn_id:id.into(),activation_id:"visit".into(),utterance_id:None,
+            text:format!("问题{id}"),occurred_at_ms:at,input_kind:"text".into(),speaker_person_id:None,
+            private_profile_id:None,allow_cloud:true,metadata:json!({})};
+        let fresh=store.journal_input(&turn("fresh",now_ms())).unwrap();
+        let old=store.journal_input(&turn("old",now_ms()-2*86_400_000)).unwrap();
+        // Put the expired turn into today's day so only retention can exclude it.
+        store.connection().unwrap().execute("UPDATE household_turns SET episode_id=(SELECT episode_id FROM household_turns WHERE id=?1) WHERE id=?2",
+            [&fresh.conversation_turn_id,&old.conversation_turn_id]).unwrap();
+        let users=|store:&Store|store.household_recent_context(&fresh.daily_conversation_id,true).unwrap().as_array().unwrap()
+            .iter().map(|r|r["user"].as_str().unwrap_or("").to_owned()).collect::<Vec<_>>();
+        assert_eq!(users(&store),vec!["问题fresh".to_string()],"past retention is hidden before the worker purges it");
+        store.connection().unwrap().execute("UPDATE households SET history_enabled=0 WHERE singleton=1",[]).unwrap();
+        assert!(users(&store).is_empty(),"history off hides the day at once");
+        drop(store);
+        let _=std::fs::remove_dir_all(dir);
+    }
+
+    /// `cargo test --lib context_read_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn context_read_cost() {
+        use crate::memory::JournalInput;
+        let dir=std::env::temp_dir().join(format!("xiaodai-cost-{}",Uuid::new_v4()));
+        let store=Store::open(dir.clone(),MemoryConfig::default()).unwrap();
+        store.update_household_settings(&json!({"history_enabled":true,"allow_cloud":true})).unwrap();
+        let mut daily=String::new();
+        for i in 0..300 {
+            let r=store.journal_input(&JournalInput{turn_id:format!("t{i}"),activation_id:"visit".into(),utterance_id:None,
+                text:format!("第{i}个问题，关于恐龙和星星"),occurred_at_ms:now_ms(),input_kind:"text".into(),speaker_person_id:None,
+                private_profile_id:None,allow_cloud:true,metadata:json!({})}).unwrap();
+            store.journal_finish(&format!("t{i}"),"completed",Some("好呀，我们来聊聊。"),json!({})).unwrap();
+            daily=r.daily_conversation_id;
+        }
+        let time=|f:&dyn Fn()|{let mut v:Vec<u128>=(0..30).map(|_|{let a=std::time::Instant::now();f();a.elapsed().as_micros()}).collect();v.sort();v[15]};
+        let purge=time(&||{store.purge_household_expired().unwrap();});
+        let recall=time(&||{store.household_context("恐龙",true).unwrap();});
+        let recent=time(&||{store.household_recent_context(&daily,true).unwrap();});
+        println!("median µs over 30 runs, 300 turns: purge={purge} household_context={recall} recent_context={recent}");
+        drop(store);
+        let _=std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn anonymous_derived_fact_does_not_claim_self_reported_identity() {
         use crate::memory::{HouseholdExtraction, JournalInput};
         let dir = std::env::temp_dir().join(format!("xiaodai-anonymous-{}", Uuid::new_v4()));
