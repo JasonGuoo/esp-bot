@@ -87,7 +87,7 @@ pub fn core_config(cfg: &FastCoreConfig, harness: &HarnessConfig, runtime_dir: &
         routes.push(route);
     }
     let order = routes.iter().map(|r| r.id.clone()).collect();
-    let prompt = format!("{PERSONA}\n{}", if cfg.escalate_to_opencode { ESCALATION } else { "" });
+    let prompt = format!("{PERSONA}\n{}\n{}", super::emotion::prompt_rule(), if cfg.escalate_to_opencode { ESCALATION } else { "" });
     let base = xd::Config::default();
     let mut codex = base.codex.clone();
     codex.binary = cfg.codex_binary.clone();
@@ -330,12 +330,13 @@ impl<'a> LiveSpeech<'a> {
         else { Err(format!("partial_spoken_answer: {reason}")) }
     }
 
-    async fn ready(&mut self, brain: &Brain, turn_id: &str, sentence: &str, audio: &Value) -> Result<(), String> {
+    async fn ready(&mut self, brain: &Brain, turn_id: &str, sentence: &str, expression: &str, audio: &Value) -> Result<(), String> {
         let Some(output)=self.output.clone() else {return Ok(())};
         let cfg=&brain.config.presentation;
         // Over-limit sentences might be split or merged at the final planning boundary.
         // Deictic speech is also held for the full presentation and its visual validation.
-        let scene=super::scene::normalize(sentence,None,cfg.max_segment_chars,&[]);
+        let mut scene=super::scene::normalize(sentence,None,cfg.max_segment_chars,&[]);
+        scene.expression=expression.into();
         let planner=super::presentation::PresentationPlanner::new(cfg.clone())?;
         let frozen=planner.freeze(self.context.clone(),&scene,None,false)?;
         if self.sent+1>=cfg.max_segments || sentence!=scene.speech || frozen.segments.len()!=1
@@ -406,6 +407,8 @@ impl Brain {
         let mut prefetch_prefix=true;
         let mut audio = HashMap::new();
         let mut sentences: Vec<String> = Vec::new();
+        let mut expressions: Vec<&'static str> = Vec::new();
+        let mut pending_tag: Option<&'static str> = None;
         let escalate = self.fast.config.escalate_to_opencode;
         let mut done = None;
         let ack_delay=tokio::time::sleep(Duration::from_millis(550));
@@ -426,14 +429,19 @@ impl Brain {
                             self.fast.record(json!({"engine":PROVIDER_ID,"outcome":"escalated","reason":"core_requested","at_ms":ms}));
                             return live.escalate("core_requested");
                         }
-                        self.emit("brain.sentence", Some(turn_id), json!({"index":index,"elapsed_ms":ms,"chars":text.chars().count()}));
+                        let (tag,text)=super::emotion::take(&text);
+                        if text.is_empty() { pending_tag=tag.or(pending_tag); continue; } // a tag on its own line
+                        let expression=tag.or(pending_tag.take()).unwrap_or_else(||super::emotion::from_keywords(&text));
+                        self.emit("brain.sentence", Some(turn_id), json!({"index":index,"elapsed_ms":ms,"chars":text.chars().count(),
+                            "expression":expression,"tagged":tag.is_some()}));
                         prefetch_prefix &= sentences.len()<self.config.presentation.max_segments
                             && text.chars().count()<=self.config.presentation.max_segment_chars;
                         if speak && prefetch_prefix {
                             let (models, voice, sentence) = (std::sync::Arc::clone(&self.models), voice.clone(), text.clone());
-                            tts.push_back(async move { let r = models.call("tts", json!({"text":sentence,"voice":voice})).await; (sentence, r) });
+                            tts.push_back(async move { let r = models.call("tts", json!({"text":sentence,"voice":voice})).await; (sentence, expression, r) });
                         }
                         sentences.push(text);
+                        expressions.push(expression);
                     }
                     Some(xd::Event::Done { text, timings }) => {
                         if live.supplement {
@@ -450,9 +458,9 @@ impl Brain {
                         return live.escalate("core_failed");
                     }
                 },
-                Some((sentence, result)) = tts.next(), if !tts.is_empty() => {
+                Some((sentence, expression, result)) = tts.next(), if !tts.is_empty() => {
                     if let Ok(value)=result {
-                        live.ready(self,turn_id,&sentence,&value).await?;
+                        live.ready(self,turn_id,&sentence,expression,&value).await?;
                         audio.insert(sentence,value);
                     } else { live.output=None; }
                 }
@@ -469,6 +477,7 @@ impl Brain {
             }
         };
         let (text,timings)=done.ok_or("brain_core_closed")?;
+        let text=super::emotion::strip(&text);
         if escalate && text.contains(ESCALATE_MARK) {
             self.fast.record(json!({"engine":PROVIDER_ID,"outcome":"escalated","reason":"core_requested"}));
             return live.escalate("core_requested");
@@ -477,10 +486,10 @@ impl Brain {
         summary["sentences"] = json!(sentences.len());
         summary["tts_prefetched"] = json!(audio.len());
         self.fast.record(summary.clone());
-        let segments = segment_sentences(&sentences, &text, self.config.presentation.max_segments, self.config.presentation.max_segment_chars);
-        let scene = super::scene::normalize(&text, None, self.config.conversation.max_reply_characters, &[]);
-        let structured = json!({"speech":text,"expression":scene.expression,"cards":[],"outcome":"answered","effect":"none",
-            "presentation":{"segments":segments.iter().map(|s| json!({"speech":s,"expression":scene.expression,"visual":{"kind":"none"},"visual_required":false})).collect::<Vec<_>>()}});
+        let segments = tagged_segments(&sentences, &expressions, &text, self.config.presentation.max_segments, self.config.presentation.max_segment_chars);
+        let expression = segments.first().map(|s| s.1).unwrap_or_else(|| super::emotion::from_keywords(&text));
+        let structured = json!({"speech":text,"expression":expression,"cards":[],"outcome":"answered","effect":"none",
+            "presentation":{"segments":segments.iter().map(|(s,e)| json!({"speech":s,"expression":e,"visual":{"kind":"none"},"visual_required":false})).collect::<Vec<_>>()}});
         let reply = HarnessReply { text, provider_id: PROVIDER_ID.into(), model_id: timings.route.clone().unwrap_or_default(),
             session_id: core.codex().thread_id().filter(|_| timings.engine.as_deref() == Some("codex")).unwrap_or_default(),
             structured: Some(structured), evidence: Vec::new() };
@@ -491,18 +500,28 @@ impl Brain {
 /// Core sentences as presentation segments (so prefetched TTS matches), merged when
 /// the planner's segment count or size limits would otherwise be exceeded.
 pub fn segment_sentences(sentences: &[String], full: &str, max_segments: usize, max_chars: usize) -> Vec<String> {
-    let mut parts: Vec<String> = sentences.iter().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect();
-    if parts.is_empty() { parts = super::presentation::split_speech(full, max_chars); }
-    let mut out: Vec<String> = Vec::new();
-    for part in parts {
+    tagged_segments(sentences, &[], full, max_segments, max_chars).into_iter().map(|(s, _)| s).collect()
+}
+
+/// As [`segment_sentences`], carrying each sentence's expression; a merged segment
+/// keeps the expression of the sentence it starts with.
+pub(super) fn tagged_segments(sentences: &[String], expressions: &[&'static str], full: &str, max_segments: usize, max_chars: usize) -> Vec<(String, &'static str)> {
+    let mut parts: Vec<(String, &'static str)> = sentences.iter().enumerate()
+        .map(|(i, s)| (s.trim().to_owned(), expressions.get(i).copied().unwrap_or_else(|| super::emotion::from_keywords(s))))
+        .filter(|(s, _)| !s.is_empty()).collect();
+    if parts.is_empty() {
+        parts = super::presentation::split_speech(full, max_chars).into_iter().map(|s| { let e = super::emotion::from_keywords(&s); (s, e) }).collect();
+    }
+    let mut out: Vec<(String, &'static str)> = Vec::new();
+    for (part, expression) in parts {
         for piece in super::presentation::split_speech(&part, max_chars) {
             if out.len() >= max_segments.max(1) {
-                let last = out.last_mut().expect("non-empty");
+                let last = &mut out.last_mut().expect("non-empty").0;
                 if last.chars().count() + piece.chars().count() <= max_chars { last.push_str(&piece); continue; }
                 // Over both limits: stop rather than exceed the frozen plan bounds.
                 break;
             }
-            out.push(piece);
+            out.push((piece, expression));
         }
     }
     out
@@ -587,10 +606,11 @@ mod tests {
         assert_eq!(segment.scene.speech,LISTENING_ACK);
         assert_eq!(speech.sent,0);
         assert!(matches!(speech.escalate("model_unavailable"),Ok(FastResult::Escalate(_))));
-        speech.ready(&brain,"example","小猫找到了帽子。",&wav).await.unwrap();
+        speech.ready(&brain,"example","小猫找到了帽子。","excited",&wav).await.unwrap();
         let TurnUpdate::Sentence{turn_id,plan,segment,acknowledgement:false}=events.try_recv().unwrap() else {panic!("missing early speech")};
         assert_eq!(turn_id,"example");
         assert_eq!(segment.scene.speech,"小猫找到了帽子。");
+        assert_eq!(segment.scene.expression,"excited","the sentence's own emotion, not a stamped happy");
         assert!(plan.segments[0].speech_asset_id.is_some());
         // The queue waits for room instead of giving up on the rest of the turn.
         let receiver=tokio::spawn(async move {
@@ -598,8 +618,8 @@ mod tests {
             let TurnUpdate::Sentence{segment,..}=events.recv().await.unwrap() else {panic!("missing second sentence")};
             (segment.scene.speech,events)
         });
-        speech.ready(&brain,"example","小狗说：“我也要去！”",&wav).await.unwrap();
-        speech.ready(&brain,"example","第三句……",&wav).await.unwrap();
+        speech.ready(&brain,"example","小狗说：“我也要去！”","happy",&wav).await.unwrap();
+        speech.ready(&brain,"example","第三句……","happy",&wav).await.unwrap();
         let (second,mut events)=receiver.await.unwrap();
         assert_eq!(second,"小狗说：“我也要去！”");
         let TurnUpdate::Sentence{segment,..}=events.try_recv().unwrap() else {panic!("missing third sentence")};
@@ -609,7 +629,7 @@ mod tests {
         assert!(complete_sentence("「好呀！」") && complete_sentence("然后，") && !complete_sentence("然后"));
         let (tx,mut rx)=tokio::sync::mpsc::channel(1);
         let mut visual=LiveSpeech::new(Some(tx),plan.context,&[],None);
-        visual.ready(&brain,"example","请看这张图。",&wav).await.unwrap();
+        visual.ready(&brain,"example","请看这张图。","happy",&wav).await.unwrap();
         assert_eq!(visual.sent,0);
         assert!(rx.try_recv().is_err());
         drop(brain);
@@ -644,7 +664,7 @@ mod tests {
             }
             heard
         });
-        for sentence in &sentences { speech.ready(&brain,"story",sentence,&wav).await.unwrap(); }
+        for sentence in &sentences { speech.ready(&brain,"story",sentence,super::super::emotion::from_keywords(sentence),&wav).await.unwrap(); }
         assert!(speech.output.is_some(),"live streaming stayed on for the whole story");
         assert_eq!(speech.sent,6);
         drop(speech);
@@ -671,5 +691,9 @@ mod tests {
         let merged = segment_sentences(&many, "", 16, 200);
         assert_eq!(merged.len(), 16);
         assert!(merged.last().unwrap().contains("第19句"));
+        let tagged = tagged_segments(&s, &["excited", "shy"], "", 16, 200);
+        assert_eq!(tagged, vec![("你好！".to_string(), "excited"), ("我是小呆。".to_string(), "shy")]);
+        let untagged = tagged_segments(&["哈哈，好好笑。".to_string()], &[], "", 16, 200);
+        assert_eq!(untagged[0].1, "laughing", "keyword fallback");
     }
 }

@@ -20,6 +20,7 @@ pub mod artifacts;
 mod capabilities;
 mod orchestration;
 pub mod fast_core;
+mod emotion;
 mod acceptance;
 
 use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex as StdMutex, RwLock, atomic::{AtomicBool, Ordering}}, time::Instant};
