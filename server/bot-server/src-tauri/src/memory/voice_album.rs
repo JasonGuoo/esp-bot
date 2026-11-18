@@ -551,6 +551,16 @@ mod tests {
             .unwrap();
         assert_eq!(src["segments"][0]["automatic_person_id"], person);
         assert_eq!(src["segments"][0]["annotation_set"], false);
+        // §12.1: a verified single-speaker match may be said aloud; an annotated
+        // turn keeps its name; a turn with overlapping voices is never nameable.
+        let speaker = store.household_turn_speaker("d").unwrap().unwrap();
+        assert_eq!((speaker.person_id.as_str(), speaker.display_name.as_str(), speaker.nameable), (person, "甲", true));
+        assert_eq!(store.household_turn_speaker("a").unwrap().unwrap().display_name, "甲");
+        let rev = input(&store, "e", now, None);
+        observation(&store, "e", rev, &[("SPEAKER_00", 0, true)]);
+        assert!(store.household_turn_speaker("e").unwrap().is_none_or(|s| !s.nameable));
+        assert!(store.household_turn_speaker("b").unwrap().is_none());
+        store.journal_speaker_correction("d", person).unwrap();
         drop(store);
         let store = home.open();
         let g = groups(&store);

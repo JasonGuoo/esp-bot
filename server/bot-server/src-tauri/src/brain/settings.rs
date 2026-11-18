@@ -55,12 +55,16 @@ pub struct ConversationConfig {
     pub idle_session_seconds: u64,
     /// Only approved HTTPS origins may appear as images or web frames.
     pub media_hosts: Vec<String>,
+    /// 「用声音认出家人并称呼名字」(owner decision 2026-11-18, §12.1): default on.
+    /// A confident single-speaker voice match may be said aloud once per
+    /// activation; it never authorises anything.
+    pub name_from_voice: bool,
 }
 
 impl Default for ConversationConfig {
     fn default() -> Self {
         Self { language: "zh-CN".into(), default_speak: true, max_reply_characters: 1200,
-            idle_session_seconds: 300, media_hosts: Vec::new() }
+            idle_session_seconds: 300, media_hosts: Vec::new(), name_from_voice: true }
     }
 }
 

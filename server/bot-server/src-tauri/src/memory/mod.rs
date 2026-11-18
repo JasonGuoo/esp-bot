@@ -21,3 +21,4 @@ pub use store::{Store, ExtractedFact};
 pub use types::*;
 pub use household_types::*;
 pub use provenance::household_source_ref;
+pub use household::TurnSpeaker;
