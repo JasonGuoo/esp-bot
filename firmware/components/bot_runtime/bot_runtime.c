@@ -32,6 +32,12 @@ struct bot_runtime {
     uint32_t gesture_until_ms, last_tap_ms, touch_gaze_until_ms;
     uint8_t tap_count;
     bool laugh_pending, idle_presenting;
+    /* A Mac-proposed unprompted line waiting for the right moment (§12.2).
+     * The Mac proposes; only this runtime decides when, or drops it. */
+    bool proactive_pending, proactive_show_if_absent, has_proactive, has_speech;
+    uint32_t proactive_id, proactive_received_ms, proactive_ttl_ms, last_proactive_ms;
+    uint32_t last_speech_ms, person_since_ms, proactive_caption_until_ms;
+    char proactive_text[BOT_CAPTION_MAX_BYTES + 1];
     bot_behavior_t last_behavior;
     bot_ambient_light_t ambient;
     bot_responses_state_t responses;
@@ -137,7 +143,11 @@ static void derive_permissions(bot_runtime_t *runtime)
     state->camera_requested = engaged || passive_camera ||
         (state->behavior == BOT_BEHAVIOR_SLEEPING && state->ambient_probe &&
          !state->settings_open && !state->critical_fault);
-    state->audio_session_requested = engaged && !runtime->revoking && !state->local_response_active;
+    /* An unprompted line is speaker-only: it never requests the audio session,
+     * so capture, VAD, local commands and uplink all stay closed (§12.2). */
+    const bool proactive = state->activation == BOT_ACTIVATION_PROACTIVE;
+    state->audio_session_requested = engaged && !proactive && !runtime->revoking && !state->local_response_active;
+    state->proactive_active = engaged && proactive && !runtime->revoking;
     const bool listening = state->conversation == BOT_CONVERSATION_LISTENING ||
                            state->conversation == BOT_CONVERSATION_WAITING;
     state->audio_uplink_permitted = listening && state->audio_session_requested && runtime->config.allow_audio_uplink &&
@@ -235,7 +245,8 @@ static void end_session(bot_runtime_t *runtime, uint32_t now_ms, session_end_rea
     if (reason != SESSION_INACTIVE) dismiss_result(&runtime->state);
     else if (runtime->state.reading_token.session_id &&
              !token_matches(runtime, &runtime->state.reading_token, false) &&
-             !runtime->state.reading_notice[0]) {
+             !runtime->state.reading_notice[0] &&
+             runtime->state.activation != BOT_ACTIVATION_PROACTIVE) {
         const char *notice = runtime->state.conversation == BOT_CONVERSATION_THINKING ?
             "处理已超时，请再试一次" : "本次收音已结束，点一下可再问";
         memcpy(runtime->state.reading_notice, notice, strlen(notice) + 1);
@@ -250,6 +261,7 @@ static void end_session(bot_runtime_t *runtime, uint32_t now_ms, session_end_rea
     runtime->state.token.turn_id = 0;
     runtime->state.token.focus_generation = 0;
     runtime->state.activation = BOT_ACTIVATION_NONE;
+    runtime->state.proactive_offer_id = 0;
     runtime->state.utterance_active = false;
     runtime->state.utterance_seen = false;
     runtime->state.playback_id = 0;
@@ -316,6 +328,12 @@ static bool arm_followup(bot_runtime_t *runtime, uint32_t now_ms)
      * The old visual result has its own reading_token and remains on screen.
      * No intermediate inactive snapshot: the completed result's image transfer
      * and hardware receipt must survive this preparation of the next turn. */
+    if (runtime->state.activation == BOT_ACTIVATION_PROACTIVE) {
+        /* After an unprompted line nobody asked anything: never listen without
+         * a wake. The 'answer directly' window is a separate default-off setting. */
+        end_session(runtime, now_ms, SESSION_INACTIVE);
+        return false;
+    }
     if (runtime->state.token.turn_id == UINT32_MAX || !advance_epoch(runtime)) {
         runtime->identity_exhausted = true;
         end_session(runtime, now_ms, SESSION_FAULT);
@@ -623,6 +641,9 @@ static void mark_wake(bot_runtime_t *runtime, const bot_event_t *event, uint32_t
     /* Capture context before begin_session retires old vision and sleep state. */
     const bot_response_context_t context = response_context(runtime, now_ms);
     runtime->manual_sleep = false;
+    /* A real wake replaces an unprompted line with a normal, fresh session. */
+    if (is_active(runtime) && runtime->state.activation == BOT_ACTIVATION_PROACTIVE)
+        end_session(runtime, now_ms, SESSION_DISMISSED);
     bool accepted = is_active(runtime) ? begin_turn(runtime, now_ms) : begin_session(runtime, now_ms);
     if (!accepted) return;
     runtime->last_wake_ms = event->observed_ms;
@@ -708,6 +729,10 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
             state->rejected_events++;
             break;
         }
+        if (event->data.sound.speech) { /* people talking nearby: not a moment to interrupt */
+            runtime->last_speech_ms = event->observed_ms;
+            runtime->has_speech = true;
+        }
         if (!stopped_this_step && !is_active(runtime) && !state->settings_open &&
             !state->critical_fault && !(state->clock_valid && state->night_policy) &&
             state->behavior != BOT_BEHAVIOR_NIGHT_DARK && state->behavior != BOT_BEHAVIOR_SLEEPING) {
@@ -779,7 +804,8 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
                 end_session(runtime, now_ms, SESSION_DISMISSED);
                 break;
             }
-            if (conversation == BOT_CONVERSATION_SUBMITTED || conversation == BOT_CONVERSATION_THINKING) {
+            if ((conversation == BOT_CONVERSATION_SUBMITTED || conversation == BOT_CONVERSATION_THINKING) &&
+                state->activation != BOT_ACTIVATION_PROACTIVE) {
                 /* a tap while thinking adds one more sentence to the same question */
                 if (begin_turn_with_intent(runtime, now_ms, true)) state->activation = BOT_ACTIVATION_TOUCH;
                 break;
@@ -902,6 +928,7 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         break;
     case BOT_EVENT_LOCAL_COMMAND:
         if (stopped_this_step || !is_active(runtime) || state->settings_open || state->critical_fault ||
+            state->activation == BOT_ACTIVATION_PROACTIVE ||
             state->local_response_active || !state->audio_available ||
             !token_matches(runtime, &event->token, false) ||
             (state->conversation != BOT_CONVERSATION_LISTENING &&
@@ -933,6 +960,7 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         break;
     case BOT_EVENT_UTTERANCE_STARTED:
         if (!is_active(runtime) || state->critical_fault || state->settings_open ||
+            state->activation == BOT_ACTIVATION_PROACTIVE ||
             state->local_response_active ||
             !state->audio_available || !token_matches(runtime, &event->token, false)) {
             state->rejected_events++;
@@ -1215,12 +1243,44 @@ static bool known_expression(const char *name)
     return false;
 }
 
+static void proactive_report(bot_runtime_t *runtime, uint32_t id, uint8_t status)
+{
+    runtime->state.proactive_report_id = id;
+    runtime->state.proactive_report_status = status;
+    runtime->state.proactive_report_seq++;
+}
+
+/* Keep a proposal only; the moment is decided in proactive_step. Settings,
+ * night or an active conversation delay it rather than reject it. */
+static bot_command_result_t accept_proactive_offer(bot_runtime_t *runtime, const bot_command_t *command,
+                                                  uint32_t now_ms)
+{
+    if (runtime->state.critical_fault) return BOT_COMMAND_REJECTED_FAULT;
+    if (!secure_link(runtime)) return BOT_COMMAND_REJECTED_UNTRUSTED;
+    if (!command->request_id || !command->ttl_ms || command->ttl_ms > 1800000U ||
+        command->request_id == runtime->state.proactive_offer_id ||
+        !command->data.caption[0] || !valid_text(command->data.caption, sizeof(command->data.caption)))
+        return BOT_COMMAND_REJECTED_INVALID;
+    if (!within_age(now_ms, command->received_ms, runtime->config.command_max_age_ms))
+        return BOT_COMMAND_REJECTED_EXPIRED;
+    if (runtime->proactive_pending && runtime->proactive_id != command->request_id)
+        proactive_report(runtime, runtime->proactive_id, 1); /* superseded, never spoken */
+    runtime->proactive_pending = true;
+    runtime->proactive_id = command->request_id;
+    runtime->proactive_received_ms = command->received_ms;
+    runtime->proactive_ttl_ms = command->ttl_ms;
+    runtime->proactive_show_if_absent = command->presentation_sequence & 1U;
+    memcpy(runtime->proactive_text, command->data.caption, sizeof(runtime->proactive_text));
+    return BOT_COMMAND_ACCEPTED;
+}
+
 static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_command_t *command,
                                            uint32_t now_ms)
 {
     bot_runtime_snapshot_t *state = &runtime->state;
-    if (command->kind < BOT_COMMAND_SET_EXPRESSION || command->kind > BOT_COMMAND_PRESENTATION_DONE)
+    if (command->kind < BOT_COMMAND_SET_EXPRESSION || command->kind > BOT_COMMAND_PROACTIVE_OFFER)
         return BOT_COMMAND_REJECTED_INVALID;
+    if (command->kind == BOT_COMMAND_PROACTIVE_OFFER) return accept_proactive_offer(runtime, command, now_ms);
     if (state->critical_fault) return BOT_COMMAND_REJECTED_FAULT;
     if (state->settings_open) return BOT_COMMAND_REJECTED_SETTINGS;
     if (!secure_link(runtime)) return BOT_COMMAND_REJECTED_UNTRUSTED;
@@ -1376,6 +1436,8 @@ bot_runtime_config_t bot_runtime_default_config(void)
         .wake_debounce_ms = CONFIG_BOT_RUNTIME_WAKE_DEBOUNCE_MS,
         .event_max_age_ms = 2000, .command_max_age_ms = 5000,
         .max_events_per_step = 32, .max_commands_per_step = 8,
+        .proactive_presence_ms = 1500, .proactive_speech_quiet_ms = 5000,
+        .proactive_idle_ms = 60000, .proactive_min_gap_ms = 20U * 60U * 1000U,
         .allow_audio_uplink = false, .allow_barge_in = false,
         .voice_settings = bot_voice_default_settings(),
         .focus = attention_manager_default_config()
@@ -1391,6 +1453,8 @@ static bool valid_config(const bot_runtime_config_t *config)
         config->wake_debounce_ms < INT32_MAX && config->event_max_age_ms > 0 &&
         config->event_max_age_ms < INT32_MAX && config->command_max_age_ms > 0 &&
         config->command_max_age_ms < INT32_MAX &&
+        config->proactive_presence_ms < INT32_MAX && config->proactive_speech_quiet_ms < INT32_MAX &&
+        config->proactive_idle_ms < INT32_MAX && config->proactive_min_gap_ms < INT32_MAX &&
         bot_voice_settings_valid(&config->voice_settings) &&
         config->max_events_per_step > 0 && config->max_events_per_step <= 512 &&
         config->max_commands_per_step > 0 && config->max_commands_per_step <= 64;
@@ -1455,6 +1519,71 @@ void bot_runtime_observe_light(bot_runtime_t *runtime, uint8_t mean_luma,
 {
     if (!runtime || !within_age(now_ms, captured_ms, 2000)) return;
     bot_ambient_observe(&runtime->ambient, mean_luma, captured_ms);
+}
+
+/* The device, not the Mac, decides the moment (§12.2). Every guardrail the
+ * device can observe is here; the Mac re-checks its own (quiet hours, caps,
+ * tasks) when the session asks to speak. */
+static bool proactive_moment(const bot_runtime_t *runtime, uint32_t now_ms)
+{
+    const bot_runtime_snapshot_t *state = &runtime->state;
+    return !is_active(runtime) && !runtime->revoking && !state->settings_open && !state->critical_fault &&
+        !runtime->manual_sleep &&
+        (state->behavior == BOT_BEHAVIOR_IDLE || state->behavior == BOT_BEHAVIOR_BORED) &&
+        !(state->clock_valid && state->night_policy) && !state->ambient_dark &&
+        secure_link(runtime) && state->audio_available &&
+        state->voice_settings.spoken_answers && !state->voice_settings.muted &&
+        state->voice_settings.volume_percent &&
+        !state->local_response_active && !state->sound_preview_active && !state->playback_id &&
+        state->person_visible &&
+        within_age(now_ms, runtime->person_since_ms, INT32_MAX) &&
+        (uint32_t)(now_ms - runtime->person_since_ms) >= runtime->config.proactive_presence_ms &&
+        !(runtime->has_speech && within_age(now_ms, runtime->last_speech_ms, runtime->config.proactive_speech_quiet_ms)) &&
+        !within_age(now_ms, state->last_interaction_ms, runtime->config.proactive_idle_ms) &&
+        !(runtime->has_proactive && within_age(now_ms, runtime->last_proactive_ms, runtime->config.proactive_min_gap_ms));
+}
+
+static void start_proactive(bot_runtime_t *runtime, uint32_t now_ms)
+{
+    bot_runtime_snapshot_t *state = &runtime->state;
+    const uint32_t id = runtime->proactive_id;
+    runtime->proactive_pending = false;
+    dismiss_result(state);
+    state->activation = BOT_ACTIVATION_PROACTIVE; /* before begin: never a listening snapshot */
+    if (!begin_session(runtime, now_ms)) return;
+    state->proactive_offer_id = id;
+    state->behavior = BOT_BEHAVIOR_ENGAGED;
+    state->conversation = BOT_CONVERSATION_THINKING;
+    runtime->has_proactive = true;
+    runtime->last_proactive_ms = now_ms;
+    reset_expression(runtime);
+    memcpy(state->expression, "happy", sizeof("happy"));
+    derive_permissions(runtime);
+}
+
+static void proactive_step(bot_runtime_t *runtime, uint32_t now_ms)
+{
+    bot_runtime_snapshot_t *state = &runtime->state;
+    if (runtime->proactive_caption_until_ms && (int32_t)(now_ms - runtime->proactive_caption_until_ms) >= 0) {
+        runtime->proactive_caption_until_ms = 0;
+        if (!is_active(runtime) && !strcmp(state->caption, runtime->proactive_text)) state->caption[0] = '\0';
+    }
+    if (!runtime->proactive_pending) return;
+    if (within_age(now_ms, runtime->proactive_received_ms, runtime->proactive_ttl_ms)) {
+        if (proactive_moment(runtime, now_ms)) start_proactive(runtime, now_ms);
+        return;
+    }
+    runtime->proactive_pending = false;
+    /* A reminder nobody was there to hear stays on screen for a while; it is
+     * never spoken late into an empty room or at night. */
+    const bool show = runtime->proactive_show_if_absent && !is_active(runtime) &&
+        !state->settings_open && !state->critical_fault &&
+        state->behavior != BOT_BEHAVIOR_NIGHT_DARK && state->behavior != BOT_BEHAVIOR_SLEEPING;
+    if (show) {
+        memcpy(state->caption, runtime->proactive_text, sizeof(state->caption));
+        runtime->proactive_caption_until_ms = (now_ms + 10U * 60U * 1000U) | 1U;
+    }
+    proactive_report(runtime, runtime->proactive_id, show ? 2 : 1);
 }
 
 void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
@@ -1556,6 +1685,8 @@ void bot_runtime_step(bot_runtime_t *runtime, uint32_t now_ms)
         runtime->config.focus.observation_max_age_ms, runtime->config.focus.min_face_confidence,
         runtime->state.camera_requested && runtime->state.camera_available &&
             !runtime->state.settings_open && !runtime->state.critical_fault);
+    if (!had_person && runtime->state.person_visible) runtime->person_since_ms = now_ms;
+    proactive_step(runtime, now_ms);
     if (!runtime->state.person_visible || runtime->state.behavior != BOT_BEHAVIOR_IDLE)
         runtime->face_reaction_active = false;
     else if (!had_person) {

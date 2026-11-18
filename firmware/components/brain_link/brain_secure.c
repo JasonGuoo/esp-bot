@@ -61,6 +61,10 @@ typedef struct {
     uint8_t remote_volume_result;
     char volume_poll_id[24];
     int64_t volume_poll_us;
+    /* Unprompted lines (§12.2): the Mac offers, the runtime picks the moment. */
+    bool proactive_supported, proactive_ready_sent, proactive_active;
+    uint32_t proactive_offer_id, proactive_report_id;
+    uint8_t proactive_report_status, proactive_report_seq, proactive_report_sent_seq;
     int64_t playback_started_us;
     uint32_t progress_seq;
     int64_t commit_started_us;
@@ -250,6 +254,7 @@ void brain_secure_network_down(void) {
     bool was = s.authenticated;
     s.authenticated = false; s.audio_allowed = false; s.result_valid=false; s.phase = DOWN;
     s.volume_poll_id[0]='\0';s.volume_poll_us=0;s.remote_volume_seen_id=0;
+    s.proactive_ready_sent=false;
     portEXIT_CRITICAL(&s_lock);
     if (was) { link_event(false); fail_session("Secure connection lost; session stopped"); }
 }
@@ -312,7 +317,12 @@ bool brain_secure_live_turns(void) {
 void brain_secure_update(const bot_runtime_snapshot_t *state) {
     if (!state) return;
     portENTER_CRITICAL(&s_lock);
-    s.active=state->audio_session_requested; s.utterance=state->utterance_active;
+    /* A speaker-only unprompted line keeps the session open for output; it
+     * never grants pcm_permitted, which still follows audio_uplink_permitted. */
+    s.active=state->audio_session_requested || state->proactive_active; s.utterance=state->utterance_active;
+    s.proactive_active=state->proactive_active; s.proactive_offer_id=state->proactive_offer_id;
+    s.proactive_report_id=state->proactive_report_id; s.proactive_report_status=state->proactive_report_status;
+    s.proactive_report_seq=state->proactive_report_seq;
     s.activation=state->activation; s.desired=state->token;
     s.pcm_permitted=state->audio_uplink_permitted;
     s.followup_armed=state->followup_armed; s.supplement_turn=state->supplement_turn;
@@ -693,6 +703,8 @@ static void text_message(const char *data,size_t n) {
             s.live_available=array_has_string(cJSON_GetObjectItemCaseSensitive(root,"capabilities"),"conversation.live.v1");
             s.live_session=false;
             s.presentation_supported=array_has_string(cJSON_GetObjectItemCaseSensitive(root,"capabilities"),"presentation.segments.v1");
+            s.proactive_supported=array_has_string(cJSON_GetObjectItemCaseSensitive(root,"capabilities"),"proactive.v1");
+            s.proactive_ready_sent=false;
             s.phase=READY; portEXIT_CRITICAL(&s_lock);
             link_event(true); ESP_LOGI(TAG,"Authenticated Mac gateway connected");
         } else fail_session("Gateway welcome invalid");
@@ -780,7 +792,11 @@ static void text_message(const char *data,size_t n) {
             snprintf(message->base64,sizeof(message->base64),"%s",data->valuestring);
             queue_image_message(message);
         } else if (fresh && (opening||beginning||completing) && !cJSON_IsTrue(ok)) {
-            finish_with_message(current,request_error(root),completing);
+            /* The Mac re-checks quiet hours, caps and tasks before an unprompted
+             * line; its refusal ends that session silently, never with an error. */
+            portENTER_CRITICAL(&s_lock); bool proactive=s.activation==BOT_ACTIVATION_PROACTIVE; portEXIT_CRITICAL(&s_lock);
+            if (proactive) fail_session_token("Proactive line declined by the Mac",&current,BOT_SESSION_END_EXPIRED);
+            else finish_with_message(current,request_error(root),completing);
         }
         else if (fresh && cJSON_IsTrue(ok) && opening) {
             cJSON *payload=cJSON_GetObjectItemCaseSensitive(root,"payload");
@@ -954,6 +970,22 @@ static void text_message(const char *data,size_t n) {
                 cJSON *session=cJSON_GetObjectItemCaseSensitive(root,"session_cancelled");
                 if (!cJSON_IsTrue(session)) fail_operation(returned,"Server cancelled the current playback");
                 else if (s_audio && playback) bot_audio_playback_cancel(s_audio,playback);
+            }
+        } else if (!strcmp(event->valuestring,"proactive.offer")) {
+            /* Only a proposal: the runtime decides the moment, or drops it. */
+            cJSON *p=cJSON_GetObjectItemCaseSensitive(root,"payload");
+            cJSON *text=cJSON_GetObjectItemCaseSensitive(p,"text");
+            cJSON *show=cJSON_GetObjectItemCaseSensitive(p,"show_if_absent");
+            uint32_t offer=0,ttl=0;
+            portENTER_CRITICAL(&s_lock); bool trusted=s.authenticated; portEXIT_CRITICAL(&s_lock);
+            if (trusted && json_uint(cJSON_GetObjectItemCaseSensitive(p,"offer_id"),UINT32_MAX,&offer) && offer &&
+                json_uint(cJSON_GetObjectItemCaseSensitive(p,"ttl_ms"),1800000,&ttl) && ttl &&
+                cJSON_IsString(text) && *text->valuestring && strlen(text->valuestring)<=BOT_CAPTION_MAX_BYTES) {
+                bot_command_t c={.kind=BOT_COMMAND_PROACTIVE_OFFER,.request_id=offer,.ttl_ms=ttl,
+                    .received_ms=(uint32_t)(esp_timer_get_time()/1000),.presentation_sequence=cJSON_IsTrue(show)?1U:0U};
+                memcpy(c.data.caption,text->valuestring,strlen(text->valuestring)+1);
+                if (bot_bus_submit_command(s_bus,&c,0)!=ESP_OK) ESP_LOGW(TAG,"Proactive offer dropped: queue full");
+                else ESP_LOGI(TAG,"Proactive offer %lu received (ttl %lu ms)",(unsigned long)offer,(unsigned long)ttl);
             }
         } else if (!strcmp(event->valuestring,"session.cancelled") || !strcmp(event->valuestring,"session.expired")) {
             bot_session_token_t returned;
@@ -1224,6 +1256,23 @@ static void volume_status_poll(const secure_state_t *state) {
         if (!strcmp(s.volume_poll_id,id)) s.volume_poll_id[0]='\0';
         portEXIT_CRITICAL(&s_lock);
     }
+}
+/* Tell a proactive-capable Mac once per connection that offers are welcome,
+ * and report offers that ended unspoken (expired or only shown). */
+static void proactive_poll(const secure_state_t *state) {
+    if (!state->proactive_supported) return;
+    char id[24],message[260];
+    if (!state->proactive_ready_sent) {
+        request_id(id,sizeof(id));
+        snprintf(message,sizeof(message),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"proactive.ready\",\"payload\":{\"version\":1}}",id);
+        if (send_text(message)) {portENTER_CRITICAL(&s_lock);if (s.authenticated) s.proactive_ready_sent=true;portEXIT_CRITICAL(&s_lock);}
+        return;
+    }
+    if (state->proactive_report_seq==state->proactive_report_sent_seq || !state->proactive_report_id) return;
+    request_id(id,sizeof(id));
+    snprintf(message,sizeof(message),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"proactive.report\",\"payload\":{\"offer_id\":%lu,\"status\":\"%s\"}}",
+             id,(unsigned long)state->proactive_report_id,state->proactive_report_status==2?"shown":"expired");
+    if (send_text(message)) {portENTER_CRITICAL(&s_lock);s.proactive_report_sent_seq=state->proactive_report_seq;portEXIT_CRITICAL(&s_lock);}
 }
 static bool playback_report(const playback_event_t *event, const char *status, const char *code) {
     char id[24],runtime[180],message[480];
@@ -1625,7 +1674,7 @@ static void secure_task(void *unused) {
         presentation_poll();
         secure_state_t state;
         portENTER_CRITICAL(&s_lock); state=s; portEXIT_CRITICAL(&s_lock);
-        if (state.authenticated) volume_status_poll(&state);
+        if (state.authenticated) {volume_status_poll(&state);proactive_poll(&state);}
         if (atomic_exchange(&s_playback_event_overflow,false)) {
             fail_session("Hardware playback event queue overflow");
             /* The missing terminal cannot keep an otherwise revoked network
@@ -1681,10 +1730,13 @@ static void secure_task(void *unused) {
                 else vTaskDelay(pdMS_TO_TICKS(30));
                 continue;
             }
-            char id[24], runtime[180], msg[1100]; request_id(id,sizeof(id)); runtime_json(runtime,sizeof(runtime),state.desired);
-            const char *activation=state.activation==BOT_ACTIVATION_WAKE_WORD?"wake_word":"touch";
+            char id[24], runtime[180], msg[1200], offer[40]=""; request_id(id,sizeof(id)); runtime_json(runtime,sizeof(runtime),state.desired);
+            const bool proactive=state.activation==BOT_ACTIVATION_PROACTIVE;
+            if (proactive && !state.proactive_offer_id) {vTaskDelay(pdMS_TO_TICKS(30));continue;}
+            if (proactive) snprintf(offer,sizeof(offer),"\"offer_id\":%lu,",(unsigned long)state.proactive_offer_id);
+            const char *activation=proactive?"proactive":state.activation==BOT_ACTIVATION_WAKE_WORD?"wake_word":"touch";
             bool spoken=state.spoken_answers && state.audio_supported;
-            snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"session.open\",\"payload\":{\"activation\":\"%s\",\"keyword\":\"小呆小呆\",\"runtime\":%s,\"output\":{\"version\":1,\"audio\":%s,\"cards\":[\"text\",\"image\"],\"image\":{\"mime\":\"image/jpeg\",\"max_width\":480,\"max_height\":272,\"max_bytes\":65536},\"presentation\":{\"version\":1,\"max_segments\":64,\"max_duration_ms\":120000,\"frame_ack\":true},\"live_turns\":true,\"video\":{\"mime\":\"video/x-motion-jpeg\",\"transport\":\"jpeg_frames\",\"max_width\":480,\"max_height\":272,\"max_frame_bytes\":65536,\"max_fps\":5,\"max_duration_ms\":15000}}}}",id,activation,runtime,spoken?"true":"false");
+            snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"session.open\",\"payload\":{\"activation\":\"%s\",\"keyword\":\"小呆小呆\",%s\"runtime\":%s,\"output\":{\"version\":1,\"audio\":%s,\"cards\":[\"text\",\"image\"],\"image\":{\"mime\":\"image/jpeg\",\"max_width\":480,\"max_height\":272,\"max_bytes\":65536},\"presentation\":{\"version\":1,\"max_segments\":64,\"max_duration_ms\":120000,\"frame_ack\":true},\"live_turns\":true,\"video\":{\"mime\":\"video/x-motion-jpeg\",\"transport\":\"jpeg_frames\",\"max_width\":480,\"max_height\":272,\"max_frame_bytes\":65536,\"max_fps\":5,\"max_duration_ms\":15000}}}}",id,activation,offer,runtime,spoken?"true":"false");
             portENTER_CRITICAL(&s_lock); s.remote=state.desired;s.session_spoken=spoken;s.cancel_before_next=false;snprintf(s.open_id,sizeof(s.open_id),"%s",id);s.phase=OPENING;portEXIT_CRITICAL(&s_lock);
             if (state.spoken_answers && !state.audio_supported) ESP_LOGW(TAG,"Mac lacks audio.reply.v1; continuing with text/image replies");
             if (!send_text(msg)) fail_operation(state.desired,"Could not open secure session");
@@ -1704,6 +1756,15 @@ static void secure_task(void *unused) {
             }
             portENTER_CRITICAL(&s_lock);s.remote=state.desired;s.audio_allowed=false;s.cancel_before_next=false;s.phase=OPEN;portEXIT_CRITICAL(&s_lock);
             heard=false;ending=false;
+        } else if (state.phase==OPEN && state.activation==BOT_ACTIVATION_PROACTIVE) {
+            /* Speaker only: ask the Mac to speak the offered line. No audio.begin,
+             * no plain audio socket, no capture: nothing is ever uploaded. */
+            char id[24], runtime[180], msg[360]; request_id(id,sizeof(id));runtime_json(runtime,sizeof(runtime),state.desired);
+            snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"proactive.accept\",\"payload\":{\"offer_id\":%lu,\"runtime\":%s}}",
+                     id,(unsigned long)state.proactive_offer_id,runtime);
+            portENTER_CRITICAL(&s_lock);snprintf(s.commit_id,sizeof(s.commit_id),"%s",id);s.progress_seq=0;
+            s.commit_started_us=esp_timer_get_time();s.phase=COMMITTED;portEXIT_CRITICAL(&s_lock);
+            if (!send_text(msg)) fail_session_token("Could not ask for the proactive line",&state.desired,BOT_SESSION_END_EXPIRED);
         } else if (state.phase==OPEN) {
             char id[24], runtime[180], msg[500]; request_id(id,sizeof(id));runtime_json(runtime,sizeof(runtime),state.desired);
             uint32_t stream=esp_random();if (!stream) stream=1;

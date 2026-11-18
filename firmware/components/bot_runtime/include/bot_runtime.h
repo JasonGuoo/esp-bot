@@ -23,7 +23,8 @@ typedef enum {
     BOT_CONVERSATION_SUBMITTED /* capture sealed; awaiting authenticated processing */
 } bot_conversation_t;
 typedef enum {
-    BOT_ACTIVATION_NONE = 0, BOT_ACTIVATION_TOUCH, BOT_ACTIVATION_WAKE_WORD
+    BOT_ACTIVATION_NONE = 0, BOT_ACTIVATION_TOUCH, BOT_ACTIVATION_WAKE_WORD,
+    BOT_ACTIVATION_PROACTIVE /* runtime-chosen moment for a Mac offer; speaker only */
 } bot_activation_t;
 typedef enum {
     BOT_COMMAND_ACCEPTED = 0, BOT_COMMAND_REJECTED_STALE,
@@ -51,6 +52,13 @@ typedef struct {
     bool followup_armed;       /* next token allocated before follow-up speech starts */
     bool display_awake_requested, camera_requested;
     bool audio_session_requested; /* local post-wake permission, never opens a second mic */
+    /* Unprompted line (UX review §12.2): a speaker-only output lease. Never
+     * implies audio_session_requested, capture, VAD or uplink. */
+    bool proactive_active;
+    uint32_t proactive_offer_id;     /* offer spoken by this session, zero otherwise */
+    uint32_t proactive_report_id;    /* last offer that ended without being spoken */
+    uint8_t proactive_report_status; /* 0 none, 1 expired unseen, 2 shown on screen */
+    uint8_t proactive_report_seq;    /* changes with every report */
     bool audio_uplink_permitted;  /* session + current secure link + capture availability */
     bool visual_tracking_permitted;
     bool person_visible;         /* fresh valid face, not identity or conversation intent */
@@ -98,6 +106,10 @@ typedef struct {
     uint32_t session_timeout_ms, wake_debounce_ms;
     uint32_t event_max_age_ms, command_max_age_ms;
     uint16_t max_events_per_step, max_commands_per_step;
+    /* Proactive moment: face seen this long, no nearby speech for this long,
+     * no interaction for this long, and this gap between unprompted lines. */
+    uint32_t proactive_presence_ms, proactive_speech_quiet_ms;
+    uint32_t proactive_idle_ms, proactive_min_gap_ms;
     bool allow_audio_uplink;
     bool allow_barge_in;
     bot_voice_settings_t voice_settings;

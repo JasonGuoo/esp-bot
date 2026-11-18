@@ -241,6 +241,7 @@ static void audio_event(void *context, const bot_audio_event_t *source) {
         event.data.sound.direction_valid = source->direction_valid;
         event.data.sound.azimuth_deg = source->azimuth_deg;
         event.data.sound.quality = source->direction_quality;
+        event.data.sound.speech = source->speech; /* people talking: no unprompted line */
         if (!source->speech && app->audio) {
             /* A sharp non-speech peak in the current block reads as a bang (threshold untuned). */
             bot_audio_status_t audio;
@@ -573,8 +574,14 @@ static void apply_audio_session(app_t *app, const bot_runtime_snapshot_t *state)
         .stop_only = state->audio_session_requested && !state->playback_id &&
             (state->conversation == BOT_CONVERSATION_SUBMITTED || state->conversation == BOT_CONVERSATION_THINKING),
     };
-    (void)bot_audio_set_session_ex(app->audio, state->audio_session_requested ? &token : NULL,
-                                   state->audio_session_requested ? &options : NULL);
+    /* An unprompted line (§12.2) gets a speaker-only lease: same token for
+     * playback, but retain_start/deliver_pcm/local_commands all false, so
+     * bot_audio runs no session capture, VAD or PCM delivery for it. */
+    static const bot_audio_session_options_t speaker_only = {0};
+    const bool proactive = state->proactive_active && !state->audio_session_requested;
+    const bool open = state->audio_session_requested || proactive;
+    (void)bot_audio_set_session_ex(app->audio, open ? &token : NULL,
+                                   open ? (proactive ? &speaker_only : &options) : NULL);
 }
 static void apply_state(void *context, const bot_runtime_snapshot_t *state) {
     app_t *app = context;

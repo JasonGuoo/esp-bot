@@ -101,7 +101,7 @@ typedef struct {
         struct { bool clock_valid; bool night; uint8_t local_hour; } night;
         struct { uint32_t code; } fault;
         struct { bot_session_end_code_t code; } session_end;
-        struct { bool direction_valid, loud; float azimuth_deg, quality; } sound;
+        struct { bool direction_valid, loud, speech; float azimuth_deg, quality; } sound;
         bot_voice_settings_t voice_settings;
         struct { bool ready; } capture;
         struct { bot_voice_command_t command; float score; } local_command;
@@ -120,7 +120,12 @@ typedef enum {
     BOT_COMMAND_END_SESSION,
     BOT_COMMAND_REPLY_PRESENT, /* retain text while real hardware audio is still pending */
     BOT_COMMAND_PRESENTATION_SEGMENT, /* visual text; no completion or capture authority */
-    BOT_COMMAND_PRESENTATION_DONE /* local receipt collector: every final output completed */
+    BOT_COMMAND_PRESENTATION_DONE, /* local receipt collector: every final output completed */
+    /* Mac-proposed unprompted line (UX review §12.2). request_id is the offer id,
+     * ttl_ms its lifetime, presentation_sequence bit0 = show on screen if nobody
+     * comes, caption the text. Only a proposal: the runtime picks the moment,
+     * speaks without any microphone lease, or drops it. */
+    BOT_COMMAND_PROACTIVE_OFFER
 } bot_command_kind_t;
 
 /* Local, non-terminal foreground feedback. Unknown wire stages never enter the runtime. */
