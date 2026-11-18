@@ -90,14 +90,14 @@ macOS / Unix 的进程组清理用于正常停止与对象析构；它不承诺�
     "base_url": "http://127.0.0.1:4097",
     "inherit_config": "/Users/yourname/.config/opencode/opencode.jsonc",
     "working_directory": null,
-    "route_order_version": 1,
+    "route_order_version": 2,
     "routes": [
       {
         "id": "glm-coding-plan",
         "label": "GLM Coding Plan",
         "provider_id": "xiaodai-glm-plan",
         "model_id": "glm-5.3",
-        "base_url": "https://api.z.ai/api/coding/paas/v4",
+        "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
         "api_key_env": "GLM_CODING_PLAN_API_KEY",
         "context_tokens": 131072,
         "body": {
@@ -134,9 +134,9 @@ macOS / Unix 的进程组清理用于正常停止与对象析构；它不承诺�
 
 #### 旧配置的模型顺序升级
 
-默认路线会被完整保存到 `brain.json`，因此只改变 Rust 默认值不能更新旧安装。更新后的 App 首次加载 `harness.route_order_version` 缺失或为 `0` 的旧配置时，仅将仍完全匹配原始内置 **Qwen → GLM → DeepSeek** 路线的配置改为 **GLM → DeepSeek → Qwen（停用）**。匹配包含全部路线字段；自定义模型、端点、标签、启用状态、请求参数、预算或顺序都会保留原样。所有旧配置在验证后通过现有原子保存流程记录版本 `1`，包括无需改变路线的自定义配置；其他应用设置、记忆和钥匙串不因路由升级而重置。
+更新后的 App 会在首次加载旧版内置路线时原子升级 `brain.json`。版本 `0`（含缺失版本）原来的 Qwen 优先顺序升级为 **GLM → DeepSeek → Qwen（停用）**。版本 `0` 和 `1` 的旧内置路线均改用智谱国内 Coding Plan 端点。
 
-版本标记用于避免反复覆盖后续手动选择。控制台明确保存配置时也会记录至少版本 `1`，因此之后主动恢复旧顺序会按用户选择保留。已自定义的安装可在 **模型与密钥** 中将 GLM 排第一、DeepSeek 排第二并停用 Qwen，再点击 **保存并重载** 和 **启动服务**。仓库更新不会替换当前正在运行的 App；需要安装并重新打开包含此次变更的版本。
+自动升级会比对整组路线的全部字段。已有自定义设置的安装保留所选端点、模型、顺序和预算。完成检查或从控制台明确保存后，配置记录版本 `2`。需要手动切换的安装可在 **模型与密钥 → 模型设置** 编辑 GLM 的端点，保存并重载服务。
 
 新默认配置不会先尝试 Qwen，因此不再经过该路线的等待后才选择 GLM。GLM 自身推理、工具执行和其他回合阶段仍有耗时；此次未测量切换后的响应速度。
 
@@ -144,9 +144,11 @@ macOS / Unix 的进程组清理用于正常停止与对象析构；它不承诺�
 
 在 **模型与密钥 → 模型设置 → 三家模型的网络** 选择网卡直连，保存并重载、启动服务。`harness.provider_network` 接受 `system`（兼容旧配置）和 `active_interface`（Mac 托管模式）。直连同时作用于已启用的 GLM、DeepSeek 和 Qwen，不改变路线顺序。三条路线需使用显式 HTTPS 端点及项目的 OpenAI 兼容适配器。
 
-OpenCode 通过仅本机可达的临时聊天端点转发；每个新请求按 macOS 服务顺序选择有活动连接、地址和路由器的 Wi-Fi 或以太网卡，IPv4/IPv6 的 TCP socket 绑定该网卡，TLS 仍验证原服务商域名。DNS 由本机解析，内置公网域名还会查询系统配置的默认 DNS，以补充 CDN 地址；这不承诺 DNS 查询也绕过 VPN。不上报密钥或请求正文，不更改系统路由，不跟随服务商重定向，也不在直连失败时退回 VPN。绑定不能创造 VPN 禁止或系统缺失的物理路由。搜索 MCP、浏览器和自定义路线按原方式联网。
+OpenCode 通过仅本机可达的临时聊天端点转发。每次请求按 macOS 服务顺序选择有活动连接、地址和路由器的 Wi-Fi 或以太网卡，将 IPv4 和 IPv6 的 TCP 连接绑定到该网卡，并校验服务商域名的 TLS 证书。内置服务商域名同时使用系统解析结果，并向活动网卡配置的 DNS 和默认 DNS 查询 A、AAAA 地址。DNS 查询遵循系统路由，模型请求必须从所选物理接口出站。该接口没有可达地址时请求会报错。搜索 MCP、浏览器和自定义路线按原方式联网。
 
-**测试网卡直连** 不带 Key，只对当前生效端点请求 `/models`；任何 HTTPS 状态（包括 401 或 405）只证明端点可达。“上次请求”另行显示正式模型连接使用的接口和 HTTP 状态，仅保留本次配置会话。
+**测试网卡直连** 对当前生效端点请求 `/models`，显示网卡、实际连接使用的 IPv4 或 IPv6、HTTP 状态和耗时。探测无需密钥，收到 401 也表示已连到服务商。“上次请求”显示正式模型请求的网卡、地址族和 HTTP 状态，仅保留本次配置会话。
+
+网卡选择、DNS 对照和正式 OpenCode 的复测命令见[活动网卡与模型直连备忘录](macos-active-interface.md)。
 
 ### 3.4 凭据与现有 provider
 
@@ -185,7 +187,7 @@ OpenCode 通过仅本机可达的临时聊天端点转发；每个新请求按 m
 
 | 顺序 | 默认模型 | 默认端点 | 说明 |
 | --- | --- | --- | --- |
-| 1 | `glm-5.3` | `https://api.z.ai/api/coding/paas/v4` | 首选，Z.AI Coding Plan 专用端点 |
+| 1 | `glm-5.3` | `https://open.bigmodel.cn/api/coding/paas/v4` | 首选，智谱国内 Coding Plan 专用端点 |
 | 2 | `deepseek-flash` | `https://api.deepseek.com/v1` | 备用，独立 DeepSeek API 账户，按其账户余额 / 计费规则使用 |
 | 默认停用 | `qwen3.7-plus` | `https://coding.dashscope.aliyuncs.com/v1` | 可选，阿里云中国站 Coding Plan 专用端点 |
 
@@ -205,7 +207,7 @@ Coding Plan 使用专用的 `sk-sp-...` key；普通百炼 `sk-...` key 与这�
 
 ### GLM
 
-本次默认采用官方已列出的 `glm-5.3`，并使用 Coding Plan 专用端点。该模型持续进行推理，应用默认请求较低的 reasoning effort，以控制语音交互等待时间；这不是关闭推理。官方文档见 [OpenCode 接入](https://docs.z.ai/devpack/tool/opencode)、[Coding Plan](https://docs.z.ai/devpack/overview)、[套餐最新模型](https://docs.z.ai/devpack/latest-model) 和 [GLM-5.3](https://docs.z.ai/guides/llm/glm-5.3)。具体套餐可用范围、地区和额度以账户及当前官方规则为准。
+默认模型为 `glm-5.3`，GLM 请求发往智谱国内 Coding Plan 端点 `https://open.bigmodel.cn/api/coding/paas/v4`。应用请求较低的 reasoning effort，以缩短语音交互等待。模型可用范围与额度取决于国内账户的套餐。见[智谱国内 OpenCode 接入指南](https://docs.bigmodel.cn/cn/coding-plan/tool/opencode)。
 
 ### DeepSeek
 

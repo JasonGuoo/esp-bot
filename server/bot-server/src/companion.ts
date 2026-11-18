@@ -942,6 +942,11 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       if (statusAgain && !disposed) { statusAgain = false; void refreshStatus(); }
     }
   }
+  function directConnectionLabel(connection: Record<string, unknown>): string {
+    const name = string(connection.interface, "无活动网卡");
+    const peer = string(connection.peer_ip);
+    return peer ? `${name} · ${peer.includes(":") ? "IPv6" : "IPv4"}` : name;
+  }
   function renderRoutes(routes: unknown[]): void {
     const host = $("#cc-routes"); host.replaceChildren();
     routes.forEach((value, index) => {
@@ -957,11 +962,11 @@ export function mountCompanion(container: HTMLElement): CompanionController {
         card.append(element("span", "cc-caption", route.network_mode === "active_interface" ? "模型连接：活动网卡直连" : "模型连接：跟随系统"));
         if (route.last_direct_request) {
           const last = object(route.last_direct_request);
-          card.append(element("span", "cc-caption", `上次请求 ${new Date(number(last.at_ms)).toLocaleTimeString()} · ${string(last.interface, "无活动网卡")} · ${last.status ? `HTTP ${number(last.status)}` : "连接失败"}`));
+          card.append(element("span", "cc-caption", `上次请求 ${new Date(number(last.at_ms)).toLocaleTimeString()} · ${directConnectionLabel(last)} · ${last.status ? `已直连 · HTTP ${number(last.status)}` : "直连失败"}`));
         }
         card.append(button("测试网卡直连", () => perform("正在测试网卡到模型端点的 HTTPS 连接…", async () => {
           const check = object(await request("harness.route.probe_direct", { route_id: route.id }));
-          notice(`${string(route.label)}：${string(check.interface)} 已连接，HTTP ${number(check.status)}，${number(check.elapsed_ms)} 毫秒。未使用密钥或调用模型。`);
+          notice(`${string(route.label)} 直连成功 · ${directConnectionLabel(check)} · HTTP ${number(check.status)} · ${number(check.elapsed_ms)} 毫秒。本次仅测试网络连接。`);
         })));
       }
       if (route.last_failure) {

@@ -6,7 +6,7 @@
     "executable": "opencode",
     "base_url": "http://127.0.0.1:4097",
     "inherit_config": null,
-    "route_order_version": 1,
+    "route_order_version": 2,
     "routes": [
       {
         "id": "glm-coding-plan",
@@ -14,7 +14,7 @@
         "enabled": true,
         "provider_id": "xiaodai-glm-plan",
         "model_id": "glm-5.3",
-        "base_url": "https://api.z.ai/api/coding/paas/v4",
+        "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
         "api_key_env": "GLM_CODING_PLAN_API_KEY",
         "context_tokens": 131072,
         "body": {

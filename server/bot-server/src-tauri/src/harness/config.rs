@@ -8,6 +8,8 @@ use serde_json::{json, Map, Value};
 
 pub const SOURCE_VERSION: &str = "2.2.5";
 pub const AGENT_ID: &str = "xiaodai";
+const GLM_CODING_BASE: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
+const PREVIOUS_GLM_CODING_BASE: &str = "https://api.z.ai/api/coding/paas/v4";
 const PACKAGE: &str = "@opencode/ai/providers/openai-compatible";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,7 +121,7 @@ impl Default for HarnessConfig {
                 ModelRoute {
                     id: "glm-coding-plan".into(), label: "GLM Coding Plan".into(),
                     provider_id: "xiaodai-glm-plan".into(), model_id: "glm-5.3".into(),
-                    base_url: Some("https://api.z.ai/api/coding/paas/v4".into()),
+                    base_url: Some(GLM_CODING_BASE.into()),
                     api_key_env: Some("GLM_CODING_PLAN_API_KEY".into()),
                     context_tokens: 131_072,
                     body: json!({"thinking":{"type":"enabled"},"reasoning_effort":"low"}),
@@ -157,21 +159,22 @@ impl Default for HarnessConfig {
 }
 
 impl HarnessConfig {
-    pub const ROUTE_ORDER_VERSION: u32 = 1;
+    pub const ROUTE_ORDER_VERSION: u32 = 2;
 
-    /// Upgrade only the previous stock routes. Custom endpoints, models, flags,
-    /// budgets or ordering are intentional configuration and remain untouched.
-    /// Mark custom configurations too, so a later deliberate return to the old
-    /// order is never mistaken for an installation that still needs upgrading.
-    pub fn upgrade_route_order(&mut self) -> bool {
-        if self.route_order_version != 0 { return false; }
-        let defaults = Self::default();
-        let mut previous_routes = defaults.routes.clone();
-        previous_routes.rotate_right(1); // Previous default: Qwen, GLM, DeepSeek.
-        previous_routes[0].enabled = true;
-        if self.routes == previous_routes {
-            self.routes = defaults.routes;
+    /// Upgrade complete stock configurations only. Explicitly saved routes keep
+    /// their chosen destination, credentials, order and flags on subsequent loads.
+    pub fn upgrade_route_defaults(&mut self) -> bool {
+        if self.route_order_version >= Self::ROUTE_ORDER_VERSION { return false; }
+        let current = Self::default().routes;
+        let mut version_one = current.clone();
+        version_one[0].base_url = Some(PREVIOUS_GLM_CODING_BASE.into());
+        if self.route_order_version == 0 {
+            let mut original = version_one.clone();
+            original.rotate_right(1);
+            original[0].enabled = true;
+            if self.routes == original { self.routes = version_one.clone(); }
         }
+        if self.routes == version_one { self.routes = current; }
         self.route_order_version = Self::ROUTE_ORDER_VERSION;
         true
     }
@@ -405,6 +408,33 @@ fn env_name(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrades_stock_glm_destination_once_and_preserves_custom_routes() {
+        let defaults = HarnessConfig::default();
+        let mut previous = defaults.clone();
+        previous.route_order_version = 1;
+        previous.routes[0].base_url = Some(PREVIOUS_GLM_CODING_BASE.into());
+
+        let mut original = previous.clone();
+        original.route_order_version = 0;
+        original.routes.rotate_right(1);
+        original.routes[0].enabled = true;
+        assert!(original.upgrade_route_defaults());
+        assert_eq!(original, defaults);
+
+        let mut custom = previous.clone();
+        custom.routes[0].base_url = Some("https://private.example/v1".into());
+        let saved = custom.routes.clone();
+        assert!(custom.upgrade_route_defaults());
+        assert_eq!(custom.routes, saved);
+
+        assert!(previous.upgrade_route_defaults());
+        assert_eq!(previous, defaults);
+        previous.routes[0].base_url = Some(PREVIOUS_GLM_CODING_BASE.into());
+        assert!(!previous.upgrade_route_defaults());
+        assert_eq!(previous.routes[0].base_url.as_deref(), Some(PREVIOUS_GLM_CODING_BASE));
+    }
 
     #[test]
     fn provider_proxy_exclusions_keep_existing_hosts_and_follow_route_urls() {

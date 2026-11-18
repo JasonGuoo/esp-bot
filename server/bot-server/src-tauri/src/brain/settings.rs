@@ -65,9 +65,13 @@ impl Default for ConversationConfig {
 pub fn load_or_create(dir: &Path, bundled_worker: Option<PathBuf>) -> Result<BrainConfig, String> {
     private_dir(dir)?;
     let path = dir.join("brain.json");
-    let mut config = if path.exists() {
-        let text = fs::read_to_string(&path).map_err(|e| format!("brain_config_read: {e}"))?;
-        serde_json::from_str(&text).map_err(|e| format!("brain_config_invalid: {e}"))?
+    let source = match fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("brain_config_read: {e}")),
+    };
+    let mut config = if let Some(text) = &source {
+        serde_json::from_str(text).map_err(|e| format!("brain_config_invalid: {e}"))?
     } else {
         let mut config = BrainConfig::default();
         config.models.script = bundled_worker.clone();
@@ -87,10 +91,18 @@ pub fn load_or_create(dir: &Path, bundled_worker: Option<PathBuf>) -> Result<Bra
     // environment. Keep an operator-selected separate interpreter intact.
     if config.tasks.python==super::tasks::TaskConfig::default().python {config.tasks.python=config.models.python.clone();}
     validate(&config)?;
-    if config.harness.upgrade_route_order() {
-        // Persist the revision with the route change in one atomic write. Do
-        // this before exposing the configuration to the console or harness.
-        save(dir, &config)?;
+    if let Some(text) = source.filter(|_| config.harness.route_order_version < HarnessConfig::ROUTE_ORDER_VERSION) {
+        let previous = config.harness.routes.clone();
+        config.harness.upgrade_route_defaults();
+        // Patch the stored document so unrelated missing fields still inherit
+        // defaults, including the worker paths resolved above for this run.
+        let mut stored: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        let harness = &mut stored["harness"];
+        harness["route_order_version"] = config.harness.route_order_version.into();
+        if previous != config.harness.routes {
+            harness["routes"] = serde_json::to_value(&config.harness.routes).map_err(|e| e.to_string())?;
+        }
+        private_write(&path, &serde_json::to_vec_pretty(&stored).map_err(|e| e.to_string())?)?;
     }
     Ok(config)
 }
@@ -171,6 +183,26 @@ pub fn private_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrading_routes_preserves_omitted_settings_on_disk() {
+        let mut routes = HarnessConfig::default().routes;
+        routes[0].base_url = Some("https://api.z.ai/api/coding/paas/v4".into());
+        let mut expected = serde_json::json!({
+            "harness": {"route_order_version": 1, "routes": routes},
+            "memory": {"history_enabled": false},
+        });
+        let dir = std::env::temp_dir().join(format!("espbot-route-upgrade-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("brain.json");
+        private_write(&path, &serde_json::to_vec(&expected).unwrap()).unwrap();
+        let config = load_or_create(&dir, None).unwrap();
+        assert_eq!(config.harness.routes, HarnessConfig::default().routes);
+        expected["harness"]["route_order_version"] = HarnessConfig::ROUTE_ORDER_VERSION.into();
+        expected["harness"]["routes"][0]["base_url"] = serde_json::json!(config.harness.routes[0].base_url);
+        let actual: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        fs::remove_dir_all(dir).unwrap();
+        assert_eq!(actual, expected);
+    }
 
     #[test]
     fn old_model_configuration_remains_valid_and_rma_requires_absolute_paths() {

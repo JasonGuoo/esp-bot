@@ -2,12 +2,12 @@
 #import <SystemConfiguration/SystemConfiguration.h>
 #include <net/if.h>
 
-int espbot_active_interface(char *name, size_t capacity) {
+unsigned int espbot_active_interface(char *name, size_t capacity, char *dns, size_t dns_capacity) {
     @autoreleasepool {
         SCDynamicStoreRef store = SCDynamicStoreCreate(NULL, CFSTR("xiaodai-models"), NULL, NULL);
         if (!store) return 0;
         NSArray *patterns = @[@"Setup:/Network/Global/IPv4", @"Setup:/Network/Service/[^/]+/Interface",
-                              @"State:/Network/Service/[^/]+/IPv[46]", @"State:/Network/Interface/[^/]+/Link"];
+                              @"State:/Network/Service/[^/]+/IPv[46]", @"State:/Network/Service/[^/]+/DNS", @"State:/Network/Interface/[^/]+/Link"];
         NSDictionary *snapshot = CFBridgingRelease(SCDynamicStoreCopyMultiple(store, NULL, (__bridge CFArrayRef)patterns));
         CFRelease(store);
         for (NSString *service in snapshot[@"Setup:/Network/Global/IPv4"][@"ServiceOrder"]) {
@@ -19,8 +19,17 @@ int espbot_active_interface(char *name, size_t capacity) {
             for (NSString *family in @[@"IPv4", @"IPv6"]) {
                 NSDictionary *state = snapshot[[NSString stringWithFormat:@"State:/Network/Service/%@/%@", service, family]];
                 if ([device isEqual:state[@"InterfaceName"]] && state[@"Router"] && [state[@"Addresses"] count] &&
-                    [device getCString:name maxLength:capacity encoding:NSASCIIStringEncoding] && if_nametoindex(name)) {
-                    return 1;
+                    [device getCString:name maxLength:capacity encoding:NSASCIIStringEncoding]) {
+                    unsigned int index = if_nametoindex(name);
+                    if (!index) continue;
+                    NSArray *servers = snapshot[[NSString stringWithFormat:@"State:/Network/Service/%@/DNS", service]][@"ServerAddresses"];
+                    dns[0] = '\0';
+                    if (servers.count) {
+                        NSArray *first = [servers subarrayWithRange:NSMakeRange(0, MIN(servers.count, 3))];
+                        if (![[first componentsJoinedByString:@","] getCString:dns maxLength:dns_capacity encoding:NSASCIIStringEncoding])
+                            dns[0] = '\0';
+                    }
+                    return index;
                 }
             }
         }

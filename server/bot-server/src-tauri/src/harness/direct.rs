@@ -26,85 +26,240 @@ use uuid::Uuid;
 #[cfg(target_os = "macos")]
 mod network {
     use super::*;
+    use futures_util::{stream, StreamExt};
     use reqwest::dns::{Addrs, Name, Resolve, Resolving};
+    use rustls::pki_types::ServerName;
+    use socket2::SockRef;
     use std::{
         ffi::CStr,
         io,
         net::{IpAddr, SocketAddr},
+        num::NonZeroU32,
         os::raw::c_char,
+        sync::LazyLock,
     };
+    use tokio::net::TcpSocket;
+    use tokio_rustls::TlsConnector;
 
     extern "C" {
-        fn espbot_active_interface(name: *mut c_char, capacity: usize) -> i32;
+        fn espbot_active_interface(
+            name: *mut c_char,
+            capacity: usize,
+            dns: *mut c_char,
+            dns_capacity: usize,
+        ) -> u32;
     }
 
-    struct ProviderDns;
+    #[derive(Clone, Eq, PartialEq)]
+    pub(super) struct ProviderDns {
+        interface: String,
+        index: NonZeroU32,
+        resolvers: Vec<String>,
+        port: u16,
+    }
+
+    fn active_network(port: u16) -> Option<ProviderDns> {
+        let mut name = [0 as c_char; libc::IF_NAMESIZE];
+        let mut dns = [0 as c_char; 512];
+        let found = unsafe {
+            espbot_active_interface(name.as_mut_ptr(), name.len(), dns.as_mut_ptr(), dns.len())
+        };
+        let index = NonZeroU32::new(found)?;
+        let interface = unsafe { CStr::from_ptr(name.as_ptr()) }
+            .to_str()
+            .ok()?
+            .to_owned();
+        let list = unsafe { CStr::from_ptr(dns.as_ptr()) }.to_str().ok()?;
+        let mut resolvers = Vec::new();
+        for address in list.split(',') {
+            let literal = address.split('%').next().unwrap_or_default();
+            let Ok(ip) = literal.parse::<IpAddr>() else {
+                continue;
+            };
+            let scoped = match ip {
+                IpAddr::V6(v6) if v6.is_unicast_link_local() => format!("{v6}%{interface}"),
+                _ => ip.to_string(),
+            };
+            if !resolvers.contains(&scoped) {
+                resolvers.push(scoped);
+            }
+        }
+        Some(ProviderDns {
+            interface,
+            index,
+            resolvers,
+            port,
+        })
+    }
+
+    async fn addresses(host: &str, server: Option<&str>, family: &str) -> Vec<SocketAddr> {
+        let mut dig = tokio::process::Command::new("/usr/bin/dig");
+        dig.kill_on_drop(true).env_clear().env("HOME", "/var/empty");
+        if let Some(ip) = server {
+            dig.arg(format!("@{ip}"));
+        }
+        // A lost DHCP-resolver reply can hide GLM's only usable address family.
+        let (tries, deadline_ms) = if host == "open.bigmodel.cn" && server.is_some() && family == "AAAA" {
+            ("+tries=2", 2400)
+        } else {
+            ("+tries=1", 1500)
+        };
+        let query = dig
+            .args(["+time=1", tries, "+short", "-q", host, "-t", family])
+            .output();
+        match tokio::time::timeout(Duration::from_millis(deadline_ms), query).await {
+            Ok(Ok(out)) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter_map(|s| s.trim().parse::<IpAddr>().ok())
+                .take(32)
+                .map(|ip| SocketAddr::new(ip, 0))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    // Some CDN edges accept TCP on the physical interface but stall during
+    // TLS. A fresh GLM connection must pick an edge that authenticated the
+    // provider hostname. No HTTP headers or prompt are sent during this race.
+    async fn tls_peer(
+        index: NonZeroU32,
+        host: ServerName<'static>,
+        address: SocketAddr,
+    ) -> io::Result<()> {
+        static TLS: LazyLock<TlsConnector> = LazyLock::new(|| {
+            let roots =
+                rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            TlsConnector::from(Arc::new(config))
+        });
+        let socket = if address.is_ipv6() {
+            let socket = TcpSocket::new_v6()?;
+            SockRef::from(&socket).bind_device_by_index_v6(Some(index))?;
+            socket
+        } else {
+            let socket = TcpSocket::new_v4()?;
+            SockRef::from(&socket).bind_device_by_index_v4(Some(index))?;
+            socket
+        };
+        TLS.connect(host, socket.connect(address).await?).await?;
+        Ok(())
+    }
+
+    async fn select_glm_peer(
+        candidates: &[SocketAddr],
+        index: NonZeroU32,
+        port: u16,
+    ) -> io::Result<SocketAddr> {
+        let host = ServerName::try_from("open.bigmodel.cn").expect("valid provider hostname");
+        let family = |ipv6| {
+            let host = host.clone();
+            let addresses = candidates
+                .iter()
+                .copied()
+                .filter(move |addr| addr.is_ipv6() == ipv6);
+            stream::iter(addresses.map(move |address| {
+                let probe = tls_peer(index, host.clone(), SocketAddr::new(address.ip(), port));
+                async move {
+                    let outcome = tokio::time::timeout(Duration::from_secs(3), probe).await;
+                    matches!(outcome, Ok(Ok(()))).then_some(address)
+                }
+            }))
+            .buffer_unordered(4)
+        };
+        let first = async {
+            let mut replies = stream::select(family(true), family(false));
+            while let Some(result) = replies.next().await {
+                if let Some(address) = result {
+                    return Some(address);
+                }
+            }
+            None
+        };
+        tokio::time::timeout(Duration::from_secs(5), first)
+            .await
+            .ok()
+            .flatten()
+            .ok_or_else(|| io::Error::other("no_direct_glm_tls_peer"))
+    }
+
     impl Resolve for ProviderDns {
         fn resolve(&self, name: Name) -> Resolving {
+            let resolvers = self.resolvers.clone();
+            let (index, port) = (self.index, self.port);
             Box::pin(async move {
                 let host = name.as_str();
                 let system = tokio::net::lookup_host((host, 0));
-                // VPN split DNS and the default resolver may return different CDN
-                // edges. Ask for alternate addresses only for these public hosts.
-                // Custom/private endpoints retain the system's DNS policy. The
-                // HTTP connector, not DNS, enforces the required interface.
-                let known = ["api.z.ai", "api.deepseek.com", "coding.dashscope.aliyuncs.com"].contains(&host);
-                let extra = async {
-                    if !known {
-                        return Vec::new();
-                    }
-                    let mut dig = tokio::process::Command::new("/usr/bin/dig");
-                    let query = dig
-                        .kill_on_drop(true)
-                        .env_clear()
-                        .env("HOME", "/var/empty")
-                        .args(["+time=1", "+tries=1", "+short", "-q", host, "-t", "A"])
-                        .output();
-                    match tokio::time::timeout(Duration::from_millis(1500), query).await {
-                        Ok(Ok(out)) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-                            .lines()
-                            .filter_map(|s| s.trim().parse::<IpAddr>().ok())
-                            .take(32)
-                            .map(|ip| SocketAddr::new(ip, 0))
-                            .collect(),
-                        _ => Vec::new(),
-                    }
-                };
-                let (system, extra) = tokio::join!(system, extra);
-                let mut addresses: Vec<_> = system.into_iter().flatten().take(64).collect();
-                for address in extra {
-                    if !addresses.contains(&address) {
-                        addresses.push(address);
+                // Include the old international endpoint for installations that
+                // explicitly selected it. Other names keep the system's split DNS.
+                let known = matches!(
+                    host,
+                    "open.bigmodel.cn"
+                        | "api.z.ai"
+                        | "api.deepseek.com"
+                        | "coding.dashscope.aliyuncs.com"
+                );
+                if !known {
+                    let resolved: Vec<_> = system.await?.collect();
+                    return Ok(Box::new(resolved.into_iter()) as Addrs);
+                }
+                // A VPN resolver may omit AAAA records even when the physical
+                // interface has a usable IPv6 path. Query both address families.
+                let sources = resolvers
+                    .iter()
+                    .map(|ip| Some(ip.as_str()))
+                    .chain(std::iter::once(None));
+                let lookups = sources
+                    .flat_map(|server| ["AAAA", "A"].map(|family| addresses(host, server, family)));
+                let (system, extra) = tokio::join!(
+                    tokio::time::timeout(Duration::from_millis(1500), system),
+                    futures_util::future::join_all(lookups)
+                );
+                let mut candidates = Vec::new();
+                let system = system
+                    .ok()
+                    .and_then(Result::ok)
+                    .into_iter()
+                    .flatten()
+                    .take(64);
+                for addr in system.chain(extra.into_iter().flatten()) {
+                    let addr = std::net::SocketAddr::new(addr.ip().to_canonical(), addr.port());
+                    if !candidates.contains(&addr) {
+                        candidates.push(addr);
                     }
                 }
-                if addresses.is_empty() {
+                if candidates.is_empty() {
                     return Err(io::Error::other("provider_dns_unavailable").into());
                 }
-                Ok(Box::new(addresses.into_iter()) as Addrs)
+                if host == "open.bigmodel.cn" && candidates.len() > 1 {
+                    let address = select_glm_peer(&candidates, index, port).await?;
+                    return Ok(Box::new(std::iter::once(address)) as Addrs);
+                }
+                Ok(Box::new(candidates.into_iter()) as Addrs)
             })
         }
     }
 
-    pub(super) async fn client(connections: &Observations) -> Result<(String, Client), &'static str> {
-        let interface = tokio::task::spawn_blocking(|| {
-            let mut buf = [0 as c_char; libc::IF_NAMESIZE];
-            if unsafe { espbot_active_interface(buf.as_mut_ptr(), buf.len()) } != 1 {
-                return None;
-            }
-            unsafe { CStr::from_ptr(buf.as_ptr()) }
-                .to_str()
-                .ok()
-                .map(str::to_owned)
-        })
-        .await
-        .map_err(|_| "provider_interface_unavailable")?
-        .ok_or("provider_interface_unavailable")?;
+    pub(super) async fn client(
+        connections: &Observations,
+        target: &str,
+    ) -> Result<(String, Client), &'static str> {
+        let port = reqwest::Url::parse(target)
+            .ok()
+            .and_then(|url| url.port_or_known_default())
+            .ok_or("provider_interface_no_endpoint")?;
+        let network = tokio::task::spawn_blocking(move || active_network(port))
+            .await
+            .map_err(|_| "provider_interface_unavailable")?
+            .ok_or("provider_interface_unavailable")?;
+        let interface = network.interface.clone();
         let mut pool = connections
             .pool
             .lock()
             .map_err(|_| "provider_interface_client_failed")?;
         if let Some((previous, client)) = pool.as_ref() {
-            if previous == &interface {
+            if previous == &network {
                 return Ok((interface, client.clone()));
             }
         }
@@ -113,14 +268,14 @@ mod network {
             .https_only(true)
             .interface(&interface)
             .user_agent(concat!("Xiaodai-Bot-Server/", env!("CARGO_PKG_VERSION")))
-            .dns_resolver(Arc::new(ProviderDns))
+            .dns_resolver(Arc::new(network.clone()))
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_secs(8))
             .pool_idle_timeout(Duration::from_secs(30))
             .build()
             .map_err(|_| "provider_interface_client_failed")?;
-        *pool = Some((interface.clone(), client.clone()));
+        *pool = Some((network, client.clone()));
         Ok((interface, client))
     }
 }
@@ -128,7 +283,7 @@ mod network {
 #[cfg(not(target_os = "macos"))]
 mod network {
     use super::*;
-    pub(super) async fn client(_: &Observations) -> Result<(String, Client), &'static str> {
+    pub(super) async fn client(_: &Observations, _: &str) -> Result<(String, Client), &'static str> {
         Err("provider_interface_requires_macos")
     }
 }
@@ -138,11 +293,11 @@ pub(super) async fn probe(route: &ModelRoute, connections: &Observations) -> Res
         return Err("provider_interface_unsupported_route".into());
     }
     let start = Instant::now();
-    let (interface, client) = network::client(connections).await?;
     let base = route
         .base_url
         .as_deref()
         .ok_or("provider_interface_no_endpoint")?;
+    let (interface, client) = network::client(connections, base).await?;
     // No credentials, no inference, no redirects. Even a 401 proves HTTPS connectivity.
     let response = client
         .get(format!("{}/models", base.trim_end_matches('/')))
@@ -150,23 +305,32 @@ pub(super) async fn probe(route: &ModelRoute, connections: &Observations) -> Res
         .send()
         .await
         .map_err(|_| format!("provider_interface_connect_failed: {interface}"))?;
-    Ok(
-        json!({"route_id":route.id,"interface":interface,"status":response.status().as_u16(),"elapsed_ms":start.elapsed().as_millis()}),
-    )
+    Ok(json!({
+        "route_id": route.id,
+        "interface": interface,
+        "status": response.status().as_u16(),
+        "peer_ip": response.remote_addr().map(|addr| addr.ip().to_canonical()),
+        "elapsed_ms": start.elapsed().as_millis(),
+    }))
 }
 
 #[derive(Default, Clone)]
 pub(super) struct Observations {
     last: Arc<Mutex<HashMap<String, Value>>>,
     #[cfg(target_os = "macos")]
-    pool: Arc<Mutex<Option<(String, Client)>>>,
+    pool: Arc<Mutex<Option<(network::ProviderDns, Client)>>>,
 }
 impl Observations {
-    fn record(&self, route: &str, interface: Option<&str>, status: Option<u16>) {
+    fn record(&self, route: &str, interface: Option<&str>, reply: Option<&reqwest::Response>) {
         if let Ok(mut last) = self.last.lock() {
             last.insert(
                 route.to_owned(),
-                json!({"interface":interface,"status":status,"at_ms":super::now_ms()}),
+                json!({
+                    "interface": interface,
+                    "status": reply.map(|r| r.status().as_u16()),
+                    "peer_ip": reply.and_then(|r| r.remote_addr()).map(|addr| addr.ip().to_canonical()),
+                    "at_ms": super::now_ms(),
+                }),
             );
         }
     }
@@ -281,7 +445,7 @@ async fn forward(
         let Ok(body) = to_bytes(body, 16 * 1024 * 1024).await else {
             return StatusCode::PAYLOAD_TOO_LARGE.into_response();
         };
-        let Ok((interface, client)) = network::client(&state.last).await else {
+        let Ok((interface, client)) = network::client(&state.last, target).await else {
             state.last.record(route, None, None);
             return (StatusCode::BAD_GATEWAY, "provider_interface_unavailable").into_response();
         };
@@ -307,7 +471,7 @@ async fn forward(
         };
         state
             .last
-            .record(route, Some(&interface), Some(reply.status().as_u16()));
+            .record(route, Some(&interface), Some(&reply));
         if reply.status().is_redirection() {
             return (StatusCode::BAD_GATEWAY, "provider_interface_redirect_refused").into_response();
         }
@@ -347,6 +511,12 @@ async fn forward(
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    fn has_peer(observation: &Value) -> bool {
+        observation["interface"].as_str().is_some_and(|name| !name.is_empty())
+            && observation["peer_ip"].as_str()
+                .is_some_and(|ip| ip.parse::<std::net::IpAddr>().is_ok())
+    }
 
     #[tokio::test]
     async fn only_configured_chat_routes_can_reach_the_relay() {
@@ -458,7 +628,8 @@ mod tests {
                 .json(&json!({"model":route.model_id,"messages":[{"role":"user","content":"一"}],"max_tokens":1})).send().await.unwrap().status();
             let actual = last.last(&route.id).unwrap();
             println!("{}: probe={check:?} chat={status} observation={actual}", route.id);
-            if check.is_err() || actual["status"] != status.as_u16() || !matches!(status.as_u16(), 401 | 403)
+            if !check.as_ref().is_ok_and(has_peer) || !has_peer(&actual)
+                || actual["status"] != status.as_u16() || !matches!(status.as_u16(), 401 | 403)
             {
                 failed.push(&route.id);
             }
@@ -523,7 +694,7 @@ mod tests {
             let last = harness.connections.last(route_id).unwrap_or(Value::Null);
             println!("OpenCode → {route_id}: {last}");
             if !matches!(result, Ok(Err(_)))
-                || last["interface"].as_str().is_none()
+                || !has_peer(&last)
                 || !matches!(last["status"].as_u64(), Some(401 | 403))
             {
                 failed.push(route_id);
