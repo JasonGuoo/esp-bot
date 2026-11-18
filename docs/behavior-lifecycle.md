@@ -2,13 +2,36 @@
 
 **2026-11-15 real-room check: NOT PASSED.** After the user announced lights-off, the 21:18–21:28 observation still reported IDLE and non-black frames. Valid camera luma was 38–107 (median 78), above the provisional entry threshold. The 22:30 scheduled transition was outside this observation. See [the measured result and serial-reset limitation](night-light-check-2026-11-15.md); source policy and simulated tests are not real-room acceptance.
 
-**Owner decision, 2026-11-18 (design only, not implemented):** 小呆 may speak first in limited
-cases: a morning hello, dated events, family-set reminders, and a "missed you" after a long absence.
-It may also call people by name after a confident voice match. Speaking first never opens the
-microphone session or uploads pre-wake audio, and never happens at night, in quiet hours or during
-another activity. See the guardrails in [the UX review, §12](review-ux-2026-11-18.md). The
-2026-11-08 rule below still governs listening and conversation start until this design is
-implemented.
+**Owner decision, 2026-11-18 (implemented, host-tested; board check pending):** 小呆 may *speak*
+first in limited cases: a morning hello, today's dated events, guardian-set reminders and a
+"missed you" after 2+ days. It may call people by name only after a confident voice match in a
+woken turn (§12.1); unprompted lines are always nameless, because there is no pre-wake identity.
+The 2026-11-08 rule below still governs **listening**: only 小呆小呆 or a deliberate touch starts a
+conversation, and speaking first never opens the microphone session, VAD, capture or uplink.
+
+How it works ([UX review §12.2](review-ux-2026-11-18.md), protocol in
+[mac-brain-v3.md §8.1](../shared/mac-brain-v3.md)):
+
+- The owner switch **主动打招呼 defaults off** (console 家人 → 主动打招呼). Under it, each moment has
+  a toggle (default on), quiet hours (default 21:30–07:30), a minimum gap between lines (default
+  180 min, the "per person" bucket is "anyone") and a household daily cap (default 5). The same line
+  is never repeated on a day. The "answer directly" follow-up window is not built and cannot be
+  enabled.
+- The Mac only **proposes** one line at a time (`proactive.offer`). `bot_runtime` keeps it and
+  decides the moment: behavior `IDLE` or `BORED` (never `DROWSY`, `SLEEPING`, `NIGHT_DARK`, manual
+  sleep or a dark room, and not with the night policy), settings closed, no session, local response,
+  preview or playback, a fresh face seen for ≥1.5 s, no nearby speech energy for 5 s, no interaction
+  for 60 s, ≥20 min since its last unprompted line, a secure link, spoken answers on and not muted.
+- At that moment the runtime starts a `PROACTIVE` session (`ENGAGED`/`THINKING`, happy face).
+  `audio_session_requested` stays false; only `proactive_active` is set, which gives a speaker-only
+  output lease (bot_audio session with no capture, VAD, local commands or PCM delivery). The Mac
+  re-checks its own guardrails (switches, quiet hours, cap, gap, repeat, foreground turn, queued or
+  running tasks) before it synthesises the line, and a refusal ends the session silently.
+- The line plays at the owner-selected volume (no Mac-side gain). When it finishes, the session ends
+  instead of arming a follow-up. A wake or a tap while it is preparing replaces it with a normal
+  session; a tap while it speaks stops it.
+- An offer nobody was there for expires. A reminder is shown on screen for 10 min instead (if it is
+  daytime) and retried once 30 min later. Every offer and its outcome is journalled with its trigger.
 
 **Updated user direction, 2026-11-08:** lively when it is light, occasionally drowsy and then awake again; rest at night or after the room stays dark. It never starts a conversation merely because a face, gaze, sound or brighter room is detected. Full **小呆小呆** and deliberate touch/manual input remain the interaction triggers.
 
