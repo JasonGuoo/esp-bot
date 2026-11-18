@@ -1,0 +1,30 @@
+[package]
+name = "xiaodai-fast-responder"
+version = "0.1.0"
+edition = "2021"
+description = "Fast, interruptible streaming LLM core: text in, spoken-length sentences out, with provider race/failover."
+publish = false
+
+[lib]
+name = "fast_responder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fast-bench"
+path = "src/bin/bench.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "sync", "signal", "process"] }
+tokio-util = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "http2", "json"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Direct (physical-interface) HTTP routes: bound sockets for the TLS edge race.
+socket2 = { version = "0.6", features = ["all"] }
+libc = "0.2"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
+
+[profile.release]
+debug = false
