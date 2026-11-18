@@ -24,6 +24,10 @@
 
 > Hardware target is **ESP32-S31-Korvo-1 V1.1** (ESP32-S31), **not** ESP32-S3-Korvo-1. The S31 board has an 800×480 RGB display and GT1151 touch panel. Use ESP-IDF 6.1 / `esp32s31`, not `esp32s3`.
 
+## 小呆大脑（Xiaodai core）设为默认 — 2026-11-18
+
+`server/xiaodai-core` 是以源码引入的快速应答核心：Codex `gpt-6-luna` 优先，2 秒后 GLM、DeepSeek 竞速（dual）。Mac bot-server 的普通对话现在默认由它回答，需要工具、任务、私密档案或核心主动转交的回合仍交给 OpenCode。记忆上下文与 OpenCode 相同，回合照常写进 SQLite 家庭记录，身份识别不变。隔离环境中的真实语音回合已测过：首字约 0.8–1.0 秒，换新线程后能从 SQLite 记录中召回，声纹标注正确，停止后 Codex 在 7 ms 内中断。尚未在实板或正式 App 上验证。详见 [验收记录](docs/review-xiaodai-core-2026-11-18.md)。
+
 ## Mac bot-server local build — 2026-11-06
 
 **[Mac 端完整接入与准备指南](docs/mac-bot-server.md)** is the current server implementation record. The existing Tauri app now has a Chinese companion console, native **OpenCode 2.2.5** harness, ordered **GLM Coding Plan → DeepSeek Flash** active routes, inherited browser/search MCP, local Whisper ASR/system TTS, enrolled face/speaker recognition and SQLite memory. **2026-11-13:** Qwen Coding Plan is retained as a disabled optional route. The routing change requires the updated App; no tests, builds, inference or CI were run for this source update.

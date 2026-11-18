@@ -1,5 +1,7 @@
 # 小呆 Mac bot-server：OpenCode、多模型、本地声音与记忆
 
+**2026-11-18 小呆大脑：** 普通对话默认由 `server/xiaodai-core` 回答（Luna 优先，GLM、DeepSeek 竞速），工具、任务、私密档案和核心转交的回合仍走 OpenCode。配置项为 `brain_core`，分工、记忆、停止和实测范围见 [验收记录](review-xiaodai-core-2026-11-18.md)。下文第 4 节描述的是 OpenCode 这条路。
+
 **2026-11-16 源码更新：** Mac 已接入家庭日会话、并行 ASR/身份、持续任务与分段呈现，具体配置与迁移见[首次交付](specs/household-companion/implementation-2026-11-16.md)。[第二轮静态审查](review-household-static-2026-11-16.md)进一步修正身份范围、遗忘、取消和呈现等问题，当前均为开发完成、待测试。下方较早日期的构建/实测说明只证明各自旧版本，不验证本次源码。
 
 **2026-11-13 模型选择：** 默认启用 **GLM Coding Plan → DeepSeek Flash**，Qwen Coding Plan 保留但默认停用。旧默认配置的升级范围见 [模型顺序迁移](mac-opencode.md#旧配置的模型顺序升级)。需要更新并重新打开 App 才会应用；此次未构建、运行测试或请求模型。

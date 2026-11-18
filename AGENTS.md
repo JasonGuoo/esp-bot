@@ -5,6 +5,14 @@
 - Managed model keys come only from the current App session or its launch environment. Do not read, migrate, overwrite, or remove legacy provider Keychain items. This does not change device pairing or signing.
 - The installed S31 has a working external speaker; preserve its owner-selected volume. The paired Mac can bind managed GLM, DeepSeek and Qwen HTTPS requests to the active Wi-Fi or Ethernet interface. An HTTP response proves reachability, not model inference. See the [November 18 local acceptance and VPN limitation](docs/review-network-speech-2026-11-18.md).
 
+## Xiaodai core is the default brain — 2026-11-18
+
+- `server/xiaodai-core` (crate `xiaodai-fast-responder`) is vendored source; the bot-server depends on it by path. Keep it free of `runtime/`, `target/`, `.env` and secrets, and never copy from `~/GitHub/codex-dialed`.
+- Ordinary spoken turns go to the core (dual: Luna first, GLM/DeepSeek after 2 s). OpenCode keeps tool keyword requests, private-profile turns, pending task input, the core's `〔转交〕` escalation, core errors/timeouts and `agent.work`. Switch off with `brain_core.enabled=false` in `brain.json`.
+- The core gets the same memory context as OpenCode and its keys from the App session or launch environment. Luna's thread resets on a new household day, `memory_changed` or `identity_revoked`.
+- Isolated live acceptance passed on the Mac; no device or installed-App run yet. See [docs/review-xiaodai-core-2026-11-18.md](docs/review-xiaodai-core-2026-11-18.md).
+- Cargo and git need `DEVELOPER_DIR=/Library/Developer/CommandLineTools` while the Xcode licence is unaccepted.
+
 ## Accepted design direction — 2026-11-16
 
 - Read [the household companion design](docs/specs/household-companion/README.md)

@@ -52,6 +52,7 @@ OpenCode 使用官方 v2.2.5 或兼容的后续 v2。此次本机安装位于被
 
 - `src/companion.ts`：当前中文控制台与单一 `companion_request` IPC。
 - `src-tauri/src/brain`：主动回合、本地模型、设备 WSS v3 与控制台 API。
+- `src-tauri/src/brain/fast_core.rs`：默认对话大脑，包装 `../xiaodai-core`，负责分流、记忆上下文、逐句 TTS 预合成和转交 OpenCode，见 [验收记录](../../docs/review-xiaodai-core-2026-11-18.md)。
 - `src-tauri/src/harness`：官方 OpenCode 管理、路线、权限、取消、会话和本次运行的模型密钥。
 - `src-tauri/src/memory`：SQLite 档案、记忆和身份登记。
 - `local-models`：本地 ASR、身份与系统 TTS worker。
