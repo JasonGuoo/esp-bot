@@ -595,6 +595,43 @@ cancel/close 会清空播放状态并返回确认；不能要求此路径一定�
 未完成请求不会获得取消响应。取消后的晚到结果会被服务端丢弃，也必须被设备本地
 令牌校验挡住。重新连接不恢复旧输入、旧音频或旧 conversation。
 
+### 8.1 Unprompted lines (`proactive.v1`, 2026-11-18)
+
+UX review §12.2. The Mac proposes, the device's `bot_runtime` decides the moment,
+and the session only ever speaks. Old firmware never sees an offer (the Mac waits
+for `proactive.ready`); old Macs never advertise the capability, so new firmware
+never sends any of these.
+
+1. Welcome `capabilities` includes `proactive.v1`. Firmware then sends
+   `proactive.ready` `{version:1}` once per authenticated connection.
+2. While the device has no session and nothing is playing, the Mac checks every
+   20 s and may send one outstanding event
+   `proactive.offer` `payload:{offer_id:u32≠0, text, ttl_ms≤1800000, show_if_absent, moment}`.
+   The runtime stores it (a newer offer supersedes and reports the older one).
+3. When the device finds a moment (face seen ≥1.5 s, no nearby speech for 5 s,
+   no interaction for 60 s, ≥20 min since its last line, daytime and not dark,
+   settings closed, no session/playback, spoken answers on, not muted) it sends
+   `session.open` with `activation:"proactive"`, `offer_id` and the usual output
+   options (spoken presentation is required), then `proactive.accept`
+   `{offer_id, runtime}` instead of `audio.begin`.
+4. The Mac re-checks the owner switch and moment toggle, quiet hours, household
+   daily cap, gap, same-day repeat, foreground turn and queued/running tasks. A
+   refusal is an error response (`proactive_declined`, `proactive_offer_unknown`,
+   `proactive_speech_*`); the device ends that session silently. Acceptance is
+   `{presentation_pending:true}` followed by the usual `presentation.segment` /
+   `presentation.end` at the owner-selected volume.
+5. A proactive session is speaker-only: the Mac rejects `audio.begin`,
+   `assistant.text` and `audio.commit` on it (`proactive_session_is_speaker_only`);
+   the device never opens capture, VAD or uplink for it and ends it after the line
+   instead of arming a follow-up. A wake or tap replaces it with a normal session.
+6. An offer that ends unspoken is reported with `proactive.report`
+   `{offer_id, status:"expired"|"shown"}` (`shown`: the device displayed the text
+   because `show_if_absent` was set). Reminders are retried once 30 min later.
+
+Every offer and its outcome (`offered`, `started`, `declined`+reason, `expired`,
+`shown`, `lost`) is journalled with its trigger in the additive
+`proactive_journal` table and emitted to the console as `proactive.line`.
+
 ## 9. 常见协议错误
 
 | code | 含义 / 下一步 |

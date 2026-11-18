@@ -320,6 +320,13 @@ impl Store {
         let db=self.connection()?;
         let Some(today)=db.query_row("SELECT local_date FROM household_days WHERE id=?1",[daily_id],|r|r.get::<_,String>(0)).optional().map_err(db_error)? else{return Ok(Vec::new())};
         let Ok(today)=chrono::NaiveDate::parse_from_str(&today,"%Y-%m-%d") else{return Ok(Vec::new())};
+        drop(db);
+        self.household_dated_items_on(today,days,allow_cloud)
+    }
+
+    /// Dated items 0..=days ahead of a local date, without creating a day record.
+    pub fn household_dated_items_on(&self,today:chrono::NaiveDate,days:i64,allow_cloud:bool)->Result<Vec<(i64,String)>,String>{
+        let db=self.connection()?;
         let mut stmt=db.prepare("SELECT x.content,d.on_date,d.yearly FROM household_derived_dates d JOIN household_derived x ON x.id=d.derived_id
             WHERE x.valid=1 AND x.private_profile_id IS NULL AND (?1=0 OR x.allow_cloud=1) LIMIT 500").map_err(db_error)?;
         let rows=stmt.query_map([allow_cloud],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?))).map_err(db_error)?;

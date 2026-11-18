@@ -5,6 +5,7 @@ import { CONSOLE_PANELS, consoleTemplate, type ConsolePanel } from "./console-la
 import { mountLiveFace } from "./live-face";
 import { mountVoiceAlbum } from "./voice-album";
 import { mountHousehold, readArtifactContent } from "./household";
+import { mountProactive } from "./proactive";
 import { deviceDeliveryText, deviceReplyMetrics, renderActivity, renderBrainCore, renderCapabilities, renderDeviceStatus, renderRuntimeMetrics, renderTurnTimings, turnStageMetric, harnessTimingMetric, type DeviceDisplayReport } from "./console-presenters";
 import "./companion.css";
 import "./console.css";
@@ -185,6 +186,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     return invoke<T>("companion_request", { method, payload });
   };
   const voiceAlbum = mountVoiceAlbum($("#cc-panel-voices"), request, () => void refreshFamily(), playing => { voicePlaying = playing; updateControls(); });
+  const proactive = mountProactive($("#cc-panel-proactive"), request, notice);
   const householdController = mountHousehold($("#cc-panel-household"), $("#cc-panel-tasks"), {
     request, notice, profiles: () => profiles, onProfilesChange: refreshFamily,
     openVoiceGroup: (id) => { activatePanel("voices"); voiceAlbum.open(id); },
@@ -313,6 +315,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     if (next === "tools") void refreshPermissions();
     householdController.setPanel(next, visible);
     voiceAlbum.show(next === "voices" && visible);
+    proactive.show(next === "proactive" && visible);
     $("#cc-refresh-status").hidden = next === "voices";
     updateControls();
   }
@@ -1624,6 +1627,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       const labels: Record<string, string> = { "service.started": "对话服务已启动", "service.stopped": "对话服务已停止", "turn.started": "开始处理一次主动输入", "turn.completed": "本轮任务已完成", "turn.failed": "本轮任务未完成", "turn.cancelled": "本轮任务已取消", "harness_permission_required": "工具操作等待确认", "service.start_failed": "对话服务启动未完成" };
       if (labels[kind]) addActivity(labels[kind]);
       if (kind === "identity.observed") voiceAlbum.changed();
+      if (kind === "proactive.line") proactive.changed();
       if (kind.includes("permission")) void refreshPermissions();
       if (kind.includes("question")) void refreshQuestions();
       if (["service.started", "service.stopped", "harness_started", "harness_stopped"].includes(kind)) { void refreshStatus(); void refreshPermissions(); }
@@ -1784,6 +1788,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       else { void refreshStatus(); void refreshPermissions(); }
       householdController.setPanel(panel, visible);
       voiceAlbum.show(panel === "voices" && visible);
+      proactive.show(panel === "proactive" && visible);
     },
     dispose(): void {
       if (disposed) return;

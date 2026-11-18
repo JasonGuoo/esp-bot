@@ -146,6 +146,21 @@ pub(super) async fn prepare_failure(brain:&Brain,turn_id:&str,error:&str)->Resul
     Ok(Some((plan,segments)))
 }
 
+/// An unprompted line (UX review §12.2), synthesised like the failure line. It is
+/// not a household turn: its receipts are not journalled there (the turn id is
+/// unknown to memory) and the proactive journal records it with its trigger.
+pub(super) async fn prepare_proactive(brain:&Brain,turn_id:&str,line:&str,local_date:&str)->Result<(PresentationPlan,Vec<PreparedSegment>),String>{
+    let household=brain.memory.household_settings()?["household_id"].as_str().unwrap_or_default().to_owned();
+    // A synthetic day id: never create an empty household day just to greet.
+    let context=crate::brain::presentation::PlanContext{household_id:household,daily_conversation_id:format!("proactive-{local_date}"),
+        conversation_turn_id:turn_id.into(),task_id:None};
+    let (plan,segments,_)=tokio::time::timeout(Duration::from_secs(8),
+        brain.prepare_presentation(context,scene_for(line,"happy"),None,&[],"",true,&[],None,None)).await
+        .map_err(|_|"proactive_speech_timeout".to_string())??;
+    if segments.len()!=1 || segments[0].audio.is_none() {return Err("proactive_speech_unavailable".into());}
+    Ok((plan,segments))
+}
+
 pub(super) fn scene_for(speech:&str,expression:&str)->crate::brain::scene::Scene{
     crate::brain::scene::normalize("",Some(&json!({"speech":speech,"expression":expression,"cards":[]})),4000,&[])
 }

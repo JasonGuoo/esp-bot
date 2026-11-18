@@ -7,6 +7,7 @@ export const CONSOLE_PANELS = [
   { id: "tasks", label: "任务与作品", hub: "tasks", group: "陪伴", description: "后台任务和做好的作品。", hint: "资料整理、图片与媒体准备、打印都有独立进度，也能看到设备上真实呈现的回执。" },
   { id: "family", label: "家庭成员", hub: "family", group: "家人", description: "家人的名字、年龄段和识别样本。", hint: "年龄段由家长填写，不会自动推断。成员用于标注共同对话；个人私密范围只在明确选择时开启。" },
   { id: "voices", label: "谁在说话", hub: "family", group: "家人", description: "给听到的声音标上名字。", hint: "试听相似的声音片段，确认是谁之后再标注。" },
+  { id: "proactive", label: "主动打招呼", hub: "family", group: "家人", description: "小呆什么时候可以主动说一句。", hint: "默认关闭。只在白天、安静、看到有人、没在聊天时说；只说话，不会因此开始听。提醒、日子和问候都会记在今天的列表里。" },
   { id: "memory", label: "补充记忆", hub: "family", group: "家人", description: "手动添加或修改记忆。", hint: "后台自动整理的内容可能有误，可以随时修改或删除。家庭对话的记忆和来源在“家庭时间线”查看。" },
   { id: "models", label: "模型与密钥", hub: "manage", group: "管理", description: "模型顺序、服务端点与 API Key。", hint: "密钥只在本次运行的会话里使用。" },
   { id: "local", label: "本地能力", hub: "manage", group: "管理", description: "这台 Mac 的语音、视觉与身份模型。", hint: "检查本机模型是否就绪、是否已加载。" },
@@ -56,6 +57,7 @@ export const consoleTemplate = `
 
     <section class="cc-panel cc-scroll" id="cc-panel-household" aria-labelledby="cc-page-title" hidden></section>
     <section class="cc-panel cc-scroll" id="cc-panel-voices" aria-labelledby="cc-page-title" hidden></section>
+    <section class="cc-panel cc-scroll" id="cc-panel-proactive" aria-labelledby="cc-page-title" hidden></section>
     <section class="cc-panel cc-scroll" id="cc-panel-tasks" aria-labelledby="cc-page-title" hidden></section>
     <section class="cc-panel cc-scroll" id="cc-panel-family" aria-labelledby="cc-page-title" hidden>
       <div class="cc-context-bar"><button type="button" class="cc-button" id="cc-family-voices">听声音，标记是谁</button><label for="cc-member-focus">当前选择的成员</label><select id="cc-member-focus"><option value="">请选择成员</option></select><p>成员用于标注共同对话；个人范围只由明确选择开启。</p></div>

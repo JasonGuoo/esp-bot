@@ -26,6 +26,7 @@ mod latency;
 mod acks;
 mod memory_text;
 mod flow;
+pub(crate) mod proactive;
 pub mod persona;
 mod acceptance;
 

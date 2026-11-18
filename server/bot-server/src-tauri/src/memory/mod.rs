@@ -12,6 +12,7 @@ mod types;
 mod household_types;
 mod household;
 mod household_jobs;
+pub mod proactive;
 mod profile_merge;
 mod provenance;
 pub mod graphiti;
