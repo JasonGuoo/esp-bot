@@ -1,5 +1,10 @@
 # esp-bot development instructions
 
+## Current Mac and device behavior — 2026-11-18
+
+- Managed model keys come only from the current App session or its launch environment. Do not read, migrate, overwrite, or remove legacy provider Keychain items. This does not change device pairing or signing.
+- The installed S31 has a working external speaker; preserve its owner-selected volume. The paired Mac can bind managed GLM, DeepSeek and Qwen HTTPS requests to the active Wi-Fi or Ethernet interface. An HTTP response proves reachability, not model inference. See the [November 18 local acceptance and VPN limitation](docs/review-network-speech-2026-11-18.md).
+
 ## Accepted design direction — 2026-11-16
 
 - Read [the household companion design](docs/specs/household-companion/README.md)

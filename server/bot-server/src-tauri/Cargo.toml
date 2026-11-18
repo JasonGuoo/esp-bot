@@ -9,7 +9,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
 default = ["lan-diagnostics"]
-lan-diagnostics = ["dep:axum"]
+lan-diagnostics = ["axum/ws"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -19,7 +19,7 @@ cc = "=1.10.0"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 chrono-tz = "0.10"
 tauri = { version = "2", features = [] }
-axum = { version = "0.8", features = ["ws"], optional = true }
+axum = "0.8"
 mdns-sd = "0.21"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -38,9 +38,6 @@ libc = "0.2"
 rusqlite = { version = "0.41.1", features = ["bundled", "fallible_uint"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-security-framework = "3.7"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

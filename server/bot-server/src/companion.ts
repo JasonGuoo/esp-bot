@@ -69,8 +69,10 @@ function errorText(error: unknown): string {
     ["device_volume_unavailable", "设备未连接或暂不支持远程音量控制。"],
     ["device_settings_open", "请先关闭小呆上的设置页面。"],
     ["device_volume_busy", "上一次音量调整还在等待设备确认。"],
-    ["api_key_keychain_authorization_timeout", "等待 macOS 钥匙串授权已超时，密钥仍然保留。请完成系统授权，再点击“启动服务”。"],
-    ["api_key_keychain_read", "macOS 未允许读取已保存密钥。请解锁登录钥匙串并完成系统授权，再启动服务。无需重新填写密钥。"],
+    ["api_key_turn_in_progress", "对话正在进行，请等本轮结束后再修改密钥。"],
+    ["api_key_applied_restart_failed", "本次密钥已更改，但模型服务未能重新启动。请检查运行状态后点击“启动服务”。"],
+    ["provider_interface_unavailable", "没有可用的 Wi-Fi 或有线网卡。请检查连接后再试。"],
+    ["provider_interface_connect_failed", `无法通过 ${text.split(": ").pop() || "活动网卡"} 与服务商建立 HTTPS 连接。请检查网络或端点。`],
   ]) if (text.includes(code)) return message;
   return text.slice(0, 2000);
 }
@@ -138,6 +140,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   let questionSignature = "";
   let pendingQuestionCount = 0;
   let serviceReady = false;
+  let modelSetupNeeded = false;
   let serviceRunning = false;
   let speakerStates: JsonObject[] = [];
   let speakerDirty = false;
@@ -242,7 +245,8 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   }
   function updateControls(): void {
     const blocked = turnBusy || operationBusy || captureConverting;
-    $<HTMLButtonElement>("#cc-send").disabled = blocked || !serviceReady || recordPurpose !== null || (!wavDraft && !input.value.trim());
+    $<HTMLButtonElement>("#cc-send").disabled = blocked || !serviceReady || modelSetupNeeded || recordPurpose !== null || (!wavDraft && !input.value.trim());
+    $("#cc-model-setup").hidden = !serviceReady || !modelSetupNeeded;
     input.disabled = turnBusy || wavDraft !== null;
     profileSelect.disabled = blocked || recordPurpose !== null;
     privateScope.disabled = blocked || recordPurpose !== null || !selectedProfile;
@@ -283,8 +287,8 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     keyInput.disabled = blocked || !keyConfigurable;
     $<HTMLButtonElement>("#cc-api-key-save").disabled = blocked || !keyConfigurable || !keyInput.value.trim();
     $<HTMLButtonElement>("#cc-api-key-delete").disabled = blocked || !keyConfigurable
-      || !credentialRoutes.some((route) => route.id === keyRoute.value && route.keychain_saved === true);
-    $<HTMLButtonElement>("#cc-api-key-save").textContent = credentialRoutes.some((route) => route.id === keyRoute.value && route.keychain_saved === true) ? "更新密钥" : "保存密钥";
+      || !credentialRoutes.some((route) => route.id === keyRoute.value && route.session_key_set === true);
+    $<HTMLButtonElement>("#cc-api-key-save").textContent = credentialRoutes.some((route) => route.id === keyRoute.value && route.session_key_set === true) ? "更新本次密钥" : "本次使用";
     for (const form of Array.from(container.querySelectorAll<HTMLFormElement>("#cc-route-form, #cc-local-form, #cc-tools-form, #cc-native-form, #cc-gateway-form, #cc-preferences-form"))) {
       for (const control of Array.from(form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLButtonElement>("input, textarea, select, button"))) control.disabled = blocked || !loadedConfiguration;
     }
@@ -466,6 +470,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   async function sendTurn(): Promise<void> {
     if (turnBusy || operationBusy || recordPurpose) return;
     if (!serviceReady) { notice("请先启动小呆服务，再发送这一条。", true); return; }
+    if (modelSetupNeeded) { notice("请先在“模型与密钥”启用一条已配置的路线。草稿已保留。", true); return; }
     const text = input.value.trim();
     const draft = wavDraft;
     if (!draft && !text) return;
@@ -518,7 +523,14 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       phase("idle", result.task_ids?.length ? "这件事已接下，可以在“任务与作品”查看进度。" : "还想接着聊哪一点？", result.scene.expression);
       messages.scrollTop = messages.scrollHeight;
     } catch (error) {
-      if (generation === turnGeneration) { notice(errorText(error), true); phase("error"); }
+      if (generation === turnGeneration) {
+        notice(errorText(error), true); phase("error");
+        if (!draft && !received) user.row.append(button("把原问题放回输入框", () => {
+          if (conversationId !== currentConversation || turnBusy || operationBusy) return;
+          if (input.value || wavDraft) { notice("输入框里已有草稿，请先处理草稿。", true); return; }
+          input.value = text; input.focus(); updateControls(); notice("原问题已放回输入框，可以修改后发送。");
+        }));
+      }
     } finally {
       if (draft && !received) user.body.textContent = `语音 · ${draft.seconds.toFixed(1)} 秒（${generation === turnGeneration ? "本轮未完成" : "已停止"}）`;
       if (generation === turnGeneration) { activeTurn = null; turnBusy = false; updateControls(); void refreshPermissions(); }
@@ -878,20 +890,22 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       const value = object(await request("service.status"));
       if (disposed) return;
       const harness = object(value.harness);
+      modelSetupNeeded = harness.mode === "managed" && !list(harness.routes).map(object).some((route) =>
+        route.enabled === true && (route.inherited_provider === true || !route.credential_env || route.credential_present === true));
       backendCancellable = list(value.device_activity).some((activity) => object(activity).cancellable === true)
         || list(value.active_turns).length > 0;
       serviceReady = value.ready === true && value.accepting_turns === true && harness.healthy === true;
       const gatewayListening = object(value.gateway).running === true;
       serviceRunning = harness.running === true || gatewayListening;
       const pill = $("#cc-service-pill");
-      pill.textContent = serviceReady ? "对话服务运行中" : value.ready === false ? "配置待处理" : gatewayListening ? "等待对话引擎，设备可连接" : "对话服务未启动";
-      pill.classList.toggle("ready", serviceReady);
+      pill.textContent = serviceReady ? (modelSetupNeeded ? "服务已启动 · 等待配置模型" : "对话服务运行中") : value.ready === false ? "配置待处理" : gatewayListening ? "等待对话引擎，设备可连接" : "对话服务未启动";
+      pill.classList.toggle("ready", serviceReady && !modelSetupNeeded);
       $("#cc-service-dot").classList.toggle("ready", serviceReady);
       $("#cc-service-dot").classList.toggle("error", value.ready === false || (serviceRunning && !serviceReady));
       $("#cc-service-caption").textContent = `OpenCode ${string(harness.version, string(harness.source_version, "版本待读取"))} · Mac 本机`;
       $("#cc-updated-at").textContent = `更新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })} · 每 15 秒刷新`;
       $("#cc-status-summary").textContent = value.ready === false ? string(value.error, "配置未完成")
-        : `${serviceReady ? "可以开始对话" : gatewayListening ? "设备入口已监听；可点击启动服务重试对话引擎" : serviceRunning ? "对话服务未就绪，可停止后重试" : "对话服务未启动，可在左下角启动"} · OpenCode ${string(harness.version, string(harness.source_version, "版本待读取"))} · ${string(harness.mode, "managed")}`;
+        : `${serviceReady ? (modelSetupNeeded ? "尚无可用模型，请启用路线并提供密钥" : "可以开始对话") : gatewayListening ? "设备入口已监听；可点击启动服务重试对话引擎" : serviceRunning ? "对话服务未就绪，可停止后重试" : "对话服务未启动，可在左下角启动"} · OpenCode ${string(harness.version, string(harness.source_version, "版本待读取"))} · ${string(harness.mode, "managed")}`;
       $("#cc-status-json").textContent = pretty(value);
       $("#cc-config-path").textContent = string(value.config_path);
       const memoryState=object(value.memory), pending=number(memoryState.background_pending), failed=number(memoryState.background_failed);
@@ -930,6 +944,17 @@ export function mountCompanion(container: HTMLElement): CompanionController {
         : route.credential_present !== true ? "等待配置密钥" : "已配置密钥 · 等待实际调用确认";
       if (route.cooling_down === true) state = `暂时跳过 · ${new Date(number(route.retry_at_ms)).toLocaleTimeString()} 后再尝试`;
       card.append(element("span", "cc-caption", state));
+      if (route.direct_capable === true) {
+        card.append(element("span", "cc-caption", route.network_mode === "active_interface" ? "模型连接：活动网卡直连" : "模型连接：跟随系统"));
+        if (route.last_direct_request) {
+          const last = object(route.last_direct_request);
+          card.append(element("span", "cc-caption", `上次请求 ${new Date(number(last.at_ms)).toLocaleTimeString()} · ${string(last.interface, "无活动网卡")} · ${last.status ? `HTTP ${number(last.status)}` : "连接失败"}`));
+        }
+        card.append(button("测试网卡直连", () => perform("正在测试网卡到模型端点的 HTTPS 连接…", async () => {
+          const check = object(await request("harness.route.probe_direct", { route_id: route.id }));
+          notice(`${string(route.label)}：${string(check.interface)} 已连接，HTTP ${number(check.status)}，${number(check.elapsed_ms)} 毫秒。未使用密钥或调用模型。`);
+        })));
+      }
       if (route.last_failure) {
         const reason=string(route.last_failure);
         const labels:Record<string,string>={headers_timeout:"服务商响应超时",authentication:"密钥或订阅验证失败",configuration:"模型或端点配置有误",quota_exhausted:"额度不足",rate_limited:"请求暂时受限"};
@@ -960,10 +985,9 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     }
     const route = credentialRoutes.find((item) => item.id === keyRoute.value);
     $("#cc-api-key-status").textContent = !route
-      ? "没有可在此配置的路线。Mac 管理模式可保存密钥；attach 模式或继承的 provider 请在 OpenCode 中配置。"
+      ? "没有可配置的路线。外部 OpenCode 的密钥由它自行管理。"
       : route.inherited_provider === true ? "此路线使用 OpenCode 已有的登录。密钥由 OpenCode 管理。"
-      : route.credential_error ? `钥匙串状态不可用：${string(route.credential_error)}`
-      : `${string(route.label)}：${route.keychain_saved === true ? "已配置 · macOS 钥匙串" : route.credential_env_present === true ? "已配置 · 启动环境变量" : "尚未配置密钥"}。${route.keychain_saved === true && route.credential_env_present === true ? "钥匙串优先；移除后仍会使用环境变量。" : ""}`;
+      : `${string(route.label)}：${route.session_key_set === true ? "本次已输入" : route.credential_env_present === true ? "来自启动环境变量" : "未提供密钥"}。${route.session_key_set === true && route.credential_env_present === true ? "清除本次密钥后将使用环境变量。" : ""}`;
     populateRouteForm();
     updateControls();
   }
@@ -971,22 +995,19 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     const routeId = keyRoute.value;
     const route = credentialRoutes.find((item) => item.id === routeId);
     if (!route || route.credential_editable !== true) return;
-    if (remove && !window.confirm(`移除 ${string(route.label)} 保存在本机钥匙串的密钥？服务将停止；已有环境变量和 OpenCode 登录不受影响。`)) return;
     let key = keyInput.value.trim();
     keyInput.value = "";
     if (!remove && (!key || key.length > 4096 || /[^\x21-\x7e]/.test(key))) {
       key = ""; updateControls(); notice("API Key 应为不含空格和换行的英文、数字或符号。", true); return;
     }
-    await perform(remove ? "正在移除密钥…" : "正在保存到 macOS 钥匙串…", async () => {
-      await stopConsole(false);
+    await perform(remove ? "正在清除本次密钥…" : "正在应用本次密钥…", async () => {
       try {
         const pending = request(remove ? "api_key.delete" : "api_key.save", { route_id: routeId, ...(remove ? {} : { api_key: key }) });
         key = "";
-        await pending;
-        serviceReady = false; updateControls();
+        const result = object(await pending);
         await refreshStatus();
-        addActivity(remove ? "已移除本机模型密钥" : "模型密钥已更新");
-        notice(remove ? "已移除本机保存的密钥。点击“启动服务”继续。" : "密钥已保存在 macOS 钥匙串。点击“启动服务”生效。");
+        addActivity(remove ? "已清除本次模型密钥" : "已应用本次模型密钥");
+        notice(`${remove ? "已清除本次输入的密钥" : "密钥仅用于本次运行"}。${result.running === true ? "模型服务已恢复。" : "点击“启动服务”继续。"}`);
       } finally { key = ""; }
     });
     key = "";
@@ -1043,6 +1064,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     inputValue("#cc-local-model-dir", models.model_dir); inputValue("#cc-local-voice", models.voice); inputValue("#cc-local-timeout", models.request_timeout_seconds);
     inputValue("#cc-asr-backend", string(models.asr_backend, "whisper"));
     inputValue("#cc-rma-qwen-python", models.rma_qwen_python); inputValue("#cc-rma-qwen-worker", models.rma_qwen_worker); inputValue("#cc-rma-qwen-model", models.rma_qwen_model);
+    inputValue("#cc-provider-network", string(harness.provider_network, "system"));
     inputValue("#cc-tools-inherit", harness.inherit_config);
     inputValue("#cc-mcp-names", list(harness.required_mcp).map((value) => string(value)).filter(Boolean).join("\n"));
     const native = new Set(list(harness.native_actions).map((value) => string(value)));
@@ -1288,6 +1310,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       const index = routes.findIndex((route) => route.id === routeId);
       if (index < 0) throw new Error("这条模型路线已经改变，请重新读取配置。");
       const route = routes.splice(index, 1)[0]; route.model_id = model; route.base_url = endpoint || null; route.enabled = enabled;
+      harness.provider_network = formInput("#cc-provider-network");
       routes.splice(priority, 0, route); harness.routes = routes; config.harness = harness;
     }, "cc-route-form");
   });
@@ -1335,7 +1358,8 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   on("#cc-api-key-delete", () => changeApiKey(true));
   keyRoute.addEventListener("change", () => selectRoute(keyRoute.value));
   keyInput.addEventListener("input", updateControls);
-  on("#cc-start", () => perform("正在读取钥匙串并启动 OpenCode…如出现 macOS 授权窗口，请完成授权。", async () => { await request("service.start"); await refreshStatus(); notice("服务启动请求已完成。"); }));
+  on("#cc-start", () => perform("正在启动模型服务…", async () => { await request("service.start"); await refreshStatus(); notice("服务启动请求已完成。"); }));
+  on("#cc-model-setup-open", () => activatePanel("models"));
   on("#cc-service-stop", () => perform("正在停止服务…", async () => { await stopConsole(false); await request("service.stop"); serviceReady = false; updateControls(); notice("服务已停止。"); }));
   on("#cc-refresh-status", () => refreshStatus());
   on("#cc-reload", () => perform("正在重载配置…", async () => { if (!discardConfigurationDrafts()) return; await stopConsole(false); await request("service.reload"); resetConversationView(); await loadConfiguration(); await refreshFamily(); notice("配置已重载，点击“启动服务”继续。"); }));

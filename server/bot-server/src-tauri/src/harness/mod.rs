@@ -7,6 +7,7 @@
 //! silently mixed into the native V2 API.
 
 mod config;
+mod direct;
 mod http;
 mod routing;
 mod turn;
@@ -37,36 +38,21 @@ use routing::RoutingState;
 
 pub type HarnessEventSink = Arc<dyn Fn(Value) + Send + Sync>;
 
-// A Keychain request may remain blocked in macOS after its async caller times
-// out. Serialize reads across reloads so retries cannot create more prompts.
-static CREDENTIAL_READ_GATE: StdMutex<()> = StdMutex::new(());
 type LoadedCredentials = (BTreeMap<String, zeroize::Zeroizing<String>>, BTreeSet<String>);
-
-struct CredentialReadGuard(Arc<AtomicBool>);
-impl Drop for CredentialReadGuard {
-    fn drop(&mut self) { self.0.store(true, Ordering::Release); }
-}
 
 fn load_credentials_with(
     routes: &[ModelRoute],
     uses_deepseek_search: bool,
-    gate: &StdMutex<()>,
-    cancelled: &AtomicBool,
     mut read: impl FnMut(&str) -> Result<Option<zeroize::Zeroizing<String>>, String>,
 ) -> Result<LoadedCredentials, String> {
-    let _guard = gate.lock().map_err(|_| "api_key_keychain_lock_failed")?;
     let mut saved = BTreeMap::new();
     let mut present = BTreeSet::new();
     let mut seen = BTreeSet::new();
     for route in routes.iter().filter(|route| route.base_url.is_some() &&
         (route.enabled || (uses_deepseek_search && route.api_key_env.as_deref() == Some("DEEPSEEK_API_KEY")))) {
-        if cancelled.load(Ordering::Acquire) { return Err("api_key_keychain_read_cancelled".into()); }
         if let Some(account) = &route.api_key_env {
             if !seen.insert(account.clone()) { continue; }
             let key = read(account)?;
-            // A timed-out OS request can finish later. Drop its secret and do
-            // not start another item's prompt once the caller has gone away.
-            if cancelled.load(Ordering::Acquire) { return Err("api_key_keychain_read_cancelled".into()); }
             if let Some(key) = key {
                 saved.insert(account.clone(), key);
                 present.insert(account.clone());
@@ -141,6 +127,7 @@ struct ActiveTurn {
 }
 
 struct ManagedProcess {
+    _relay: Option<direct::Relay>,
     child: Child,
     group: Option<u32>,
 }
@@ -188,6 +175,8 @@ pub struct Harness {
     client: Client,
     process: Mutex<Option<ManagedProcess>>,
     ready: AtomicBool,
+    keys: Arc<secrets::SessionKeys>,
+    connections: direct::Observations,
     credential_envs: RwLock<BTreeSet<String>>,
     password: RwLock<String>,
     version: RwLock<Option<String>>,
@@ -293,7 +282,7 @@ impl Harness {
     }
     pub(crate) fn workspace(&self) -> &std::path::Path { &self.workspace }
     /// Creates state, not a subprocess. Starting models remains a console action.
-    pub fn new(config: HarnessConfig, data_dir: PathBuf, data_root: PathBuf, sink: HarnessEventSink) -> Result<Arc<Self>, String> {
+    pub fn new(config: HarnessConfig, data_dir: PathBuf, data_root: PathBuf, sink: HarnessEventSink, keys: Arc<secrets::SessionKeys>) -> Result<Arc<Self>, String> {
         config.validate()?;
         private_dir(&data_dir)?;
         let workspace = config.workspace(&data_dir);
@@ -322,7 +311,7 @@ impl Harness {
             .connect_timeout(Duration::from_secs(5)).build()
             .map_err(|_| "opencode_config: cannot construct HTTP client".to_owned())?;
         Ok(Arc::new(Self {
-            config, data_dir, data_root, workspace, client,
+            config, data_dir, data_root, workspace, client, keys, connections: Default::default(),
             process: Mutex::new(None), ready: AtomicBool::new(false),
             credential_envs: RwLock::new(BTreeSet::new()),
             password: RwLock::new(String::new()), version: RwLock::new(None), last_error: RwLock::new(None),
@@ -380,23 +369,14 @@ impl Harness {
             };
             if !effective.is_object() { return Err("opencode_config: inline configuration must be an object".into()); }
             merge(&mut effective, overlay);
+            let relay = direct::Relay::start(&self.config, &mut effective, self.connections.clone()).await?;
             // Resolve the user's global config before replacing the child's
             // XDG roots. OpenCode's config directory is independent of its
             // private data/cache/state directories.
             let global_config = inherited_global_config_dir()?;
             let mut command = Command::new(&self.config.executable);
-            let routes = self.config.routes.clone();
             let uses_deepseek_search = self.config.required_mcp.iter().any(|name| name == "deepseek-search");
-            let cancelled = Arc::new(AtomicBool::new(false));
-            let _cancel_on_drop = CredentialReadGuard(Arc::clone(&cancelled));
-            // A rebuilt, locally signed App can require fresh Keychain consent.
-            // Bound the wait so an unattended system prompt cannot hold the
-            // lifecycle gate forever. A timed-out read never launches a child;
-            // its Zeroizing values are dropped when the OS request finishes.
-            let credentials = tokio::time::timeout(Duration::from_secs(60), tokio::task::spawn_blocking(move || {
-                load_credentials_with(&routes, uses_deepseek_search, &CREDENTIAL_READ_GATE, &cancelled, secrets::load)
-            })).await.map_err(|_| "api_key_keychain_authorization_timeout: complete the macOS Keychain prompt, then retry startup")?
-                .map_err(|_| "api_key_keychain_task_failed")??;
+            let credentials = load_credentials_with(&self.config.routes, uses_deepseek_search, |account| self.keys.load(account))?;
             for (account, key) in &credentials.0 { command.env(account, key.as_str()); }
             let inherited = std::env::var("no_proxy").ok().filter(|value| !value.is_empty())
                 .or_else(|| std::env::var("NO_PROXY").ok()).unwrap_or_default();
@@ -438,7 +418,7 @@ impl Harness {
             drop(command);
             drop(credentials.0);
             let group = child.id();
-            *process = Some(ManagedProcess { child, group });
+            *process = Some(ManagedProcess { child, group, _relay: relay });
         }
         let deadline = Instant::now() + Duration::from_millis(self.config.startup_timeout_ms);
         let result = loop {
@@ -497,25 +477,22 @@ impl Harness {
         let health = if running { self.info().await } else { Err("not started".into()) };
         let routing = self.routing.lock().ok().map(|r| r.clone()).unwrap_or_default();
         let now = now_ms();
-        let configured_routes = self.config.routes.clone();
-        let key_status = tokio::task::spawn_blocking(move || configured_routes.iter().filter_map(|route| {
-            route.api_key_env.as_ref().map(|account| (account.clone(), secrets::exists(account)))
-        }).collect::<BTreeMap<_, _>>()).await.unwrap_or_default();
         let routes = self.config.routes.iter().map(|route| {
             let state = routing.routes.get(&route.id);
-            let saved = route.api_key_env.as_ref().and_then(|key| key_status.get(key));
-            let keychain_saved = saved.is_some_and(|result| matches!(result, Ok(true)));
+            let session = route.api_key_env.as_ref().is_some_and(|key| self.keys.contains(key));
             let environment_present = route.api_key_env.as_ref().is_some_and(|key| secrets::environment_present(key));
             json!({
                 "id":route.id,"label":route.label,"enabled":route.enabled,
                 "provider_id":route.provider_id,"model_id":route.model_id,
                 "credential_env":route.api_key_env,
                 "credential_env_present":route.api_key_env.as_ref().map(|_| environment_present),
-                "credential_present":keychain_saved || environment_present,
-                "keychain_saved":keychain_saved,
-                "credential_source":if keychain_saved {"keychain"} else if environment_present {"environment"} else {"none"},
-                "credential_error":saved.and_then(|result| result.as_ref().err()),
-                "credential_editable":cfg!(target_os = "macos") && self.config.mode == "managed" && route.base_url.is_some() && route.api_key_env.is_some(),
+                "credential_present":session || environment_present,
+                "session_key_set":session,
+                "credential_source":if session {"session"} else if environment_present {"environment"} else {"none"},
+                "credential_editable":self.config.mode == "managed" && route.base_url.is_some() && route.api_key_env.is_some(),
+                "direct_capable":cfg!(target_os = "macos") && self.config.mode == "managed" && route.supports_physical_network(),
+                "last_direct_request":self.connections.last(&route.id),
+                "network_mode":if self.config.provider_network == config::ProviderNetwork::ActiveInterface && route.supports_physical_network() {"active_interface"} else {"system"},
                 "inherited_provider":route.base_url.is_none(),
                 "last_failure":state.map(|s| s.last_failure),
                 "retry_at_ms":state.map(|s| s.retry_at_ms),
@@ -546,6 +523,12 @@ impl Harness {
             "retained_conversations":self.sessions.lock().map(|m| m.conversations.len()).unwrap_or(0),
             "pending_permissions":self.pending_permissions.lock().map(|m| m.len()).unwrap_or(0)
         })
+    }
+
+    pub async fn probe_direct(&self, route_id: &str) -> Result<Value, String> {
+        let route = self.config.routes.iter().find(|route| route.id == route_id).ok_or("unknown_provider_route")?;
+        if self.config.mode != "managed" { return Err("provider_interface_requires_managed".into()); }
+        direct::probe(route, &self.connections).await
     }
 
     pub fn api_key_account(&self, route_id: &str) -> Result<String, String> {
@@ -868,63 +851,12 @@ pub(super) fn now_ms() -> u64 {
 #[cfg(test)]
 mod credential_read_tests {
     use super::*;
-    use std::sync::mpsc;
-
-    #[test]
-    fn cancelled_read_does_not_request_the_next_key() {
-        let routes = HarnessConfig::default().routes;
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let worker_cancelled = Arc::clone(&cancelled);
-        let (started_tx, started_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            let gate = StdMutex::new(());
-            let mut requests = 0;
-            let result = load_credentials_with(&routes, true, &gate, &worker_cancelled, |_account| {
-                requests += 1;
-                started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                Ok(Some(zeroize::Zeroizing::new("test-key".to_owned())))
-            });
-            (result, requests)
-        });
-        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        cancelled.store(true, Ordering::Release);
-        release_tx.send(()).unwrap();
-        drop(release_tx);
-        let (result, requests) = worker.join().unwrap();
-        assert!(result.is_err());
-        assert_eq!(requests, 1);
-    }
-
-    #[test]
-    fn cancelled_waiter_does_not_start_a_keychain_request() {
-        let gate = Arc::new(StdMutex::new(()));
-        let held = gate.lock().unwrap();
-        let worker_gate = Arc::clone(&gate);
-        let worker = std::thread::spawn(move || {
-            let cancelled = AtomicBool::new(true);
-            let mut requests = 0;
-            let result = load_credentials_with(&HarnessConfig::default().routes, true, &worker_gate, &cancelled, |_account| {
-                requests += 1;
-                Ok(None)
-            });
-            (result, requests)
-        });
-        drop(held);
-        let (result, requests) = worker.join().unwrap();
-        assert!(result.is_err());
-        assert_eq!(requests, 0);
-    }
-
     #[test]
     fn search_can_use_the_deepseek_key_when_its_model_route_is_disabled() {
         let mut routes = HarnessConfig::default().routes;
         for route in &mut routes { route.enabled = false; }
-        let gate = StdMutex::new(());
-        let cancelled = AtomicBool::new(false);
         let mut requested = Vec::new();
-        let (saved, _) = load_credentials_with(&routes, true, &gate, &cancelled, |account| {
+        let (saved, _) = load_credentials_with(&routes, true, |account| {
             requested.push(account.to_owned());
             Ok(Some(zeroize::Zeroizing::new("test-key".to_owned())))
         }).unwrap();

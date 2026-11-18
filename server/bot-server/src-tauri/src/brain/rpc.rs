@@ -31,18 +31,23 @@ impl BrainHost {
                 let key = payload.get_mut("api_key").ok_or("api_key_required")?.take();
                 let Value::String(key) = key else { return Err("api_key_required".into()); };
                 let key = zeroize::Zeroizing::new(key);
-                crate::harness::secrets::validate_key(key.trim())?;
+                crate::harness::secrets::validate_key(&key)?;
                 Some(key)
             } else { None };
-            // Stop before mutation so the old child cannot keep using an outdated key.
-            // The lifecycle gate serializes this with start/reload/shutdown.
-            brain.stop().await?;
-            tokio::task::spawn_blocking(move || match key {
-                Some(key) => crate::harness::secrets::save(&account, key.trim()),
-                None => crate::harness::secrets::delete(&account),
-            }).await.map_err(|_| "api_key_keychain_task_failed")??;
+            // Swap the child's environment only between turns. The gate also prevents
+            // a new device turn from entering while OpenCode restarts; WSS stays up.
+            let _turn = brain.turn_gate.try_write().map_err(|_| "api_key_turn_in_progress")?;
+            let running = brain.accepting.load(Ordering::Acquire);
+            if running { brain.harness.stop().await?; }
+            self.keys.set(&account, key)?;
             brain.harness.reset_route(&route_id).await?;
-            return Ok(json!({"saved":method == "api_key.save","restart_required":true}));
+            if running {
+                if let Err(error) = brain.harness.start().await {
+                    brain.accepting.store(false, Ordering::Release);
+                    return Err(format!("api_key_applied_restart_failed: {error}"));
+                }
+            }
+            return Ok(json!({"session_key_set":method == "api_key.save","running":running}));
         }
         if method == "service.start" { return self.start().await; }
         if method == "service.stop" { self.stop().await?; return Ok(json!({"stopped":true})); }
@@ -168,6 +173,7 @@ impl BrainHost {
                 brain.harness.reply_permission(required(&payload,"session_id")?,required(&payload,"request_id")?,payload.get("allow").and_then(Value::as_bool).unwrap_or(false)).await?;
                 Ok(json!({"replied":true}))
             },
+            "harness.route.probe_direct" => brain.harness.probe_direct(required(&payload,"route_id")?).await,
             "harness.route.reset" => { brain.harness.reset_route(required(&payload,"route_id")?).await?; Ok(json!({"reset":true})) },
             "device.credentials.list" => brain.credentials.list(),
             "device.credentials.issue" => brain.credentials.issue(required(&payload,"device_id")?),

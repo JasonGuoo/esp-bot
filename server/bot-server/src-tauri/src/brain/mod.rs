@@ -160,7 +160,12 @@ pub struct Brain {
 }
 
 impl Brain {
+    #[cfg(test)]
     fn new(config_dir: PathBuf, worker_resource: Option<PathBuf>, sink: EventSink) -> Result<Arc<Self>, String> {
+        Self::with_keys(config_dir, worker_resource, sink, Arc::default())
+    }
+
+    fn with_keys(config_dir: PathBuf, worker_resource: Option<PathBuf>, sink: EventSink, keys: Arc<crate::harness::secrets::SessionKeys>) -> Result<Arc<Self>, String> {
         let memory_script = worker_resource.as_ref().and_then(|p|p.parent()).map(|p|p.join("memory_extract.py")).filter(|p|p.is_file());
         let graphiti_script=worker_resource.as_ref().and_then(|p|p.parent()).map(|p|p.join("graphiti_worker.py")).unwrap_or_else(||config_dir.join("engines/local-models/graphiti_worker.py"));
         let config = settings::load_or_create(&config_dir, worker_resource)?;
@@ -177,7 +182,7 @@ impl Brain {
             }
             sink(event);
         });
-        let harness = Harness::new(config.harness.clone(), runtime_dir.join("opencode"), config_dir.clone(), Arc::clone(&sink))?;
+        let harness = Harness::new(config.harness.clone(), runtime_dir.join("opencode"), config_dir.clone(), Arc::clone(&sink), keys)?;
         let memory = Store::open(runtime_dir.join("memory"), config.memory.clone())?;
         let credentials = credentials::Credentials::open(runtime_dir.join("devices"))?;
         let (cancellation_events, _) = broadcast::channel(64);
@@ -403,6 +408,7 @@ fn valid_turn_id(id: &str) -> bool { !id.is_empty() && id.len() <= 128 && id.byt
 
 /// Reloadable host remains present even when a malformed config prevents startup.
 pub struct BrainHost {
+    keys: Arc<crate::harness::secrets::SessionKeys>,
     pub config_dir: PathBuf,
     resource: Option<PathBuf>,
     sink: EventSink,
@@ -414,8 +420,9 @@ pub struct BrainHost {
 
 impl BrainHost {
     pub fn new(config_dir: PathBuf, resource: Option<PathBuf>, sink: EventSink, diagnostics: Option<DiagnosticSnapshot>) -> Arc<Self> {
-        let inner = Brain::new(config_dir.clone(), resource.clone(), Arc::clone(&sink));
-        Arc::new(Self {config_dir, resource, sink, diagnostics, inner:RwLock::new(inner), lifecycle:Mutex::new(()),
+        let keys = Arc::default();
+        let inner = Brain::with_keys(config_dir.clone(), resource.clone(), Arc::clone(&sink), Arc::clone(&keys));
+        Arc::new(Self {config_dir, resource, sink, keys, diagnostics, inner:RwLock::new(inner), lifecycle:Mutex::new(()),
             auto_start_pending:AtomicBool::new(true)})
     }
 
@@ -451,7 +458,7 @@ impl BrainHost {
         self.suppress_auto_start();
         let _lifecycle = self.lifecycle.lock().await;
         if let Ok(brain) = self.get() { brain.stop().await?; }
-        let next = Brain::new(self.config_dir.clone(), self.resource.clone(), Arc::clone(&self.sink));
+        let next = Brain::with_keys(self.config_dir.clone(), self.resource.clone(), Arc::clone(&self.sink), Arc::clone(&self.keys));
         *self.inner.write().map_err(|_|"brain_host_poisoned")? = next.clone();
         let brain = next?;
         Ok(brain.status().await)
@@ -463,4 +470,35 @@ impl BrainHost {
 #[tauri::command]
 pub async fn companion_request(host: tauri::State<'_, Arc<BrainHost>>, method: String, payload: Option<Value>) -> Result<Value,String> {
     host.dispatch(&method,payload.unwrap_or_else(||json!({}))).await
+}
+
+#[cfg(test)]
+mod key_lifecycle_tests {
+    use super::*;
+    #[tokio::test]
+    async fn key_survives_config_reload_but_not_an_app_restart() {
+        let dir = std::env::temp_dir().join(format!("xiaodai-session-test-{}", uuid::Uuid::new_v4()));
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+        let _cleanup = Cleanup(dir.clone());
+        let open = || BrainHost::new(dir.clone(), None, Arc::new(|_|{}), None);
+        let host = open();
+        let key = uuid::Uuid::new_v4().simple().to_string();
+        let payload = json!({"route_id":"glm-coding-plan", "api_key":key});
+        host.dispatch("api_key.save",payload.clone()).await.unwrap();
+        let status = host.reload().await.unwrap();
+        assert_eq!(status["harness"]["routes"][0]["credential_source"],"session");
+        assert!(!status.to_string().contains(&key));
+        let config = host.dispatch("config.read",json!({})).await.unwrap();
+        assert!(!config.to_string().contains(&key));
+        let brain = host.get().unwrap();
+        let turn = brain.turn_gate.read().await;
+        assert_eq!(host.dispatch("api_key.delete",json!({"route_id":"glm-coding-plan"})).await.unwrap_err(),"api_key_turn_in_progress");
+        drop(turn);
+        host.dispatch("api_key.delete",json!({"route_id":"glm-coding-plan"})).await.unwrap();
+        assert_eq!(brain.harness.status().await["routes"][0]["session_key_set"],false);
+        host.dispatch("api_key.save",payload).await.unwrap();
+        drop(brain); drop(host);
+        assert_eq!(open().get().unwrap().harness.status().await["routes"][0]["session_key_set"],false);
+    }
 }

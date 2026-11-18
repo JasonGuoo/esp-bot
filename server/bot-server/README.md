@@ -1,6 +1,6 @@
 # 小呆 Bot Server — Mac 控制台
 
-当前验证状态见 [2026-11-15 本机与 S31 验收](../../docs/review-acceptance-2026-11-15.md)，接续 [Review 源码修正](../../docs/review-fixes-2026-11-14.md)。已执行本机测试、签名 release 打包及真实语音链路检查；未运行 CI。Mac 直接录音的系统授权限制另列。普通设置保存不再自动停止服务；显式重载后手动启动生效。
+模型密钥、物理网卡与实板喇叭的当前状态见 [11 月 18 日验收](../../docs/review-network-speech-2026-11-18.md)。先前记录见 [2026-11-15 本机与 S31 验收](../../docs/review-acceptance-2026-11-15.md)，接续 [Review 源码修正](../../docs/review-fixes-2026-11-14.md)。已执行本机测试、签名 release 打包及真实语音链路检查；未运行 CI。Mac 直接录音的系统授权限制另列。普通设置保存不再自动停止服务；显式重载后手动启动生效。
 
 Rust + Tauri 2 桌面应用，当前唯一对话入口为“小呆”。
 界面提供固定的八个功能入口：对话、家庭成员、记忆库、模型与密钥、本地能力、工具与授权、设备连接、运行设置。
@@ -33,19 +33,16 @@ App 内嵌前端、Python worker 源码和工具示例，直接打开不依赖 V
 
 ## 在控制台配置 API Key
 
-1. 打开 **模型与密钥 → API Key**。
-2. 选择 GLM Coding Plan 或 DeepSeek Flash，粘贴对应 Key，点击 **保存密钥**。Qwen Coding Plan 保留为默认停用的可选路线。
-3. 保存后密钥输入框清空，只显示“已配置”；点击 **启动服务** 生效。
+进入 **模型与密钥 → API Key**，选中服务商后点击 **本次使用**。密钥只在当前 App 进程的内存中保存；停止服务或重载配置后仍可用，完全退出 App 后清除。也可以从带有对应环境变量的进程启动。两者都有时，本次输入优先。Bot Server 不读取、迁移或删除旧版的模型钥匙串条目，也不把输入的模型 Key 写入 JSON、日志或浏览器存储。
 
-密钥保存在本机 macOS 登录钥匙串，不写入 `brain.json`、日志或浏览器存储。
-保存或移除密钥会先停止服务，避免旧进程继续使用旧密钥。
-已保存的钥匙串密钥优先于启动环境变量；移除后已有环境变量仍可生效。
-此入口用于 managed 模式的显式 provider。attach 模式及继承的 provider 由外部 OpenCode 配置凭据。
+服务运行时，更改密钥会在两轮对话之间重启托管的 OpenCode，已连接设备保留 WSS 连接；有正在进行的对话时，先等该轮结束。配置 Key 不等于确认账户可用或额度充足。attach 模式与继承的 provider 继续由外部 OpenCode 管理。
+
+在同页选择“三家模型的网络”并保存、重载、启动后，GLM、DeepSeek、Qwen 的模型请求可绑定活动 Wi-Fi 或有线网卡。按钮“测试网卡直连”不使用额度。[网络行为及限制](../../docs/mac-opencode.md#模型走哪张网卡)。
 
 `brain.json` 位于 `~/小呆 Server/brain.json`。
 模型、端点与优先级在 **模型与密钥** 编辑；本机模型环境在 **本地能力**；启动偏好和完整 JSON 在 **运行设置**。
 **2026-11-13 默认顺序：GLM → DeepSeek Flash**；Qwen 默认停用，仍可在控制台重新启用。
-旧默认配置的升级条件见 [模型顺序迁移](../../docs/mac-opencode.md#旧配置的模型顺序升级)。更新并重新打开 App 后生效；单独拉取源码不会改变已运行的 App。本次仅修改源码和文档，没有运行测试、构建、模型请求或 CI。配置密钥不代表已确认账户额度或模型可用性。
+旧默认配置的升级条件见 [模型顺序迁移](../../docs/mac-opencode.md#旧配置的模型顺序升级)。更新并重新打开 App 后生效；单独拉取源码不会改变已运行的 App。11 月 13 日的默认顺序变更当时仅交付源码和文档。配置密钥不代表已确认账户额度或模型可用性。
 
 OpenCode 使用官方 v2.2.5 或兼容的后续 v2。此次本机安装位于被 Git 忽略的
 `runtime/bin/opencode`，不是 App 内置安装器。其他 Mac 需要自行安装并配置可执行路径。
@@ -55,7 +52,7 @@ OpenCode 使用官方 v2.2.5 或兼容的后续 v2。此次本机安装位于被
 
 - `src/companion.ts`：当前中文控制台与单一 `companion_request` IPC。
 - `src-tauri/src/brain`：主动回合、本地模型、设备 WSS v3 与控制台 API。
-- `src-tauri/src/harness`：官方 OpenCode 管理、路线、权限、取消、会话和钥匙串。
+- `src-tauri/src/harness`：官方 OpenCode 管理、路线、权限、取消、会话和本次运行的模型密钥。
 - `src-tauri/src/memory`：SQLite 档案、记忆和身份登记。
 - `local-models`：本地 ASR、身份与系统 TTS worker。
 

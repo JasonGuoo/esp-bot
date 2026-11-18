@@ -2,6 +2,8 @@
 
 更新：2026-11-13。适用硬件：ESP32-S31-Korvo-1 V1.1。
 
+2026-11-18：这台实板已接入外置喇叭，设备已设为「图文＋语音」。Server 可在「设备连接」调整音量和静音。当前设置、低音量唤醒复核和先前实际听感见[实板验收](review-network-speech-2026-11-18.md#喇叭和唤醒)。
+
 > **2026-11-16 设计更新：** 当前操作说明和已实现半双工路径仍见本文；下一阶段以[家庭陪伴设计](specs/household-companion/README.md)及[设备与声音契约](specs/household-companion/device-and-audio.md)为准。明确唤醒后由 Mac 并行处理 ASR 与声纹，家庭成员共用当天记录；任务 ACK、真实进度、最终播放分开，不把 ACK 播放完当作整轮结束。并行识别、多人分段、AEC 语音打断均为待开发能力，不能从现有“声纹模块”或本地素材数量推断已经具备。
 
 本次继续使用 **Mac 作为对话后端**：现有本地 ASR、TTS、OpenCode、身份和记忆模块负责自由对话，默认模型路由仍是 GLM → DeepSeek。设备独立负责完整「小呆小呆」唤醒、104 条内置应答、表情、固定控制命令及收音权限。本次没有新增脱离 Mac 的云端 Agent。
@@ -25,7 +27,7 @@ npm run tauri build
 open "src-tauri/target/release/bundle/macos/ESP Bot Server.app"
 ```
 
-沿用已有本机签名、Keychain、模型环境和配对配置；详见 [Mac Server 构建说明](../server/bot-server/README.md)。本次没有为升级增加 CI，也不需要重新填写已有凭据。
+沿用已有本机签名、模型环境和配对配置。新版模型密钥仅在本次运行中输入或从启动环境读取；详见 [Mac Server 构建说明](../server/bot-server/README.md)。
 
 ## 2. 设备上的「声音」页面
 

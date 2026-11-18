@@ -80,7 +80,7 @@ macOS / Unix 的进程组清理用于正常停止与对象析构；它不承诺�
 
 ### 3.3 `brain.json` 设置示例
 
-当前设置统一在 `brain.json` 中，已移除原型 `config.json` 加载器。下面是 `harness` 对象示例，其他顶层设置保留已有值。路径改成自己的 Mac 路径；Mac managed 模式可在控制台保存 Key 到钥匙串，也支持启动环境变量。
+当前设置统一在 `brain.json` 中，已移除原型 `config.json` 加载器。下面是 `harness` 对象示例，其他顶层设置保留已有值。路径改成自己的 Mac 路径；Mac managed 模式接受本次运行输入的 Key，也支持启动环境变量。
 
 ```json
 {
@@ -140,30 +140,19 @@ macOS / Unix 的进程组清理用于正常停止与对象析构；它不承诺�
 
 新默认配置不会先尝试 Qwen，因此不再经过该路线的等待后才选择 GLM。GLM 自身推理、工具执行和其他回合阶段仍有耗时；此次未测量切换后的响应速度。
 
+### 模型走哪张网卡
+
+在 **模型与密钥 → 模型设置 → 三家模型的网络** 选择网卡直连，保存并重载、启动服务。`harness.provider_network` 接受 `system`（兼容旧配置）和 `active_interface`（Mac 托管模式）。直连同时作用于已启用的 GLM、DeepSeek 和 Qwen，不改变路线顺序。三条路线需使用显式 HTTPS 端点及项目的 OpenAI 兼容适配器。
+
+OpenCode 通过仅本机可达的临时聊天端点转发；每个新请求按 macOS 服务顺序选择有活动连接、地址和路由器的 Wi-Fi 或以太网卡，IPv4/IPv6 的 TCP socket 绑定该网卡，TLS 仍验证原服务商域名。DNS 由本机解析，内置公网域名还会查询系统配置的默认 DNS，以补充 CDN 地址；这不承诺 DNS 查询也绕过 VPN。不上报密钥或请求正文，不更改系统路由，不跟随服务商重定向，也不在直连失败时退回 VPN。绑定不能创造 VPN 禁止或系统缺失的物理路由。搜索 MCP、浏览器和自定义路线按原方式联网。
+
+**测试网卡直连** 不带 Key，只对当前生效端点请求 `/models`；任何 HTTPS 状态（包括 401 或 405）只证明端点可达。“上次请求”另行显示正式模型连接使用的接口和 HTTP 状态，仅保留本次配置会话。
+
 ### 3.4 凭据与现有 provider
 
-Mac 控制台的 **模型与密钥 → API Key** 可直接保存、替换和移除三条路线的密钥。
-密钥使用 macOS 登录钥匙串，账户名为路线的 `api_key_env`，服务标识为
-`ai.reasonia.espbot.server.provider-api-keys`。JSON、日志、状态与浏览器存储不包含实际 Key。
-状态轮询只查元数据，不读取密钥正文。
+进入 **模型与密钥 → API Key**，选中服务商后点击 **本次使用**。密钥只在当前 App 进程的内存中保存；停止服务或重载配置后仍可用，完全退出 App 后清除。也可以从带有对应环境变量的进程启动。两者都有时，本次输入优先。Bot Server 不读取、迁移或删除旧版的模型钥匙串条目，也不把输入的模型 Key 写入 JSON、日志或浏览器存储。
 
-保存 / 移除会先停止 managed 服务，防止旧进程继续使用旧值；再次启动时仅向这个子进程
-注入钥匙串密钥，不修改宿主的全局环境。钥匙串优先于同名环境变量，移除钥匙串项后
-环境变量仍可能生效。attach 服务和继承的 provider 由外部 OpenCode 负责凭据。
-
-三个服务商分别是钥匙串中的独立条目。macOS 的授权按条目生效，即使对话框显示同一
-服务名称，也可能分别请求授权。选择“Allow”只允许本次读取；“Always Allow”记住
-当前签名身份对该条目的访问。临时签名绑定具体构建的代码哈希，重新构建后系统可能再次
-询问；使用稳定的开发者签名可减少更新导致的重复授权。
-
-2026-11-07 用户已同意使用本机 Apple Development 证书签名 Bot Server。构建入口
-`npm run tauri build` 从本地忽略的 `runtime/macos-signing-identity` 读取证书公开指纹，
-并交给 Tauri 的 `APPLE_SIGNING_IDENTITY`；私钥不离开钥匙串。已构建的 App 的指定要求
-使用应用标识及证书链，而非某次构建的代码哈希。切换到该身份时，已有条目可能仍需逐项
-选择一次“Always Allow”。
-
-读取超时不能强行关闭一个已经由 macOS 显示的授权请求；宿主会停止后续条目的读取，
-并串行化重新尝试，避免超时后的旧任务继续触发更多提示。它不会更改或删除已保存密钥。
+服务运行时，更改密钥会在两轮对话之间重启托管的 OpenCode，已连接设备保留 WSS 连接；有正在进行的对话时，先等该轮结束。配置 Key 不等于确认账户可用或额度充足。attach 模式与继承的 provider 继续由外部 OpenCode 管理。
 
 默认生成的三个 provider 分别读取以下环境变量的值：
 
@@ -173,7 +162,7 @@ Mac 控制台的 **模型与密钥 → API Key** 可直接保存、替换和移�
 | GLM | `GLM_CODING_PLAN_API_KEY` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
 
-程序只把变量名写入 OpenCode 配置的 `env`，由官方 provider 加载器取值。启动 bot-server 的进程需要继承这些变量。macOS GUI 应用不会因为某个终端设置过变量就自动拥有它们；可使用自己已有的安全启动流程或 OpenCode 凭据存储，不要把真实 key 写进仓库示例。
+程序只把变量名写入 OpenCode 配置的 `env`，由官方 provider 加载器取值。若未在 App 输入本次密钥，启动 bot-server 的进程需要继承这些变量。macOS GUI 应用不会因为某个终端设置过变量就自动拥有它们；可使用自己已有的安全启动流程或 OpenCode 凭据存储，不要把真实 key 写进仓库示例。
 
 如果已经在 OpenCode 中配置了 provider，可在对应路线设置：
 
@@ -200,11 +189,11 @@ Mac 控制台的 **模型与密钥 → API Key** 可直接保存、替换和移�
 | 2 | `deepseek-flash` | `https://api.deepseek.com/v1` | 备用，独立 DeepSeek API 账户，按其账户余额 / 计费规则使用 |
 | 默认停用 | `qwen3.7-plus` | `https://coding.dashscope.aliyuncs.com/v1` | 可选，阿里云中国站 Coding Plan 专用端点 |
 
-### 模型连接与 Mac 网卡
+### 旧版系统路由与 11 月 12 日的对照
 
-Bot Server 启动托管 OpenCode 时，按已启用路线的实际 `base_url`，将主机名与继承的 `no_proxy` 或 `NO_PROXY` 合并，只传给该子进程。重启托管服务后新配置生效。外部托管的 OpenCode 由其启动方设置代理。详见 [Bun fetch 的代理环境变量](https://bun.com/docs/runtime/networking/fetch)。
+在“跟随系统”模式下，Bot Server 启动托管 OpenCode 时，按已启用路线的实际 `base_url`，将主机名与继承的 `no_proxy` 或 `NO_PROXY` 合并，只传给该子进程。重启托管服务后新配置生效。外部托管的 OpenCode 由其启动方设置代理。详见 [Bun fetch 的代理环境变量](https://bun.com/docs/runtime/networking/fetch)。
 
-物理出口由 macOS 路由及 VPN 的分流规则决定。验证时用当前 DNS 解析出的对端，检查 `route -n get <对端 IP>` 的接口，再用 `lsof -nP -a -p <OpenCode PID> -iTCP` 核对真实模型连接的本地和对端地址。分别记录 TCP、TLS、首字节与含推理/工具的回合耗时。WireGuard 环境按 VPN 客户端支持的目标地址规则分流，注意共享 CDN 和地址轮换。详见 [Astrill 的站点分流说明](https://www.astrill.com/features/website-and-app-filter)。
+在这个模式中，物理出口由 macOS 路由及 VPN 的分流规则决定。验证时用当前 DNS 解析出的对端，检查 `route -n get <对端 IP>` 的接口，再用 `lsof -nP -a -p <OpenCode PID> -iTCP` 核对真实模型连接的本地和对端地址。分别记录 TCP、TLS、首字节与含推理/工具的回合耗时。WireGuard 环境按 VPN 客户端支持的目标地址规则分流，注意共享 CDN 和地址轮换。详见 [Astrill 的站点分流说明](https://www.astrill.com/features/website-and-app-filter)。
 
 11 月 12 日在这台 Mac 上实测，应用内的 OpenCode 所带 Bun 1.4.4 在本机对照端点上能遵循上述代理例外。Astrill WireGuard 在线时，三个云端点的普通 IPv4 连接最初都经 `utun6`。同一轮读表任务中，Qwen 等待 30.0 秒后中断，GLM 调用工具并在 25.7 秒后完成；设备从提交语音到图文绘制回执共约 56 秒。前者另有独立的 TLS 握手超时记录。切换物理出口后的时延需要用该出口另测。
 
@@ -285,7 +274,7 @@ OpenCode 原生 V2 的 MCP 结构是：
 
 2026-11-07 本机设置：已将不含密钥的 `server/bot-server/runtime/opencode-local-tools.json`
 保存到控制台的继承配置入口，指向本机安装的 MCP Python SDK 2.3.0、DeepSeek 适配器和
-已缓存的 Playwright MCP 0.0.83。DeepSeek 复用钥匙串中的 `DEEPSEEK_API_KEY`；即使
+已缓存的 Playwright MCP 0.0.83。当时 DeepSeek 从钥匙串取 `DEEPSEEK_API_KEY`；11 月 18 日起只用本次输入或启动环境变量。即使
 DeepSeek 模型路线被关闭，启用该搜索工具时也会为子进程提供同一 Key。
 搜索 MCP 的初始化和 `search` / `fetch` 工具发现已在本机检查，不代表已调用付费 API。
 Chrome 连接需要用户在 `chrome://inspect/#remote-debugging` 开启本实例远程调试，

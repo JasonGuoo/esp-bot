@@ -124,10 +124,9 @@ python3 scripts/configure_mac.py --inherit-config /absolute/path/opencode.jsonc
 
 ### 3.3 凭据与工具
 
-推荐直接在 **模型与密钥 → API Key** 中选择路线并保存密钥。Mac 登录钥匙串
-持久保存密钥，控制台只显示配置状态；启动 managed OpenCode 时注入子进程环境。
-保存 / 移除会停止服务，再次启动后生效。钥匙串优先于同名启动环境变量，JSON 不存实际 Key。
-也可从配置过环境变量的终端启动；Finder App 不会自动继承其他终端的 export。
+进入 **模型与密钥 → API Key**，选中服务商后点击 **本次使用**。密钥只在当前 App 进程的内存中保存；停止服务或重载配置后仍可用，完全退出 App 后清除。也可以从带有对应环境变量的进程启动。两者都有时，本次输入优先。Bot Server 不读取、迁移或删除旧版的模型钥匙串条目，也不把输入的模型 Key 写入 JSON、日志或浏览器存储。
+
+服务运行时，更改密钥会在两轮对话之间重启托管的 OpenCode，已连接设备保留 WSS 连接；有正在进行的对话时，先等该轮结束。配置 Key 不等于确认账户可用或额度充足。attach 模式与继承的 provider 继续由外部 OpenCode 管理。 从 Finder 启动的 App 不会自动继承其他终端的 `export`。
 
 `browser` 和 `deepseek-search` 由 OpenCode 的配置加载器继承。缺少时界面显示缺少，
 不会虚构可用工具。可选安装方法与 v2 配置示例在

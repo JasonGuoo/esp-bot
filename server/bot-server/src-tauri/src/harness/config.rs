@@ -9,6 +9,14 @@ use serde_json::{json, Map, Value};
 pub const SOURCE_VERSION: &str = "2.2.5";
 pub const AGENT_ID: &str = "xiaodai";
 const PACKAGE: &str = "@opencode/ai/providers/openai-compatible";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderNetwork {
+    #[default]
+    System,
+    ActiveInterface,
+}
 /// V2 permission action names for built-ins currently supported by the
 /// console's per-operation approval bridge. Other actions stay denied until
 /// their interaction and lifecycle are explicitly integrated.
@@ -19,6 +27,7 @@ pub const NATIVE_ACTIONS: &[&str] = &["read", "glob", "grep", "edit", "shell", "
 pub struct HarnessConfig {
     /// `managed` starts our own process; `attach` uses a separately configured server.
     pub mode: String,
+    pub provider_network: ProviderNetwork,
     pub executable: String,
     /// Literal loopback only. Do not expose the OpenCode API on the robot LAN.
     pub base_url: String,
@@ -85,10 +94,21 @@ impl Default for ModelRoute {
     }
 }
 
+impl ModelRoute {
+    pub(super) fn physical_network_target(&self) -> bool {
+        matches!(self.id.as_str(), "glm-coding-plan" | "deepseek-flash" | "qwen-coding-plan")
+    }
+
+    pub(super) fn supports_physical_network(&self) -> bool {
+        self.physical_network_target() && self.package == PACKAGE && self.base_url.is_some()
+    }
+}
+
 impl Default for HarnessConfig {
     fn default() -> Self {
         Self {
             mode: "managed".into(), executable: "opencode".into(),
+            provider_network: ProviderNetwork::System,
             base_url: "http://127.0.0.1:4097".into(),
             working_directory: None, inherit_config: None,
             password_env: "XIAODAI_OPENCODE_PASSWORD".into(),
@@ -159,7 +179,11 @@ impl HarnessConfig {
     pub(super) fn provider_no_proxy(&self, inherited: &str) -> String {
         let mut entries: Vec<String> = inherited.split(',').map(str::trim)
             .filter(|entry| !entry.is_empty()).map(str::to_owned).collect();
+        if self.provider_network == ProviderNetwork::ActiveInterface {
+            if !entries.iter().any(|entry| entry == "127.0.0.1") { entries.push("127.0.0.1".into()); }
+        }
         for route in self.routes.iter().filter(|route| route.enabled) {
+            if self.provider_network == ProviderNetwork::ActiveInterface && route.physical_network_target() { continue; }
             let Some(url) = route.base_url.as_deref().and_then(|base| reqwest::Url::parse(base).ok()) else { continue };
             if let Some(host) = url.host_str() {
                 if !entries.iter().any(|entry| entry.eq_ignore_ascii_case(host)) {
@@ -173,6 +197,14 @@ impl HarnessConfig {
     pub fn validate(&self) -> Result<reqwest::Url, String> {
         if self.mode != "managed" && self.mode != "attach" {
             return Err("opencode_config: mode must be managed or attach".into());
+        }
+        if self.provider_network == ProviderNetwork::ActiveInterface {
+            if !cfg!(target_os = "macos") || self.mode != "managed" {
+                return Err("provider_direct_mode: 网卡直连需要在 Mac 上由小呆托管 OpenCode".into());
+            }
+            if self.routes.iter().any(|route| route.enabled && route.physical_network_target() && !route.supports_physical_network()) {
+                return Err("provider_direct_endpoint: 启用直连的路线需要明确的 HTTPS 端点和 OpenAI 兼容协议".into());
+            }
         }
         let url = reqwest::Url::parse(&self.base_url)
             .map_err(|_| "opencode_config: invalid base_url".to_owned())?;
