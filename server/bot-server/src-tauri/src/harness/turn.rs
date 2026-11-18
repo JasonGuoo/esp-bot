@@ -314,6 +314,9 @@ impl Harness {
             if event_session != Some(session) { continue; }
             if kind == "session.inbox.delivered" {
                 if data["inboxID"].as_str() == Some(input) {
+                    if !delivered {
+                        self.emit(json!({"kind":"harness_prompt_delivered","turn_id":request.turn_id}));
+                    }
                     delivered = true;
                 } else if delivered {
                     return Err(AttemptFailure::transport("another inbox item entered the active turn"));

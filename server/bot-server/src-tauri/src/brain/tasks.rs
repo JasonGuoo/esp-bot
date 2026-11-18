@@ -580,6 +580,7 @@ impl TaskService{
         tx.commit().map_err(db_error)?;Ok(())
     }
     pub fn plan(&self,id:&str,revision:Option<u32>)->Result<PresentationPlan,String>{
+        if self.redacting.load(Ordering::Acquire){return Err("task_source_update_in_progress".into());}
         let plan=self.load_plan(id,revision)?;
         if !self.source_current(&plan.context.conversation_turn_id)?{return Err("presentation_source_invalidated".into());}
         let db=self.db.lock().map_err(|_|"task_database_lock")?;if presentation_sources_invalidated(&db,id)?{return Err("presentation_source_invalidated".into());}Ok(plan)

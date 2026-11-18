@@ -115,7 +115,8 @@ struct bot_audio {
     int64_t afe_fetch_wait_since_us;
     int64_t raw_speech_until_us; /* raw-energy observation, never retained PCM */
     uint32_t keyword_policy_epoch, controls_attempt_revision;
-    bool keyword_policy_commands, retry_afe_requested;
+    bot_keyword_policy_t keyword_policy_commands;
+    bool retry_afe_requested;
     int64_t afe_recovery_due_us;
     bool playback_requested, playback_cancelled, playback_end_enqueued;
     bool echo_reset_pending;
@@ -267,7 +268,7 @@ static void apply_controls(bot_audio_t *a)
     esp_err_t volume_error = esp_codec_dev_set_out_vol(a->codec, settings.volume_percent);
     esp_err_t err = volume_error;
     if (err == ESP_OK && a->afe.keyword.data)
-        err = bot_audio_keyword_set_policy(&a->afe.keyword, a->afe.keyword.commands_enabled,
+        err = bot_audio_keyword_set_policy(&a->afe.keyword, a->afe.keyword.policy,
                                            settings.wake_threshold_percent);
     if (err == ESP_OK && a->afe.wake_backend == BOT_AUDIO_WAKE_BACKEND_WAKENET) {
         if (!a->afe.iface || !a->afe.iface->set_wakenet_threshold ||
@@ -956,9 +957,12 @@ static bool fetch_frame(bot_audio_t *a)
     uint32_t detection_gate = a->gate_epoch;
     bot_audio_wake_backend_t backend = a->status.wake_backend;
     bool healthy = a->run && a->capture_good && !echo_blocked_locked(a, now);
-    bool command_mode = a->status.session_open && a->session_options.local_commands &&
+    bool graph_allowed = a->status.session_open &&
         epoch != 0 && epoch == detection_gate && !a->status.rx_discard_frames &&
         !a->status.command_consumed && !a->buffer_overflow_latched;
+    bot_keyword_policy_t command_mode = !graph_allowed ? BOT_KEYWORD_WAKE_ONLY :
+        a->session_options.stop_only ? BOT_KEYWORD_STOP_ONLY :
+        a->session_options.local_commands ? BOT_KEYWORD_COMMANDS : BOT_KEYWORD_WAKE_ONLY;
     bool wake_cooldown_clear =
         (!a->last_wake_us || now - a->last_wake_us >= (int64_t)a->config.wake_debounce_ms * 1000);
     uint8_t threshold = a->status.controls_applied.wake_threshold_percent;
@@ -1012,8 +1016,11 @@ static bool fetch_frame(bot_audio_t *a)
         (a->session_options.retain_start || a->session_options.deliver_pcm || a->session_options.local_commands);
     const bool waiting_for_followup = a->waiting_for_followup;
     bool command_allowed = detected >= BOT_VOICE_COMMAND_VOLUME_UP &&
-        detected <= BOT_VOICE_COMMAND_UNMUTE && command_mode && vad_allowed &&
-        a->session_options.local_commands && detection_gate == a->gate_epoch && same_token(&a->session, &token);
+        detected <= BOT_VOICE_COMMAND_UNMUTE && detection_gate == a->gate_epoch && epoch == detection_gate &&
+        a->run && a->capture_good && a->status.session_open && !a->status.command_consumed && !echo_block &&
+        same_token(&a->session, &token) &&
+        ((command_mode == BOT_KEYWORD_COMMANDS && vad_allowed && a->session_options.local_commands) ||
+         (command_mode == BOT_KEYWORD_STOP_ONLY && a->session_options.stop_only && detected == BOT_VOICE_COMMAND_STOP));
     bool wake_allowed = wake && a->run && a->capture_good &&
         a->status.wake_status == BOT_AUDIO_WAKE_READY && detection_gate == a->gate_epoch && !echo_block &&
         (!a->last_wake_us || now - a->last_wake_us >= (int64_t)a->config.wake_debounce_ms * 1000);
@@ -1452,7 +1459,7 @@ open_codec:
     a->afe_epoch = a->afe_reset_requested = 0;
     a->keyword_epoch = 0;
     a->keyword_policy_epoch = 0;
-    a->keyword_policy_commands = false;
+    a->keyword_policy_commands = BOT_KEYWORD_WAKE_ONLY;
     a->controls_attempt_revision = 0;
     a->retry_afe_requested = false;
     a->afe_recovery_due_us = 0;
@@ -1544,7 +1551,7 @@ esp_err_t bot_audio_set_session_ex(bot_audio_t *a, const bot_audio_token_t *toke
         a->session_options.deliver_pcm == next.deliver_pcm &&
         a->session_options.retain_start == next.retain_start &&
         a->session_options.waiting_for_followup == next.waiting_for_followup &&
-        a->session_options.local_commands == next.local_commands;
+        a->session_options.local_commands == next.local_commands && a->session_options.stop_only == next.stop_only;
     if (unchanged) {
         UNLOCK(a);
         return ESP_OK;
@@ -1552,7 +1559,9 @@ esp_err_t bot_audio_set_session_ex(bot_audio_t *a, const bot_audio_token_t *toke
     bot_audio_token_t old_token = a->session;
     bool was_ready = a->status.capture_ready;
     bool capture_requested = next.retain_start || next.deliver_pcm || next.local_commands;
-    if (!same_session) {
+    if (!same_session || a->session_options.stop_only != next.stop_only) {
+        /* Drop frames from before the wait policy changed. In particular a
+         * word in the submitted question cannot stop the pending answer. */
         if (++a->gate_epoch == 0) ++a->gate_epoch;
         a->status.rx_discard_frames = token ? a->dma_frames + a->capture_samples : 0;
         a->afe_reset_requested = 0;

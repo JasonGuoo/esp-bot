@@ -389,10 +389,15 @@ static void command(bot_command_kind_t kind, bot_session_token_t token, const ch
     }
     if (bot_bus_submit_command(s_bus,&c,0)!=ESP_OK) fail_operation(token,"Secure response queue full");
 }
-static void progress_command(bot_session_token_t token, bool waiting_for_approval) {
+static void progress_command(bot_session_token_t token, bot_wait_stage_t stage, const char *preview) {
     bot_command_t c={.kind=BOT_COMMAND_PROGRESS,.token=token,
         .received_ms=(uint32_t)(esp_timer_get_time()/1000),.ttl_ms=2000};
-    c.data.waiting_for_approval=waiting_for_approval;
+    c.wait_stage=stage;
+    if (preview) {
+        size_t n=strnlen(preview,BOT_CAPTION_MAX_BYTES);
+        while (n && ((unsigned char)preview[n]&0xc0)==0x80) --n;
+        memcpy(c.data.caption,preview,n); c.data.caption[n]=0;
+    }
     if (bot_bus_submit_command(s_bus,&c,0)!=ESP_OK) fail_operation(token,"Secure response queue full");
 }
 static bool array_has_string(cJSON *array, const char *value) {
@@ -406,6 +411,7 @@ static const char *request_error(cJSON *root) {
     cJSON *error=cJSON_GetObjectItemCaseSensitive(root,"error");
     cJSON *code=cJSON_GetObjectItemCaseSensitive(error,"code");
     const char *name=cJSON_IsString(code)?code->valuestring:"";
+    if (!strcmp(name,"all_routes_unavailable")) return "请在 Mac 上配置可用模型";
     if (!strcmp(name,"asr_no_speech")) return "没听清，请再说一次";
     if (!strcmp(name,"brain_busy")) return "小呆正在处理别的事，请稍后再试";
     if (!strcmp(name,"brain_not_started")) return "请先在 Mac 上启动小呆服务";
@@ -852,9 +858,11 @@ static void text_message(const char *data,size_t n) {
             presentation_segment(root,token);
         } else if (!strcmp(event->valuestring,"turn.accepted") && fresh && phase==COMMITTED) {
             bot_session_token_t returned;
-            if (json_token(cJSON_GetObjectItemCaseSensitive(root,"runtime"),&returned) && same(returned,token)) {
-                command(BOT_COMMAND_THINKING,token,NULL);
-                command(BOT_COMMAND_SET_CAPTION,token,"正在处理");
+            if (cJSON_IsString(id) && json_token(cJSON_GetObjectItemCaseSensitive(root,"runtime"),&returned) && same(returned,token)) {
+                portENTER_CRITICAL(&s_lock);
+                bool matched=s.phase==COMMITTED && !strcmp(id->valuestring,s.commit_id);
+                portEXIT_CRITICAL(&s_lock);
+                if (matched) command(BOT_COMMAND_THINKING,token,NULL);
             }
         } else if (!strcmp(event->valuestring,"turn.progress") && fresh && phase==COMMITTED && cJSON_IsString(id)) {
             bot_session_token_t returned;
@@ -865,15 +873,22 @@ static void text_message(const char *data,size_t n) {
             if (!json_token(cJSON_GetObjectItemCaseSensitive(root,"runtime"),&returned) || !same(returned,token) ||
                 !cJSON_IsNumber(seq) || seq->valuedouble<1 || seq->valuedouble>4294967295.0 ||
                 seq->valuedouble!=(double)(uint32_t)seq->valuedouble || !cJSON_IsString(stage)) goto done;
-            const char *message=NULL;
-            bool approval=false;
-            if (!strcmp(stage->valuestring,"transcribing")) message="正在听懂";
-            else if (!strcmp(stage->valuestring,"understood")) message=cJSON_IsString(preview)?preview->valuestring:"听懂了";
-            else if (!strcmp(stage->valuestring,"working")) message="正在处理";
-            else if (!strcmp(stage->valuestring,"awaiting_parent")) {message="请在 Mac 上确认";approval=true;}
-            else if (!strcmp(stage->valuestring,"preparing_image")) message="正在准备图片";
-            else if (!strcmp(stage->valuestring,"synthesizing")) message="正在准备语音";
-            if (!message) goto done;
+            const char *wire=stage->valuestring;
+            bot_wait_stage_t status=BOT_WAIT_NONE;
+            if (!strcmp(wire,"transcribing")) status=BOT_WAIT_TRANSCRIBING;
+            else if (!strcmp(wire,"understood")) status=BOT_WAIT_UNDERSTOOD;
+            else if (!strcmp(wire,"working")) status=BOT_WAIT_WORKING;
+            else if (!strcmp(wire,"awaiting_parent")) status=BOT_WAIT_APPROVAL;
+            else if (!strcmp(wire,"preparing_image")) status=BOT_WAIT_IMAGE;
+            else if (!strcmp(wire,"synthesizing")) status=BOT_WAIT_SPEECH;
+            if (!status) goto done;
+            cJSON *activity=cJSON_GetObjectItemCaseSensitive(payload,"activity");
+            if (cJSON_IsString(activity)) {
+                if (!strcmp(activity->valuestring,"model")) status=BOT_WAIT_MODEL;
+                else if (!strcmp(activity->valuestring,"composing")) status=BOT_WAIT_COMPOSING;
+                else if (!strcmp(activity->valuestring,"tool")) status=BOT_WAIT_TOOL;
+                else if (!strcmp(activity->valuestring,"answer")) status=BOT_WAIT_ANSWER;
+            }
             portENTER_CRITICAL(&s_lock);
             bool valid=s.phase==COMMITTED && s.authenticated && s.active && same(s.desired,returned) &&
                 same(s.remote,returned) && !strcmp(id->valuestring,s.commit_id) &&
@@ -882,8 +897,8 @@ static void text_message(const char *data,size_t n) {
             if (valid) s.progress_seq=(uint32_t)seq->valuedouble;
             portEXIT_CRITICAL(&s_lock);
             if (valid) {
-                progress_command(token,approval);
-                command(BOT_COMMAND_SET_CAPTION,token,message);
+                const char *text=(status==BOT_WAIT_UNDERSTOOD || status==BOT_WAIT_ANSWER) && cJSON_IsString(preview) ? preview->valuestring : NULL;
+                progress_command(token,status,text);
             }
         } else if (!strcmp(event->valuestring,"audio.complete") && fresh && phase==PLAYING) {
             /* TCP and WSS are independent; the authenticated plain-audio end
@@ -1144,9 +1159,9 @@ static void runtime_json(char *out,size_t capacity,bot_session_token_t t) {
         (unsigned long)t.epoch,(unsigned long)t.session_id,(unsigned long)t.turn_id,(unsigned long)t.focus_generation);
 }
 static void request_id(char *out,size_t capacity) { snprintf(out,capacity,"r%lu",(unsigned long)++s_request); }
-static bool simple_request(const char *method) {
-    char msg[180], id[24]; request_id(id,sizeof(id));
-    snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"%s\",\"payload\":{}}",id,method);
+static bool cancel_request(const char *method, bot_session_token_t token) {
+    char msg[320], id[24], runtime[180]; request_id(id,sizeof(id));runtime_json(runtime,sizeof(runtime),token);
+    snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"%s\",\"payload\":{\"runtime\":%s}}",id,method,runtime);
     return send_text(msg);
 }
 static void volume_status_poll(const secure_state_t *state) {
@@ -1604,7 +1619,7 @@ static void secure_task(void *unused) {
             plain_close();
             if (state.phase!=READY && state.phase!=WELCOME) {
                 flush_pcm();
-                if (!simple_request("session.close")) {vTaskDelay(pdMS_TO_TICKS(30));continue;}
+                if (!cancel_request("session.close",state.remote)) {vTaskDelay(pdMS_TO_TICKS(30));continue;}
                 portENTER_CRITICAL(&s_lock); if (s.authenticated) {s.phase=READY;s.remote=(bot_session_token_t){0};s.audio_allowed=false;} portEXIT_CRITICAL(&s_lock);
             }
             heard=false;ending=false;vTaskDelay(pdMS_TO_TICKS(30));continue;
@@ -1638,7 +1653,7 @@ static void secure_task(void *unused) {
         } else if (state.remote.session_id!=state.desired.session_id) {
             capture_event(state.remote,false);
             plain_close();flush_pcm();
-            if (!simple_request("session.close")) {vTaskDelay(pdMS_TO_TICKS(30));continue;}
+            if (!cancel_request("session.close",state.remote)) {vTaskDelay(pdMS_TO_TICKS(30));continue;}
             portENTER_CRITICAL(&s_lock);s.phase=READY;s.audio_allowed=false;s.remote=(bot_session_token_t){0};portEXIT_CRITICAL(&s_lock);
             heard=false;ending=false;
         } else if (!same(state.remote,state.desired)) {
@@ -1646,7 +1661,7 @@ static void secure_task(void *unused) {
             capture_event(state.remote,false);
             plain_close();flush_pcm();
             if (!(state.phase==WAIT_NEXT && state.followup_armed && !state.cancel_before_next)) {
-                if (!simple_request("assistant.cancel")) {vTaskDelay(pdMS_TO_TICKS(30));continue;}
+                if (!cancel_request("assistant.cancel",state.remote)) {vTaskDelay(pdMS_TO_TICKS(30));continue;}
             }
             portENTER_CRITICAL(&s_lock);s.remote=state.desired;s.audio_allowed=false;s.cancel_before_next=false;s.phase=OPEN;portEXIT_CRITICAL(&s_lock);
             heard=false;ending=false;
@@ -1716,7 +1731,7 @@ static void secure_task(void *unused) {
                 heard=false;ending=false;
             }
         } else if (state.phase==COMMITTED && esp_timer_get_time()-state.commit_started_us>=180000000) {
-            bool cancelled=simple_request("assistant.cancel");
+            bool cancelled=cancel_request("assistant.cancel",state.remote);
             portENTER_CRITICAL(&s_lock);s.cancel_before_next=!cancelled;portEXIT_CRITICAL(&s_lock);
             finish_with_message(state.remote,"处理超时，请再试一次",true);
         } else if (state.phase==PLAYBACK_PENDING) {

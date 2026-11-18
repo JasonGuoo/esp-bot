@@ -48,7 +48,13 @@ impl Drop for RunningGateway {
 }
 
 struct TurnTask(JoinHandle<()>);
-impl TurnTask { fn abort(&self) { self.0.abort(); } }
+impl TurnTask {
+    fn abort(&self) { self.0.abort(); }
+    async fn stop(&mut self) {
+        self.abort();
+        let _ = (&mut self.0).await;
+    }
+}
 impl Drop for TurnTask { fn drop(&mut self) { self.0.abort(); } }
 
 struct OnlinePeer { id:String, devices:Arc<StdMutex<BTreeMap<String, usize>>> }
@@ -329,21 +335,41 @@ fn device_audio_counts(payload:&Value, sent_frames:u32, sent_bytes:usize)->Resul
 }
 struct ActivePeer {
     turn_id:String, request_id:String, token:RuntimeToken, task:TurnTask,
-    progress_seq:u32, last_stage:Option<&'static str>, last_progress:Instant,
+    progress_seq:u32, last_stage:Option<FeedbackStage>, last_progress:Instant,
 }
 
-fn progress_stage(event: &Value) -> Option<&'static str> {
-    match event["kind"].as_str()? {
-        "turn.transcribing" => Some("transcribing"),
-        "turn.understood" => Some("understood"),
-        "turn.preparing_image" => Some("preparing_image"),
-        "turn.synthesizing" => Some("synthesizing"),
-        "turn.thinking" | "harness_permission_replied" => Some("working"),
-        "harness_tool_activity" if matches!(event["phase"].as_str(),
-            Some("session.tool.called" | "session.tool.success" | "session.tool.failed" | "session.shell.started")) => Some("working"),
-        "harness_permission_required" | "harness_question_required" => Some("awaiting_parent"),
-        _ => None,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FeedbackStage(&'static str, Option<&'static str>);
+impl FeedbackStage {
+    fn payload(self, seq:u32, preview:Option<&str>, heartbeat:bool)->Value {
+        let mut payload=json!({"seq":seq,"stage":self.0});
+        if let Some(activity)=self.1 {payload["activity"]=json!(activity);}
+        if heartbeat {payload["still_working"]=json!(true);}
+        else if self.0=="understood" || self.1==Some("answer") {
+            if let Some(text)=preview {payload["preview"]=json!(text.chars().take(80).collect::<String>());}
+        }
+        payload
     }
+}
+fn progress_stage(event: &Value) -> Option<FeedbackStage> {
+    let (stage,activity)=match event["kind"].as_str()? {
+        "turn.transcribing" => ("transcribing",None),
+        "turn.understood" => ("understood",None),
+        "turn.preparing_image" => ("preparing_image",None),
+        "turn.synthesizing" => ("synthesizing",None),
+        "turn.thinking" | "harness_permission_replied" => ("working",None),
+        "harness_prompt_delivered" => ("working",Some("model")),
+        "harness_first_text" => ("working",Some("composing")),
+        "turn.answer_preview" => ("working",Some("answer")),
+        "harness_tool_activity" => match event["phase"].as_str()? {
+            "session.tool.called" | "session.shell.started" => ("working",Some("tool")),
+            "session.tool.success" | "session.tool.failed" => ("working",None),
+            _=>return None,
+        },
+        "harness_permission_required" | "harness_question_required" => ("awaiting_parent",None),
+        _ => return None,
+    };
+    Some(FeedbackStage(stage,activity))
 }
 
 fn reject(status:StatusCode,reason:&str)->ErrorResponse {
@@ -423,13 +449,14 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                     if let (Some(turn),Some(stage))=(active.as_mut(),progress_stage(&event)) {
                         if event["turn_id"].as_str()==Some(turn.turn_id.as_str()) &&
                             engagement.as_ref().is_some_and(|session|session.output.is_some()) {
+                            if stage.1==Some("answer") {
+                                let Some(id)=event.pointer("/payload/presentation_id").and_then(Value::as_str) else {continue;};
+                                if !brain.memory.pending_household_cleanup()?.is_empty() || brain.tasks.plan(id,None).is_err() {continue;}
+                            }
                             if turn.last_stage==Some(stage) && turn.last_progress.elapsed()<Duration::from_secs(1) {continue;}
                             turn.last_stage=Some(stage);turn.last_progress=Instant::now();
                             turn.progress_seq=turn.progress_seq.saturating_add(1);
-                            let mut payload=json!({"seq":turn.progress_seq,"stage":stage});
-                            if stage=="understood" {
-                                if let Some(preview)=event.pointer("/payload/preview").and_then(Value::as_str) {payload["preview"]=json!(preview);}
-                            }
+                            let payload=stage.payload(turn.progress_seq,event.pointer("/payload/preview").and_then(Value::as_str),false);
                             let update=json!({"v":3,"type":"event","event":"turn.progress",
                                 "id":turn.request_id,"runtime":turn.token,"payload":payload});
                             if send(&mut socket,Message::Text(update.to_string())).await.is_err(){break;}
@@ -441,9 +468,9 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                 let turn=active.as_mut().ok_or("active_turn_missing")?;
                 if turn.last_progress.elapsed()>=Duration::from_secs(8) && engagement.as_ref().is_some_and(|session|session.output.is_some()) {
                     turn.last_progress=Instant::now();turn.progress_seq=turn.progress_seq.saturating_add(1);
-                    let stage=turn.last_stage.unwrap_or("working");
+                    let stage=turn.last_stage.unwrap_or(FeedbackStage("working",None));
                     let event=json!({"v":3,"type":"event","event":"turn.progress","id":turn.request_id,"runtime":turn.token,
-                        "payload":{"seq":turn.progress_seq,"stage":stage,"still_working":true}});
+                        "payload":stage.payload(turn.progress_seq,None,true)});
                     if send(&mut socket,Message::Text(event.to_string())).await.is_err(){break;}
                 }
             },
@@ -757,8 +784,18 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     Ok(response)
                                 },
                                 "assistant.cancel"|"session.close"=>{
-                                    if let Some(turn)=active.take(){
-                                        let _=brain.cancel(Some(&turn.turn_id)).await;turn.task.abort();
+                                    // Older clients omit runtime and use ordered WSS. A tagged stop must
+                                    // match exactly; never revoke the next question because of a late tap.
+                                    if frame.payload.get("runtime").is_some() {
+                                        let token=parse_runtime(&frame.payload)?;
+                                        if engagement.as_ref().is_none_or(|e| e.token!=token) {return Err("stale_runtime".into());}
+                                    }
+                                    if let Some(mut turn)=active.take(){
+                                        // Abort/join only the local producer. Dropping its guards retires
+                                        // the owned OpenCode session and schedules its exact interrupt;
+                                        // a slow provider must not occupy the device control socket.
+                                        turn.task.stop().await;
+                                        brain.emit("turn.cancelled",Some(&turn.turn_id),json!({"code":"device_stop"}));
                                         send(&mut socket,Message::Text(cancelled_response(&turn))).await?;
                                     }
                                     if let Some(session)=&engagement{brain.tasks.revoke_outputs(Some(&session.conversation_id))?;}
@@ -782,7 +819,9 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         None=>{plain=None;None},
                                         _=>return Err("audio_transport_unsupported".into()),
                                     };
-                                    audio=Some((media::AudioInput::new(stream),token));session.last_user=Instant::now();
+                                    audio=Some((media::AudioInput::new(stream),token));
+                                    session.token=token;
+                                    session.last_user=Instant::now();
                                     Ok(json!({"stream_id":stream,"runtime":token,"max_bytes":media::MAX_INPUT_PCM,"plain_audio":plain_config}))
                                 },
                                 "audio.playback.ready"=>{
@@ -888,14 +927,14 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         if audio.is_some(){return Err("audio_capture_in_progress".into());}
                                         (Some(frame.payload.get("text").and_then(Value::as_str).ok_or("text_required")?.to_owned()),None)
                                     }else{
+                                        let (capture,capture_token)=audio.as_mut().ok_or("audio_session_required")?;
+                                        if token!=*capture_token || capture.stream_id!=stream_id(&frame.payload)? {return Err("audio_session_mismatch".into());}
                                         if let Some(transport)=plain.as_mut() {
                                             let expected=frame.payload.get("frames").and_then(Value::as_u64)
                                                 .and_then(|n|u32::try_from(n).ok()).ok_or("audio_frame_count_required")?;
-                                            let capture=&mut audio.as_mut().ok_or("audio_session_required")?.0;
                                             finish_plain_input(transport,capture,expected).await?;
                                         }
-                                        let (capture,capture_token)=audio.take().ok_or("audio_session_required")?;
-                                        if token!=capture_token || capture.stream_id!=stream_id(&frame.payload)?{return Err("audio_session_mismatch".into());}
+                                        let (capture,_)=audio.take().ok_or("audio_session_required")?;
                                         (None,Some(capture.wav_base64()?))
                                     };
                                     session.token=token;session.last_turn=Some(token.turn_id);session.last_user=Instant::now();
@@ -937,7 +976,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
             },
         }
     }
-    if let Some(turn)=active.take(){let _=brain.cancel(Some(&turn.turn_id)).await;turn.task.abort();}
+    if let Some(turn)=active.take(){turn.task.abort();}
     if let Some(session)=&engagement{let _=brain.tasks.revoke_outputs(Some(&session.conversation_id));}
     brain.device_activity(&device_id,json!({"phase":"disconnected","cancellable":false}));
     let _=send(&mut socket, Message::Close(None)).await;
@@ -986,6 +1025,28 @@ async fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_transcripts_and_frozen_answers_carry_preview_text() {
+        let full="字".repeat(100);
+        for (kind,expected,caption) in [
+            ("turn.understood",FeedbackStage("understood",None),true),
+            ("harness_prompt_delivered",FeedbackStage("working",Some("model")),false),
+            ("harness_first_text",FeedbackStage("working",Some("composing")),false),
+            ("turn.answer_preview",FeedbackStage("working",Some("answer")),true),
+        ] {
+            let stage=progress_stage(&json!({"kind":kind})).unwrap();
+            assert_eq!(stage,expected);
+            let value=stage.payload(3,Some(&full),false);
+            assert_eq!(value["preview"].as_str().map(|s|s.chars().count()),caption.then_some(80));
+            let heartbeat=stage.payload(4,Some(&full),true);
+            assert_eq!(heartbeat["activity"],value["activity"]);
+            assert_eq!(heartbeat["still_working"],true);
+            assert!(heartbeat.get("preview").is_none());
+        }
+        assert!(progress_stage(&json!({"kind":"harness_text_delta","delta":"raw JSON"})).is_none());
+    }
+
 
     #[test]
     fn playback_receipts_distinguish_device_counts_from_transmitted_and_planned_audio() {
@@ -1192,6 +1253,23 @@ mod tests {
         // Brain wasn't started, so the test never invokes ASR or a cloud model.
         let rejected_turn:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(rejected_turn["id"],"commit1");assert_eq!(rejected_turn["ok"],false);
+        // A re-ask owns its new token from audio.begin, including before commit.
+        let new_token=json!({"epoch":8,"session_id":12,"turn_id":2,"focus_generation":0});
+        let old_token=json!({"epoch":7,"session_id":12,"turn_id":1,"focus_generation":0});
+        let fresh_audio=json!({"stream_id":124,"format":"pcm_s16le","sample_rate":16000,"channels":1,"runtime":new_token});
+        for (id,method,payload,error) in [
+            ("begin2","audio.begin",fresh_audio.clone(),None),
+            ("late-stop","assistant.cancel",json!({"runtime":old_token}),Some("stale_runtime")),
+            ("bad-commit","audio.commit",json!({"stream_id":123,"runtime":new_token}),Some("audio_session_mismatch")),
+            ("duplicate-begin","audio.begin",fresh_audio,Some("session_busy")),
+            ("stop2","assistant.cancel",json!({"runtime":new_token}),None),
+        ] {
+            socket.send(Message::Text(json!({"v":3,"type":"request","id":id,"method":method,"payload":payload}).to_string())).await.unwrap();
+            let reply:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(reply["id"],id);
+            assert_eq!(reply["ok"],error.is_none(),"{reply}");
+            assert_eq!(reply["error"]["code"].as_str(),error);
+        }
         socket.close(None).await.unwrap();brain.stop().await.unwrap();
         assert!(TcpStream::connect(&address).await.is_err());drop(brain);
     }

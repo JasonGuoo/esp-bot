@@ -213,6 +213,7 @@ static void end_session(bot_runtime_t *runtime, uint32_t now_ms, session_end_rea
             "处理已超时，请再试一次" : "本次收音已结束，点一下可再问";
         memcpy(runtime->state.reading_notice, notice, strlen(notice) + 1);
     }
+    runtime->state.wait_stage = BOT_WAIT_NONE;
     runtime->waiting_for_approval = false;
     runtime->reply_presented = false;
     runtime->remote_audio_done = false;
@@ -245,6 +246,7 @@ static void end_session(bot_runtime_t *runtime, uint32_t now_ms, session_end_rea
 static bool begin_turn(bot_runtime_t *runtime, uint32_t now_ms)
 {
     bot_session_token_t old = runtime->state.token;
+    runtime->state.wait_stage = BOT_WAIT_NONE;
     runtime->waiting_for_approval = false;
     runtime->reply_presented = false;
     runtime->remote_audio_done = false;
@@ -297,6 +299,7 @@ static bool arm_followup(bot_runtime_t *runtime, uint32_t now_ms)
     runtime->response_playback_done = false;
     runtime->reply_presented = runtime->remote_audio_done = false;
     runtime->presentation_done_pending = false;
+    runtime->state.wait_stage = BOT_WAIT_NONE;
     runtime->waiting_for_approval = false;
     runtime->state.caption[0] = '\0';
     runtime->state.last_interaction_ms = now_ms;
@@ -310,6 +313,7 @@ static bool arm_followup(bot_runtime_t *runtime, uint32_t now_ms)
 static bool begin_session(bot_runtime_t *runtime, uint32_t now_ms)
 {
     runtime->manual_sleep = false;
+    runtime->state.wait_stage = BOT_WAIT_NONE;
     runtime->waiting_for_approval = false;
     runtime->reply_presented = false;
     runtime->remote_audio_done = false;
@@ -687,6 +691,17 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         mark_wake(runtime, event, now_ms);
         break;
     case BOT_EVENT_TOUCH_WAKE:
+        /* The explicit replace button belongs only to the turn it was drawn for.
+         * Do not let a delayed click start a new session or interrupt another turn. */
+        if (event->token.session_id) {
+            if (stopped_this_step || !event->data.touch.intentional || !is_active(runtime) ||
+                state->settings_open || state->critical_fault || !token_matches(runtime,&event->token,false) ||
+                (state->conversation!=BOT_CONVERSATION_SUBMITTED && state->conversation!=BOT_CONVERSATION_THINKING &&
+                 state->conversation!=BOT_CONVERSATION_SPEAKING)) { state->rejected_events++; break; }
+            dismiss_result(state);
+            if (begin_turn(runtime,now_ms)) state->activation=BOT_ACTIVATION_TOUCH;
+            break;
+        }
         if (state->critical_fault && runtime->overflow_fault && event->data.touch.intentional) {
             runtime->recovery_requested = true;
             break; /* Recovery consumes the touch; a second action may wake. */
@@ -811,7 +826,9 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
             state->local_response_active || !state->audio_available ||
             !token_matches(runtime, &event->token, false) ||
             (state->conversation != BOT_CONVERSATION_LISTENING &&
-             state->conversation != BOT_CONVERSATION_WAITING) ||
+             state->conversation != BOT_CONVERSATION_WAITING &&
+             !(event->data.local_command.command == BOT_VOICE_COMMAND_STOP && !state->playback_id &&
+               (state->conversation == BOT_CONVERSATION_THINKING || state->conversation == BOT_CONVERSATION_SUBMITTED))) ||
             !bot_voice_command_valid(event->data.local_command.command) ||
             !isfinite(event->data.local_command.score) || event->data.local_command.score < 0 ||
             event->data.local_command.score > 1) {
@@ -900,6 +917,9 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         state->utterance_active = false;
         state->capture_ready = state->transport_ready = false;
         state->conversation = BOT_CONVERSATION_SUBMITTED;
+        state->wait_started_ms = now_ms;
+        state->wait_stage = BOT_WAIT_SENDING;
+        state->caption[0] = 0;
         state->last_interaction_ms = now_ms;
         reset_expression(runtime);
         break;
@@ -1167,6 +1187,9 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
              state->conversation != BOT_CONVERSATION_SUBMITTED &&
              state->conversation != BOT_CONVERSATION_THINKING))
             return BOT_COMMAND_REJECTED_INVALID;
+        if (state->wait_stage == BOT_WAIT_NONE) state->wait_started_ms = now_ms;
+        if (state->wait_stage == BOT_WAIT_NONE || state->wait_stage == BOT_WAIT_SENDING)
+            state->wait_stage = BOT_WAIT_WORKING;
         state->conversation = BOT_CONVERSATION_THINKING;
         state->last_interaction_ms = now_ms;
         runtime->waiting_for_approval = false;
@@ -1181,6 +1204,7 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
             return BOT_COMMAND_REJECTED_INVALID;
         memcpy(state->reading_text, command->data.caption, sizeof(state->reading_text));
         state->reading_token = state->token;
+        state->wait_stage = BOT_WAIT_NONE;
         state->reading_sequence = command->presentation_sequence;
         state->reading_notice[0] = state->image_notice[0] = '\0';
         if (state->conversation != BOT_CONVERSATION_SPEAKING)
@@ -1238,7 +1262,14 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
     case BOT_COMMAND_PROGRESS:
         if (state->utterance_active || state->conversation != BOT_CONVERSATION_THINKING)
             return BOT_COMMAND_REJECTED_INVALID;
-        runtime->waiting_for_approval = command->data.waiting_for_approval;
+        if (command->wait_stage <= BOT_WAIT_NONE || command->wait_stage > BOT_WAIT_ANSWER ||
+            (command->data.caption[0] && !valid_text(command->data.caption, sizeof(command->data.caption)))) return BOT_COMMAND_REJECTED_INVALID;
+        /* Progress never advances a presentation or replaces an already displayed answer. */
+        if (state->wait_stage != BOT_WAIT_NONE) {
+            state->wait_stage = command->wait_stage;
+            if (command->data.caption[0]) memcpy(state->caption,command->data.caption,sizeof(state->caption));
+        }
+        runtime->waiting_for_approval = command->wait_stage == BOT_WAIT_APPROVAL;
         state->last_interaction_ms = now_ms;
         break;
     case BOT_COMMAND_END_SESSION:

@@ -27,6 +27,10 @@
 
 #if CONFIG_BOT_AUDIO_MULTINET_WAKE_FALLBACK
 typedef struct { bot_voice_command_t id; const char *phrase; } local_phrase_t;
+static bool command_allowed(bot_keyword_policy_t policy, bot_voice_command_t id)
+{
+    return policy == BOT_KEYWORD_COMMANDS || (policy == BOT_KEYWORD_STOP_ONLY && id == BOT_VOICE_COMMAND_STOP);
+}
 static const local_phrase_t s_commands[] = {
     {BOT_VOICE_COMMAND_VOLUME_UP, "sheng yin da yi dian"},
     {BOT_VOICE_COMMAND_VOLUME_DOWN, "sheng yin xiao yi dian"},
@@ -95,7 +99,7 @@ esp_err_t bot_audio_keyword_open(bot_audio_keyword_t *keyword, char *model_name,
     }
     clear_frame(keyword);
     if (esp_mn_commands_alloc(mn, keyword->data) != ESP_OK ||
-        bot_audio_keyword_set_policy(keyword, false, CONFIG_BOT_AUDIO_MULTINET_THRESHOLD_PERCENT) != ESP_OK) {
+        bot_audio_keyword_set_policy(keyword, BOT_KEYWORD_WAKE_ONLY, CONFIG_BOT_AUDIO_MULTINET_THRESHOLD_PERCENT) != ESP_OK) {
         bot_audio_keyword_close(keyword);
         return ESP_FAIL;
     }
@@ -118,48 +122,50 @@ esp_err_t bot_audio_keyword_open(bot_audio_keyword_t *keyword, char *model_name,
 #endif
 }
 
-esp_err_t bot_audio_keyword_set_policy(bot_audio_keyword_t *keyword, bool commands_enabled,
+esp_err_t bot_audio_keyword_set_policy(bot_audio_keyword_t *keyword, bot_keyword_policy_t policy,
                                        uint8_t wake_threshold_percent)
 {
 #if CONFIG_BOT_AUDIO_MULTINET_WAKE_FALLBACK
     if (!keyword->data || !keyword->iface) return ESP_ERR_NOT_SUPPORTED;
     if (wake_threshold_percent < BOT_VOICE_WAKE_THRESHOLD_MIN ||
         wake_threshold_percent > BOT_VOICE_WAKE_THRESHOLD_MAX) return ESP_ERR_INVALID_ARG;
-    if (keyword->available && keyword->commands_enabled == commands_enabled &&
+    if (keyword->available && keyword->policy == policy &&
         keyword->threshold_percent == wake_threshold_percent) return ESP_OK;
     bot_audio_keyword_reset(keyword);
-    const bool rebuild = !keyword->available || keyword->commands_enabled != commands_enabled;
+    const bool rebuild = !keyword->available || keyword->policy != policy;
     keyword->available = false;
     unsigned native_percent = wake_threshold_percent;
-    if (commands_enabled && native_percent > CONFIG_BOT_AUDIO_LOCAL_COMMAND_THRESHOLD_PERCENT)
+    if (policy != BOT_KEYWORD_WAKE_ONLY && native_percent > CONFIG_BOT_AUDIO_LOCAL_COMMAND_THRESHOLD_PERCENT)
         native_percent = CONFIG_BOT_AUDIO_LOCAL_COMMAND_THRESHOLD_PERCENT;
     /* A separate top-result gate retains the wake/command-specific threshold. */
     if (keyword->iface->set_det_threshold(keyword->data, native_percent / 100.0f) < 0) return ESP_FAIL;
     if (rebuild) {
         if (esp_mn_commands_clear() != ESP_OK ||
             esp_mn_commands_add(WAKE_COMMAND_ID, BOT_AUDIO_MULTINET_COMMAND) != ESP_OK) return ESP_FAIL;
-        if (commands_enabled) {
-            for (size_t i = 0; i < sizeof(s_commands) / sizeof(s_commands[0]); ++i)
-                if (esp_mn_commands_add(s_commands[i].id, s_commands[i].phrase) != ESP_OK) return ESP_FAIL;
+        size_t expected=1;
+        for (size_t i=0; i<sizeof(s_commands)/sizeof(s_commands[0]); ++i) {
+            if (!command_allowed(policy,s_commands[i].id)) continue;
+            if (esp_mn_commands_add(s_commands[i].id, s_commands[i].phrase) != ESP_OK) return ESP_FAIL;
+            ++expected;
         }
         if (esp_mn_commands_update() != NULL) return ESP_FAIL;
-        const size_t expected = 1 + (commands_enabled ? sizeof(s_commands) / sizeof(s_commands[0]) : 0);
-        for (size_t i = 0; i < expected; ++i) {
-            esp_mn_phrase_t *phrase = esp_mn_commands_get_from_index((int)i);
-            int id = i ? s_commands[i - 1].id : WAKE_COMMAND_ID;
-            const char *text = i ? s_commands[i - 1].phrase : BOT_AUDIO_MULTINET_COMMAND;
-            if (!phrase || phrase->command_id != id || !phrase->string || strcmp(phrase->string, text))
-                return ESP_ERR_INVALID_STATE;
+        size_t pos=0;
+        esp_mn_phrase_t *phrase=esp_mn_commands_get_from_index((int)pos++);
+        if (!phrase || phrase->command_id!=WAKE_COMMAND_ID || !phrase->string || strcmp(phrase->string,BOT_AUDIO_MULTINET_COMMAND)) return ESP_ERR_INVALID_STATE;
+        for (size_t i=0; i<sizeof(s_commands)/sizeof(s_commands[0]); ++i) {
+            if (!command_allowed(policy,s_commands[i].id)) continue;
+            phrase=esp_mn_commands_get_from_index((int)pos++);
+            if (!phrase || phrase->command_id!=s_commands[i].id || !phrase->string || strcmp(phrase->string,s_commands[i].phrase)) return ESP_ERR_INVALID_STATE;
         }
         if (esp_mn_commands_get_from_index((int)expected) != NULL) return ESP_ERR_INVALID_STATE;
     }
-    keyword->commands_enabled = commands_enabled;
+    keyword->policy = policy;
     keyword->threshold_percent = wake_threshold_percent;
     keyword->available = true;
     return ESP_OK;
 #else
     (void)keyword;
-    (void)commands_enabled;
+    (void)policy;
     (void)wake_threshold_percent;
     return ESP_ERR_NOT_SUPPORTED;
 #endif
@@ -232,7 +238,8 @@ int bot_audio_keyword_detect(bot_audio_keyword_t *keyword, int16_t *samples, siz
                  * The exact graph/strings are already verified when installed. */
                 if (id == WAKE_COMMAND_ID &&
                     result->prob[0] >= keyword->threshold_percent / 100.0f) accepted = id;
-                if (keyword->commands_enabled && bot_voice_command_valid((bot_voice_command_t)id) &&
+                if (command_allowed(keyword->policy,(bot_voice_command_t)id) &&
+                    bot_voice_command_valid((bot_voice_command_t)id) &&
                     result->prob[0] >= CONFIG_BOT_AUDIO_LOCAL_COMMAND_THRESHOLD_PERCENT / 100.0f) accepted = id;
             }
             if (accepted) keyword->last_score = result->prob[0];

@@ -45,10 +45,15 @@ impl Delivery {
         let spoken=if pcm.is_some() && frozen.speech_asset_id.is_some() && !frozen.speech.is_empty() && frozen.speech==speech{Some(speech.clone())}else{None};
         self.current_visual_unavailable=frozen.wait_for_first_frame && frozen.visual["kind"]!="none" && image.is_none();
         while speech.len()>DEVICE_CAPTION_BYTES {speech.pop();}
+        // The retained caption remains readable after a voice-only answer. The
+        // hardware's actual playback and display receipts still gate follow-up.
+        let voice_only=final_segment && spoken.is_some() && image.is_none() && segment.scene.cards.is_empty()
+            && segment.media_kind.is_none() && frozen.visual["kind"]=="none" && !frozen.wait_for_first_frame;
+        let hold_ms=if voice_only {0} else {segment.dwell_ms.min(30_000)};
         self.current_rendered=Some(spoken.unwrap_or_else(||speech.clone()));
         let mut payload=json!({"presentation_id":self.plan.presentation_id,"presentation_index":self.index,"output_lease_id":self.lease_id,
             "segment_id":segment.segment_id,"seq":self.current_seq,"purpose":purpose,"final":final_segment,
-            "hold_ms":segment.dwell_ms.min(30_000),"scene":{"speech":speech,"expression":segment.scene.expression,"cards":cards},"audio":descriptor});
+            "hold_ms":hold_ms,"scene":{"speech":speech,"expression":segment.scene.expression,"cards":cards},"audio":descriptor});
         if let Some(kind)=&segment.media_kind{payload["media_kind"]=json!(kind);}
         self.receipt_sequence+=1;
         let current=brain.tasks.record_receipt(crate::brain::presentation::PlaybackReceipt{
@@ -136,7 +141,7 @@ pub(super) async fn prepare_task(brain:Arc<Brain>,task:crate::brain::tasks::Task
                 // audible, factual introduction. It is a separate frozen
                 // segment, never a rewrite of an existing media soundtrack.
                 let speech=task.result["summary"].as_str().unwrap_or("这份图文资料已经准备好了。");
-                let (intro,mut spoken,_)=brain.prepare_presentation(plan.context.clone(),scene_for(speech,"happy"),None,&[],"",true,&[]).await?;
+                let (intro,mut spoken,_)=brain.prepare_presentation(plan.context.clone(),scene_for(speech,"happy"),None,&[],"",true,&[],None).await?;
                 let mut semantic=intro.segments;semantic.extend(plan.segments);
                 plan.segments=semantic;plan.presentation_id=format!("presentation_{}",uuid::Uuid::new_v4().simple());
                 use sha2::{Digest,Sha256};
@@ -160,7 +165,7 @@ pub(super) async fn prepare_task(brain:Arc<Brain>,task:crate::brain::tasks::Task
     let context=crate::brain::presentation::PlanContext{household_id:task.household_id,daily_conversation_id:task.daily_conversation_id,
         conversation_turn_id:task.conversation_turn_id,task_id:Some(task.task_id)};
     let expression=if matches!(task.state,crate::brain::tasks::TaskState::Succeeded|crate::brain::tasks::TaskState::Partial){"happy"}else{"thinking"};
-    let (plan,segments,_)=brain.prepare_presentation(context,scene_for(&summary,expression),None,&[],"",true,&[]).await?;
+    let (plan,segments,_)=brain.prepare_presentation(context,scene_for(&summary,expression),None,&[],"",true,&[],None).await?;
     Ok((plan,segments))
 }
 

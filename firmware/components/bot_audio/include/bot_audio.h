@@ -126,7 +126,8 @@ typedef struct {
     bool deliver_pcm;             /* current authenticated transport is ready */
     bool retain_start;            /* explicit post-wake, same-token RAM capture */
     bool waiting_for_followup;    /* stricter VAD onset; no implicit token change */
-    bool local_commands;          /* fixed local commands only in an active session */
+    bool local_commands;          /* fixed local commands only in an active listening session */
+    bool stop_only;               /* submitted/quiet wait: local keyword only, never VAD or PCM */
 } bot_audio_session_options_t;
 
 typedef struct {

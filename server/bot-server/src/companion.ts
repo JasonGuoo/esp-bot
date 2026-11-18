@@ -194,7 +194,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   function phase(value: Phase, description?: string, expression?: string): void {
     const defaults: Record<Phase, string> = {
       idle: "聊一聊，或者一起发现一个小原理。", listening: "正在录音，只听你这一次主动说的话。",
-      thinking: "我想一想，也查一查需要的资料…", speaking: "小呆正在说话。", error: "这一步没完成，可以看看提示。",
+      thinking: "收到，我在想怎么回答。", speaking: "小呆正在说话。", error: "这一步没完成，可以看看提示。",
     };
     $("#cc-phase").textContent = description ?? defaults[value];
     $("#cc-phase").hidden = panel !== "talk" && value === "idle";
@@ -1587,7 +1587,11 @@ export function mountCompanion(container: HTMLElement): CompanionController {
           }
         }
         if (kind === "turn.transcribing") status.textContent = "正在转写设备语音";
-        else if (kind === "turn.thinking") status.textContent = "正在处理请求";
+        else if (kind === "turn.understood") status.textContent = `听到：${string(object(data.payload).preview)}`;
+        else if (kind === "turn.thinking") status.textContent = "已收到问题";
+        else if (kind === "harness_prompt_delivered") status.textContent = "正在等待模型回答";
+        else if (kind === "harness_first_text") status.textContent = "正在组织回答";
+        else if (kind === "turn.answer_preview") status.textContent = string(object(data.payload).preview);
         else if (kind === "harness_permission_required") status.textContent = "等待在 Mac 上确认工具操作";
         else if (kind === "harness_question_required") status.textContent = "等待在 Mac 上回答问题";
         else if (kind === "harness_tool_activity" && data.phase === "session.tool.called") status.textContent = `正在使用工具 ${string(data.tool)}`;
@@ -1629,6 +1633,9 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       if (routeMetric) addActivity(routeMetric);
       if (kind === "turn.transcribing") phase("thinking", "先在 Mac 上听懂这句话…");
       else if (kind === "turn.thinking") phase("thinking");
+      else if (kind === "harness_prompt_delivered") phase("thinking", "问题已送到，正在等回答。你可以随时停止。");
+      else if (kind === "harness_first_text") phase("thinking", "正在组织回答。");
+      else if (kind === "turn.answer_preview") phase("thinking", string(object(data.payload).preview));
       else if (kind === "turn.synthesizing") phase("thinking", "正在用本地声音准备回复…");
       else if (kind === "harness_permission_required") phase("thinking", "有一项操作需要家长确认。");
       else if (kind === "harness_question_required") phase("thinking", "小呆在等你的回答。");

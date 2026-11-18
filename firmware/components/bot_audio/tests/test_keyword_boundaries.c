@@ -42,8 +42,16 @@ int main(void) {
     detect_at = 1;
     result.command_id[0] = BOT_VOICE_COMMAND_VOLUME_UP;
     assert(bot_audio_keyword_detect(&keyword, pcm, 512, -20.0f, true, true) == 0);
-    keyword.commands_enabled = true;
+    keyword.policy = BOT_KEYWORD_COMMANDS;
     assert(bot_audio_keyword_detect(&keyword, pcm, 512, -20.0f, true, true) == BOT_VOICE_COMMAND_VOLUME_UP);
+    keyword.policy = BOT_KEYWORD_STOP_ONLY;
+    assert(bot_audio_keyword_detect(&keyword, pcm, 512, -20.0f, true, true) == 0);
+    result.command_id[0] = BOT_VOICE_COMMAND_STOP;
+    assert(bot_audio_keyword_detect(&keyword, pcm, 512, -20.0f, true, false) == 0);
+    result.prob[0] = 0.40f;
+    assert(bot_audio_keyword_detect(&keyword, pcm, 512, -20.0f, true, true) == 0);
+    result.prob[0] = 0.95f;
+    assert(bot_audio_keyword_detect(&keyword, pcm, 512, -20.0f, true, true) == BOT_VOICE_COMMAND_STOP);
     result.command_id[0] = 999;
     assert(bot_audio_keyword_detect(&keyword, pcm, 512, -20.0f, true, true) == 0);
     puts("PASS keyword frame retention, VAD boundaries, permission closure and invalid energy");

@@ -27,7 +27,8 @@ struct face_view {
     char result_value[384];
     char result_status_value[384], result_image_notice_value[384];
     lv_obj_t *gear_button, *gear_icon;
-    lv_obj_t *stop_button, *stop_icon;
+    lv_obj_t *stop_button, *stop_icon, *replace_button, *replace_label, *wait_status;
+    char wait_text[80];
     face_settings_t *settings;
     const face_theme_t *theme;
     face_render_state_t state;
@@ -84,6 +85,9 @@ static void paint_chrome(face_view_t *f) {
     lv_obj_set_style_text_color(f->gear_icon, lv_color_hex(t->chrome_text), 0);
     lv_obj_set_style_bg_color(f->stop_button, lv_color_hex(t->subtitle_bg), 0);
     lv_obj_set_style_text_color(f->stop_icon, lv_color_hex(t->chrome_text), 0);
+    lv_obj_set_style_bg_color(f->replace_button,lv_color_hex(t->subtitle_bg),0);
+    lv_obj_set_style_text_color(f->replace_label,lv_color_hex(t->chrome_text),0);
+    lv_obj_set_style_text_color(f->wait_status,lv_color_hex(t->subtitle_text),0);
     if (f->result_panel) {
         lv_obj_set_style_bg_color(f->result_panel, lv_color_hex(t->subtitle_bg), 0);
         lv_obj_set_style_text_color(f->result_text, lv_color_hex(t->subtitle_text), 0);
@@ -127,7 +131,9 @@ static void draw_face(face_view_t *f) {
     lv_obj_set_size(f->result_body, body_w, h - body_y - 26);
     lv_obj_align(f->result_close, LV_ALIGN_TOP_RIGHT, -12, 6);
     lv_obj_align(f->gear_button, LV_ALIGN_TOP_RIGHT, -24, 22);
-    lv_obj_align(f->stop_button, LV_ALIGN_TOP_LEFT, 24, 22);
+    lv_obj_align(f->stop_button, LV_ALIGN_TOP_LEFT, 24, 16);
+    lv_obj_align(f->replace_button, LV_ALIGN_TOP_LEFT, 132, 16);
+    lv_obj_align(f->wait_status, LV_ALIGN_TOP_MID, 0, h*72/100);
     if (f->settings && (w != f->last_layout_w || h != f->last_layout_h)) {
         face_settings_layout(f->settings, w, h);
         f->last_layout_w = w;
@@ -204,6 +210,10 @@ static void tap_face(lv_event_t *event) {
         face_reveal_settings(f);
         emit(f, FACE_EVENT_TOUCH);
     }
+}
+
+static void ask_again(lv_event_t *event) {
+    emit(lv_event_get_user_data(event), FACE_EVENT_ASK_AGAIN);
 }
 
 static void stop_pressed(lv_event_t *event) {
@@ -314,6 +324,10 @@ face_view_t *face_create(lv_obj_t *parent) {
     visible(f->caption_bar, false);
     visible(f->caption, false);
 
+    f->wait_status = lv_label_create(f->root);
+    lv_obj_set_style_text_font(f->wait_status,&xiaodai_font_sc_30,0);
+    lv_label_set_text_static(f->wait_status,f->wait_text);
+    visible(f->wait_status,false);
     f->result_panel = lv_obj_create(f->root);
     lv_obj_set_style_radius(f->result_panel, 14, 0);
     lv_obj_set_style_border_width(f->result_panel, 0, 0);
@@ -367,15 +381,25 @@ face_view_t *face_create(lv_obj_t *parent) {
     visible(f->gear_button, false);
 
     f->stop_button = lv_button_create(f->root);
-    lv_obj_set_size(f->stop_button, 54, 46);
+    lv_obj_set_size(f->stop_button, 96, 50);
     lv_obj_set_style_radius(f->stop_button, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(f->stop_button, 0, 0);
     lv_obj_set_style_shadow_width(f->stop_button, 0, 0);
     lv_obj_add_event_cb(f->stop_button, stop_pressed, LV_EVENT_PRESSED, f);
     f->stop_icon = lv_label_create(f->stop_button);
-    lv_label_set_text(f->stop_icon, LV_SYMBOL_STOP);
+    lv_obj_set_style_text_font(f->stop_icon,&xiaodai_font_sc_30,0);
+    lv_label_set_text(f->stop_icon, "停止");
     lv_obj_center(f->stop_icon);
     visible(f->stop_button, false);
+    f->replace_button = lv_button_create(f->root);
+    lv_obj_set_size(f->replace_button,124,50);
+    lv_obj_set_style_radius(f->replace_button,LV_RADIUS_CIRCLE,0);
+    lv_obj_set_style_shadow_width(f->replace_button,0,0);
+    f->replace_label=lv_label_create(f->replace_button);
+    lv_obj_set_style_text_font(f->replace_label,&xiaodai_font_sc_30,0);
+    lv_label_set_text(f->replace_label,"重新说"); lv_obj_center(f->replace_label);
+    lv_obj_add_event_cb(f->replace_button,ask_again,LV_EVENT_CLICKED,f);
+    visible(f->replace_button,false);
 
     f->settings = face_settings_create(f->root, applied_from_settings, f);
     if (!f->settings) {
@@ -635,6 +659,15 @@ void face_on_event(face_view_t *f, face_event_cb_t callback, void *context) {
     if (!f) return;
     f->on_event = callback;
     f->event_context = context;
+}
+void face_set_turn_controls(face_view_t *f,bool replace,const char *status) {
+    if (!f) return;
+    visible(f->replace_button,replace);
+    if (!status) status="";
+    if (!strcmp(f->wait_text,status)) return;
+    lv_strlcpy(f->wait_text,status,sizeof(f->wait_text));
+    lv_label_set_text_static(f->wait_status,f->wait_text);
+    visible(f->wait_status,f->wait_text[0]!=0);
 }
 void face_set_stop_visible(face_view_t *f, bool show) {
     if (f) visible(f->stop_button, show);

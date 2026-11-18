@@ -895,8 +895,66 @@ static void test_managed_playback_does_not_arm_followup(bool completion_arrives_
     bot_runtime_destroy(runtime);
 }
 
+static void test_wait_feedback_and_interruption(bool replace)
+{
+    bot_bus_t bus = {0};
+    bot_runtime_t *runtime = NULL;
+    bot_runtime_snapshot_t state;
+    assert(bot_runtime_create(&bus, NULL, NULL, NULL, 1000, &runtime) == ESP_OK);
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_AUDIO_HEALTH, .source=BOT_SOURCE_AUDIO,
+        .observed_ms=1010, .data.health={.available=true}});
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_LINK_STATE, .source=BOT_SOURCE_LINK,
+        .observed_ms=1020, .data.link={.connected=true,.authenticated=true,.encrypted=true}});
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE, .source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1030, .data.touch={.intentional=true}});
+    bot_runtime_get_snapshot(runtime, &state);
+    bot_session_token_t token = state.token;
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_UTTERANCE_STARTED,.source=BOT_SOURCE_AUDIO,.observed_ms=1040,.token=token});
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_UTTERANCE_ENDED,.source=BOT_SOURCE_AUDIO,.observed_ms=1050,.token=token});
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_TURN_SUBMITTED,.source=BOT_SOURCE_LINK,.observed_ms=1060,.token=token});
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.wait_stage == BOT_WAIT_SENDING && state.wait_started_ms == 1060);
+    bus.command=(bot_command_t){.kind=BOT_COMMAND_THINKING,.received_ms=1070,.token=token};
+    bus.has_command=true; bot_runtime_step(runtime,1070);
+    bus.command=(bot_command_t){.kind=BOT_COMMAND_PROGRESS,.received_ms=1080,.token=token,
+        .wait_stage=BOT_WAIT_UNDERSTOOD,.data.caption="苹果怎么说"};
+    bus.has_command=true; bot_runtime_step(runtime,1080);
+    bus.command=(bot_command_t){.kind=BOT_COMMAND_PROGRESS,.received_ms=1090,.token=token,.wait_stage=BOT_WAIT_MODEL};
+    bus.has_command=true; bot_runtime_step(runtime,1090);
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_LOCAL_COMMAND,.source=BOT_SOURCE_AUDIO,.observed_ms=1100,
+        .token=token,.data.local_command={.command=BOT_VOICE_COMMAND_SLEEP,.score=.95f}});
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(state.wait_stage==BOT_WAIT_MODEL && !strcmp(state.caption,"苹果怎么说") && state.wait_started_ms==1060);
+    assert(!state.audio_uplink_permitted && state.conversation==BOT_CONVERSATION_THINKING);
+    if (replace) {
+        bus.command=(bot_command_t){.kind=BOT_COMMAND_PRESENTATION_SEGMENT,.received_ms=1110,.token=token,
+            .presentation_sequence=1,.data.caption="旧回答"};
+        bus.has_command=true; bot_runtime_step(runtime,1110);
+        bot_runtime_get_snapshot(runtime,&state);
+        assert(state.reading_token.turn_id==token.turn_id);
+        post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,.source=BOT_SOURCE_LOCAL_UI,
+            .observed_ms=1120,.token=token,.data.touch={.intentional=true}});
+        bus.command=(bot_command_t){.kind=BOT_COMMAND_REPLY_DONE,.received_ms=1130,.token=token,.data.caption="迟到的回答"};
+        bus.has_command=true; bot_runtime_step(runtime,1130);
+        post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,.source=BOT_SOURCE_LOCAL_UI,
+            .observed_ms=1140,.token=token,.data.touch={.intentional=true}});
+        bot_runtime_get_snapshot(runtime,&state);
+        assert(state.token.turn_id==token.turn_id+1 && state.token.epoch!=token.epoch);
+        assert(state.conversation==BOT_CONVERSATION_LISTENING && !*state.reading_text && !*state.caption);
+    } else {
+        post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_LOCAL_COMMAND,.source=BOT_SOURCE_AUDIO,.observed_ms=1110,
+            .token=token,.data.local_command={.command=BOT_VOICE_COMMAND_STOP,.score=.95f}});
+        bot_runtime_get_snapshot(runtime,&state);
+        assert(!state.token.session_id && state.conversation==BOT_CONVERSATION_NONE);
+    }
+    assert(state.wait_stage==BOT_WAIT_NONE);
+    bot_runtime_destroy(runtime);
+}
+
 int main(void)
 {
+    test_wait_feedback_and_interruption(false);
+    test_wait_feedback_and_interruption(true);
     bot_bus_t bus = {0};
     bot_runtime_t *runtime = NULL;
     bot_runtime_snapshot_t state;

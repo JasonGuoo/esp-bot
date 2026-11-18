@@ -71,6 +71,23 @@ impl PresentationPlanner{
     }
 }
 
+impl PresentationPlan {
+    /// A complete first sentence from the frozen text. Never cut a clause or
+    /// publish content whose meaning depends on visual delivery.
+    pub fn answer_lead(&self) -> Option<&str> {
+        let first=self.segments.first()?;
+        if first.wait_for_first_frame || first.visual_required || first.visual["kind"]!="none" {return None;}
+        let text=first.speech.trim();
+        let end=text.char_indices().find(|(_,c)|matches!(c,'。'|'！'|'？'|'!'|'?'|'\n'))
+            .map(|(i,c)|i+c.len_utf8());
+        // An unpunctuated segment may end only because the planner hit its
+        // size limit. The last word alone cannot establish a sentence boundary.
+        if end.is_none() && self.segments.len()>1 {return None;}
+        let lead=text[..end.unwrap_or(text.len())].trim();
+        (!lead.is_empty() && lead.chars().count()<=80).then_some(lead)
+    }
+}
+
 fn segment(speech:&str,expression:&str,visual:Value,required:bool,dwell:u64)->PresentationSegment{
     let references_visual=["看这里","这张图","图中","红色箭头","look here","in this picture"].iter().any(|s|speech.contains(s));
     PresentationSegment{segment_id:format!("segment_{}",uuid::Uuid::new_v4().simple()),speech:speech.into(),caption:speech.into(),expression:expression.into(),
@@ -93,3 +110,28 @@ pub fn split_speech(text:&str,limit:usize)->Vec<String>{
 pub fn proposal_schema()->Value{json!({"type":"object","additionalProperties":false,"properties":{"segments":{"type":"array","maxItems":16,"items":{
     "type":"object","properties":{"speech":{"type":"string","maxLength":200},"expression":{"type":"string","enum":crate::face_catalog_generated::EXPRESSION_IDS},
     "visual":{"type":"object"},"visual_required":{"type":"boolean"}},"required":["speech","expression","visual","visual_required"]}}},"required":["segments"]})}
+
+#[cfg(test)]
+mod feedback_tests {
+    use super::*;
+
+    #[test]
+    fn preview_requires_a_complete_independent_sentence() {
+        let context=PlanContext{household_id:"home".into(),daily_conversation_id:"day".into(),conversation_turn_id:"turn".into(),task_id:None};
+        let scene=Scene{speech:"先说结论。再解释。".into(),expression:"happy".into(),cards:vec![]};
+        let mut plan=PresentationPlanner::default().freeze(context,&scene,None,false).unwrap();
+        assert_eq!(plan.answer_lead(),Some("先说结论。"));
+        plan.segments[0].speech="很".repeat(90)+"。";
+        assert_eq!(plan.answer_lead(),None);
+        plan.segments[0].speech="第一段还没有讲完".into();
+        plan.segments.push(plan.segments[0].clone());
+        assert_eq!(plan.answer_lead(),None);
+        plan.segments.pop();
+        plan.segments[0].speech="看这里。".into();
+        plan.segments[0].wait_for_first_frame=true;
+        assert_eq!(plan.answer_lead(),None);
+        plan.segments[0].wait_for_first_frame=false;
+        plan.segments[0].visual=json!({"kind":"diagram"});
+        assert_eq!(plan.answer_lead(),None);
+    }
+}

@@ -70,7 +70,8 @@ typedef struct {
     bool utterance_seen;        /* sticky for this token after an accepted VAD START */
     bool local_response_active; /* queued/playing wake acknowledgement; microphone gate closed */
     uint32_t playback_id; /* current local playback operation; zero means none */
-    uint32_t last_interaction_ms;
+    bot_wait_stage_t wait_stage; /* never an output lease or a playback receipt */
+    uint32_t wait_started_ms, last_interaction_ms;
     uint32_t rejected_commands, rejected_events;
     char expression[BOT_EXPRESSION_MAX_BYTES + 1];
     char caption[BOT_CAPTION_MAX_BYTES + 1];

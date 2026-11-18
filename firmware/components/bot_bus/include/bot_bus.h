@@ -122,8 +122,16 @@ typedef enum {
     BOT_COMMAND_PRESENTATION_DONE /* local receipt collector: every final output completed */
 } bot_command_kind_t;
 
+/* Local, non-terminal foreground feedback. Unknown wire stages never enter the runtime. */
+typedef enum {
+    BOT_WAIT_NONE, BOT_WAIT_SENDING, BOT_WAIT_WORKING, BOT_WAIT_TRANSCRIBING,
+    BOT_WAIT_UNDERSTOOD, BOT_WAIT_MODEL, BOT_WAIT_COMPOSING, BOT_WAIT_TOOL,
+    BOT_WAIT_APPROVAL, BOT_WAIT_IMAGE, BOT_WAIT_SPEECH, BOT_WAIT_ANSWER
+} bot_wait_stage_t;
+
 typedef struct {
     uint32_t request_id;
+    bot_wait_stage_t wait_stage;
     bot_command_kind_t kind;
     bot_session_token_t token;
     uint32_t received_ms;        /* stamped by local ingress, never remote uptime */
@@ -132,7 +140,6 @@ typedef struct {
     union {
         char expression[BOT_EXPRESSION_MAX_BYTES + 1];
         char caption[BOT_CAPTION_MAX_BYTES + 1];
-        bool waiting_for_approval;
     } data;
 } bot_command_t;
 

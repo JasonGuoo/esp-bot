@@ -99,6 +99,7 @@ typedef struct {
     uint8_t last_local_hour;
     uint32_t last_clock_poll_ms, last_diagnostic_ms, last_light_poll_ms, last_audio_retry_ms;
     char rendered_caption[BOT_CAPTION_MAX_BYTES + 1];
+    bot_session_token_t replace_token; /* read/written under the display lock */
     char rendered_expression[BOT_EXPRESSION_MAX_BYTES + 1];
 } app_t;
 
@@ -479,6 +480,11 @@ static void usb_manual_task(void *context) {
 static void face_event(face_event_t event, void *context) {
     app_t *app = context;
     if (event == FACE_EVENT_TOUCH) { touch_wake(app); return; }
+    if (event == FACE_EVENT_ASK_AGAIN) {
+        if (app->replace_token.session_id) post(app,&(bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,.source=BOT_SOURCE_LOCAL_UI,
+            .observed_ms=bot_platform_now_ms(),.token=app->replace_token,.data.touch.intentional=true});
+        return;
+    }
     if (event == FACE_EVENT_STOP) { bot_bus_request_stop(app->bus, bot_platform_now_ms()); return; }
     bot_event_t message = { .source = BOT_SOURCE_LOCAL_UI, .observed_ms = bot_platform_now_ms(),
         .kind = event == FACE_EVENT_RESULT_DISMISSED ? BOT_EVENT_RESULT_DISMISSED :
@@ -542,6 +548,8 @@ static void apply_audio_session(app_t *app, const bot_runtime_snapshot_t *state)
         .retain_start = listening && state->audio_session_requested && mac_session_possible,
         .waiting_for_followup = state->followup_armed,
         .local_commands = listening && state->audio_session_requested,
+        .stop_only = state->audio_session_requested && !state->playback_id &&
+            (state->conversation == BOT_CONVERSATION_SUBMITTED || state->conversation == BOT_CONVERSATION_THINKING),
     };
     (void)bot_audio_set_session_ex(app->audio, state->audio_session_requested ? &token : NULL,
                                    state->audio_session_requested ? &options : NULL);
@@ -899,6 +907,18 @@ static void reconcile(app_t *app, uint32_t now_ms) {
         rendered_gaze_valid = true;
         face_set_stop_visible(app->face, s->behavior == BOT_BEHAVIOR_WAKING ||
                                       s->behavior == BOT_BEHAVIOR_ENGAGED || s->reading_token.session_id || s->critical_fault);
+        const bool pending=s->conversation==BOT_CONVERSATION_SUBMITTED || s->conversation==BOT_CONVERSATION_THINKING;
+        bool replace=!s->settings_open && !s->critical_fault && (pending || s->conversation==BOT_CONVERSATION_SPEAKING);
+        app->replace_token=replace?s->token:(bot_session_token_t){0};
+        static const char *const stages[]={"","正在发送","已收到","正在听懂","听懂了","在等回答","正在组织回答",
+            "正在用工具","请在 Mac 上确认","正在准备图片","正在准备语音","回答已就绪"};
+        char wait[80]="";
+        if (pending && s->wait_stage>BOT_WAIT_NONE && s->wait_stage<=BOT_WAIT_ANSWER) {
+            unsigned seconds=(now_ms-s->wait_started_ms)/1000U;
+            if (seconds>=3) snprintf(wait,sizeof(wait),"%s · %u 秒",stages[s->wait_stage],seconds);
+            else snprintf(wait,sizeof(wait),"%s",stages[s->wait_stage]);
+        }
+        face_set_turn_controls(app->face,replace,wait);
         const char *caption = s->caption;
         if (s->critical_fault) caption = s->fault_recoverable ? "请点击停止，再唤醒小呆" : "小呆需要重新启动";
         if ((!*caption || strcmp(caption, "请说") == 0) && s->audio_session_requested &&
@@ -918,7 +938,10 @@ static void reconcile(app_t *app, uint32_t now_ms) {
             face_set_subtitle(app->face, caption);
             snprintf(app->rendered_caption, sizeof(app->rendered_caption), "%s", caption);
         }
-        bool showing_result = s->reading_token.session_id && !s->settings_open && !s->critical_fault;
+        /* Keep the last answer available while reading. Once a follow-up is
+         * submitted, its own transcript and progress must be visible. */
+        bool showing_result = s->reading_token.session_id && !s->settings_open && !s->critical_fault &&
+                              (!pending || same_runtime_token(s->reading_token,s->token));
         if (!showing_result) {
             face_set_result_text(app->face,"");
             app->result_token=(bot_session_token_t){0};
@@ -993,10 +1016,10 @@ static void reconcile(app_t *app, uint32_t now_ms) {
         bot_bus_get_stats(app->bus, &stats);
         ESP_LOGI(TAG, "runtime stack_free=%u", (unsigned)uxTaskGetStackHighWaterMark(NULL));
         /* No images, PCM, transcript, person name, or biometric template in logs. */
-        ESP_LOGI(TAG, "mode=%s conversation=%s wake=%d audio=%d camera=%d secure_link=%d fault=%d dropped=%lu",
+        ESP_LOGI(TAG, "mode=%s conversation=%s wake=%d audio=%d camera=%d secure_link=%d fault=%d dropped=%lu wait_stage=%u",
                  bot_behavior_name(s->behavior), bot_conversation_name(s->conversation), s->wake_status,
                  s->audio_available, s->camera_available, s->link_authenticated && s->link_encrypted,
-                 s->critical_fault, (unsigned long)stats.normal_events_dropped);
+                 s->critical_fault, (unsigned long)stats.normal_events_dropped, (unsigned)s->wait_stage);
         if (app->vision) {
             bot_vision_status_t vision;
             bot_vision_get_status(app->vision, &vision);

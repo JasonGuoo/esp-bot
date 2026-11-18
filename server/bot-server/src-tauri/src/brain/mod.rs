@@ -177,7 +177,8 @@ impl Brain {
             let kind = event["kind"].as_str().unwrap_or("");
             if matches!(kind, "turn.transcribing" | "turn.understood" | "turn.thinking"
                 | "turn.preparing_image" | "turn.synthesizing" | "task.accepted" | "task.progress" | "task.state" | "harness_tool_activity" | "harness_permission_required"
-                | "harness_permission_replied" | "harness_question_required") {
+                | "harness_permission_replied" | "harness_question_required" | "harness_prompt_delivered"
+                | "harness_first_text" | "turn.answer_preview") {
                 let _ = progress.send(event.clone());
             }
             sink(event);
