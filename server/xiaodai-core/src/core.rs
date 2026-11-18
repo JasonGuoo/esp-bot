@@ -204,6 +204,17 @@ impl Core {
         Self { config: Arc::new(c), ..self.clone() }
     }
 
+    /// Stop the Codex child (e.g. the owning service stops). HTTP routes keep working; Codex
+    /// stays down, and background probes stop, until `reopen`.
+    pub async fn shutdown(&self) {
+        self.codex.shutdown().await;
+    }
+
+    /// Allow Codex to spawn again after `shutdown` (the next turn or `warmup` starts it).
+    pub fn reopen(&self) {
+        self.codex.reopen();
+    }
+
     /// Rolling per-engine latency stats, Luna-first state and recent switches.
     pub fn health(&self) -> HealthSnapshot {
         self.health.snapshot()
@@ -241,7 +252,7 @@ impl Core {
             let c = health.config().clone();
             loop {
                 tokio::time::sleep(Duration::from_millis(c.probe_interval_ms)).await;
-                if health.luna_degraded().is_none() {
+                if codex.is_shut_down() || health.luna_degraded().is_none() {
                     break;
                 }
                 let t = Instant::now();

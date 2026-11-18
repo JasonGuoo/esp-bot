@@ -41,6 +41,7 @@ impl BrainHost {
             if running { brain.harness.stop().await?; }
             self.keys.set(&account, key)?;
             brain.harness.reset_route(&route_id).await?;
+            brain.fast.refresh_keys(|account| brain.harness.session_key(account));
             if running {
                 if let Err(error) = brain.harness.start().await {
                     brain.accepting.store(false, Ordering::Release);

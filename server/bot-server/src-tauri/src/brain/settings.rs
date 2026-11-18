@@ -15,6 +15,8 @@ pub struct BrainConfig {
     pub conversation: ConversationConfig,
     pub tasks: super::tasks::TaskConfig,
     pub presentation: super::presentation::PresentationConfig,
+    /// Default conversational brain (Xiaodai core); OpenCode keeps tools and tasks.
+    pub brain_core: super::fast_core::FastCoreConfig,
 }
 
 impl Default for BrainConfig {
@@ -22,7 +24,7 @@ impl Default for BrainConfig {
         Self { schema_version: 1, auto_start: false, harness: HarnessConfig::default(),
             models: ModelWorkerConfig::default(), memory: MemoryConfig::default(),
             gateway: GatewayConfig::default(), conversation: ConversationConfig::default(),
-            tasks: Default::default(), presentation: Default::default() }
+            tasks: Default::default(), presentation: Default::default(), brain_core: Default::default() }
     }
 }
 
@@ -113,6 +115,7 @@ pub fn validate(config: &BrainConfig) -> Result<(), String> {
     config.memory.validate()?;
     config.tasks.validate()?;
     config.presentation.validate()?;
+    config.brain_core.validate()?;
     if config.models.speaker_python.as_ref().is_some_and(|p|!p.is_absolute()){return Err("speaker_python_path_must_be_absolute".into());}
     if config.models.diarization_model.as_ref().is_some_and(|p|!p.is_absolute()){return Err("diarization_path_must_be_absolute".into());}
     if !(100..=4000).contains(&config.conversation.max_reply_characters) { return Err("reply_limit_must_be_100_to_4000".into()); }

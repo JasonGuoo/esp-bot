@@ -141,7 +141,7 @@ pub(super) async fn prepare_task(brain:Arc<Brain>,task:crate::brain::tasks::Task
                 // audible, factual introduction. It is a separate frozen
                 // segment, never a rewrite of an existing media soundtrack.
                 let speech=task.result["summary"].as_str().unwrap_or("这份图文资料已经准备好了。");
-                let (intro,mut spoken,_)=brain.prepare_presentation(plan.context.clone(),scene_for(speech,"happy"),None,&[],"",true,&[],None).await?;
+                let (intro,mut spoken,_)=brain.prepare_presentation(plan.context.clone(),scene_for(speech,"happy"),None,&[],"",true,&[],None,None).await?;
                 let mut semantic=intro.segments;semantic.extend(plan.segments);
                 plan.segments=semantic;plan.presentation_id=format!("presentation_{}",uuid::Uuid::new_v4().simple());
                 use sha2::{Digest,Sha256};
@@ -165,7 +165,7 @@ pub(super) async fn prepare_task(brain:Arc<Brain>,task:crate::brain::tasks::Task
     let context=crate::brain::presentation::PlanContext{household_id:task.household_id,daily_conversation_id:task.daily_conversation_id,
         conversation_turn_id:task.conversation_turn_id,task_id:Some(task.task_id)};
     let expression=if matches!(task.state,crate::brain::tasks::TaskState::Succeeded|crate::brain::tasks::TaskState::Partial){"happy"}else{"thinking"};
-    let (plan,segments,_)=brain.prepare_presentation(context,scene_for(&summary,expression),None,&[],"",true,&[],None).await?;
+    let (plan,segments,_)=brain.prepare_presentation(context,scene_for(&summary,expression),None,&[],"",true,&[],None,None).await?;
     Ok((plan,segments))
 }
 

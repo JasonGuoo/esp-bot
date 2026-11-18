@@ -14,7 +14,7 @@ mod turn;
 mod compaction;
 pub(crate) mod secrets;
 
-pub use config::{HarnessConfig, ModelRoute, SOURCE_VERSION};
+pub use config::{HarnessConfig, ModelRoute, ProviderNetwork, SOURCE_VERSION};
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -529,6 +529,12 @@ impl Harness {
         let route = self.config.routes.iter().find(|route| route.id == route_id).ok_or("unknown_provider_route")?;
         if self.config.mode != "managed" { return Err("provider_interface_requires_managed".into()); }
         direct::probe(route, &self.connections).await
+    }
+
+    /// The App-session key for a credential variable (None = not entered this session).
+    /// For the in-process brain core only; never logged or returned over IPC.
+    pub(crate) fn session_key(&self, account: &str) -> Option<zeroize::Zeroizing<String>> {
+        self.keys.load(account).ok().flatten()
     }
 
     pub fn api_key_account(&self, route_id: &str) -> Result<String, String> {

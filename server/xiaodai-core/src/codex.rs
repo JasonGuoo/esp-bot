@@ -549,6 +549,8 @@ struct Inner {
     steer: Mutex<Option<SteerStats>>,
     /// Health-probe thread: (connection identity, thread id). Separate from the conversation.
     probe: tokio::sync::Mutex<Option<(usize, String)>>,
+    /// Set by `shutdown`: no (re)spawn until `reopen`.
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl Inner {
@@ -696,6 +698,7 @@ impl CodexEngine {
                 interrupt: Mutex::new(None),
                 steer: Mutex::new(None),
                 probe: tokio::sync::Mutex::new(None),
+                closed: std::sync::atomic::AtomicBool::new(false),
             }),
         }
     }
@@ -844,7 +847,30 @@ impl CodexEngine {
         w
     }
 
+    /// Stop the app-server child (owner shutting down). Running turns fail over as on a crash;
+    /// nothing respawns it (turns, probes) until `reopen`.
+    pub async fn shutdown(&self) {
+        self.inner.closed.store(true, Ordering::SeqCst);
+        *self.inner.probe.lock().await = None;
+        let mut st = self.inner.state.lock().await;
+        st.conn = None;
+        st.thread = None;
+        st.thread_turns = 0;
+    }
+
+    /// Allow spawning again after `shutdown`.
+    pub fn reopen(&self) {
+        self.inner.closed.store(false, Ordering::SeqCst);
+    }
+
+    pub fn is_shut_down(&self) -> bool {
+        self.inner.closed.load(Ordering::SeqCst)
+    }
+
     async fn ensure_ready(&self) -> Result<Arc<RpcConn>, String> {
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Err("codex engine shut down".into());
+        }
         let mut st = self.inner.state.lock().await;
         if let Some(c) = &st.conn {
             if c.is_alive() {

@@ -14,6 +14,10 @@ pub struct TurnTimings {
     pub stages_ms: BTreeMap<String, u64>,
     pub skipped: BTreeMap<String, String>,
     pub input_audio_ms: Option<u64>,
+    /// Which brain answered: the Xiaodai core (winner route, time to first text/sentence,
+    /// every engine attempt, Luna state) or OpenCode with the routing reason. Content-free.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brain: Option<serde_json::Value>,
 }
 
 struct StageTimer<'a> {

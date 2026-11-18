@@ -922,3 +922,22 @@ async fn reset_thread_starts_a_new_conversation_thread() {
     c.codex().reset_thread(true).await;
     assert!(wait_for(|| c.codex().thread_id().is_some_and(|t| t != second), 3000).await);
 }
+
+#[tokio::test]
+async fn shutdown_stops_codex_until_reopen() {
+    let (a, _) = spawn_http(0, &["HTTP在。"]).await;
+    let (c, log) = core(EngineMode::Dual, OK, Some(&a), 1000);
+    c.warmup_codex().await;
+    assert_eq!(log.spawns.load(Ordering::SeqCst), 1);
+    c.shutdown().await;
+    let evs = collect(&c, "stream").await;
+    let Some(Event::Done { timings, .. }) = evs.last() else { panic!("{evs:?}") };
+    assert_eq!(timings.engine.as_deref(), Some("http"), "HTTP answers while Codex is shut down");
+    assert_eq!(log.spawns.load(Ordering::SeqCst), 1, "no respawn while shut down");
+    c.reopen();
+    c.warmup_codex().await;
+    assert_eq!(log.spawns.load(Ordering::SeqCst), 2);
+    let evs = collect(&c, "stream").await;
+    let Some(Event::Done { timings, .. }) = evs.last() else { panic!("{evs:?}") };
+    assert_eq!(timings.engine.as_deref(), Some("codex"));
+}
