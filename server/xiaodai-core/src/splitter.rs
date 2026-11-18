@@ -43,13 +43,19 @@ impl SentenceSplitter {
             if HARD.contains(&c) {
                 let mut end = i + c.len_utf8();
                 // Attach trailing closers / repeated punctuation: 。」  ！？  ?!
+                let mut at_end = true;
                 while let Some(&(j, n)) = chars.peek() {
                     if CLOSERS.contains(&n) {
                         end = j + n.len_utf8();
                         chars.next();
                     } else {
+                        at_end = false;
                         break;
                     }
+                }
+                // A closer (」 ”) may still arrive in the next delta; flush() ends the stream.
+                if at_end && c != '\n' {
+                    return None;
                 }
                 return Some(end);
             }
@@ -106,6 +112,14 @@ mod tests {
         assert!(s.push("珀斯是西澳").is_empty());
         assert_eq!(s.push("首府。阳光"), vec!["珀斯是西澳首府。"]);
         assert_eq!(s.flush().as_deref(), Some("阳光"));
+    }
+
+    #[test]
+    fn keeps_a_closer_that_arrives_in_the_next_delta() {
+        assert_eq!(run(&["她说：「好呀！", "」然后", "走了。", "“晚安！", "”"]), vec!["她说：「好呀！」", "然后走了。", "“晚安！”"]);
+        let mut s = SentenceSplitter::new(60);
+        assert!(s.push("你好！").is_empty());
+        assert_eq!(s.push("我"), vec!["你好！"]);
     }
 
     #[test]
