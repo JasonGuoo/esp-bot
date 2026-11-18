@@ -3,7 +3,7 @@ import "./household.css";
 type RecordValue = Record<string, unknown>;
 type Profile = { id: string; display_name: string; is_child: boolean; merged_into?: string | null };
 type Request = <T = unknown>(method: string, payload?: unknown) => Promise<T>;
-type Options = { request: Request; notice(text: string, error?: boolean): void; profiles(): Profile[]; onProfilesChange?(): Promise<void>; onPlaybackChange?(playing: boolean): void };
+type Options = { request: Request; openVoiceGroup(id: number): void; notice(text: string, error?: boolean): void; profiles(): Profile[]; onProfilesChange?(): Promise<void>; onPlaybackChange?(playing: boolean): void };
 export type HouseholdController = {
   setPanel(panel: string, visible: boolean): void;
   refresh(): Promise<void>;
@@ -183,7 +183,7 @@ export function mountHousehold(household: HTMLElement, tasks: HTMLElement, optio
   const history = check("保留家庭对话原文"); const cloud = check("允许新家庭来源用于云端对话与整理");
   const settingsForm = node("form", "cc-form"); const settingsNote = node("p", "cc-caption");
   settingsForm.append(field("家庭时区（IANA）", zone), field("原文保留天数（1–365）", retention), history.row, cloud.row,
-    node("p", "cc-caption", "关闭原文保留会清理现有原文及依赖内容；关闭云端使用会撤销已有来源的云端许可。重新开启只影响新来源。声纹原始录音不归档。"),
+    node("p", "cc-caption", "关闭原文保留会清理现有原文及依赖内容；关闭云端使用会撤销已有来源的云端许可。重新开启只影响新来源。完整录音不归档。开启「谁在说话」后，可在那里试听短片段。"),
     control("保存设置", async () => {
       if (!settingsForm.reportValidity()) return;
       if (settings.history_enabled === true && !history.input.checked && !window.confirm("关闭归档并清理已保留的家庭对话原文？")) return;
@@ -287,6 +287,8 @@ export function mountHousehold(household: HTMLElement, tasks: HTMLElement, optio
       };
       actions.append(select, control("保存标注", () => annotate(false), "cc-button primary"), control("撤销人工标注", () => annotate(true)));
       if (value.source_expired === true) for (const input of Array.from(actions.querySelectorAll<HTMLButtonElement | HTMLSelectElement>("button,select"))) input.disabled = true;
+      const group = num(segment.voice_group_id);
+      if (group) actions.append(control("试听这组声音", () => { sourceDialog.modal.close(); options.openVoiceGroup(group); }));
       row.append(actions); body.append(row);
     }
     const edit = node("textarea"); edit.value = str(value.text); edit.rows = 4; edit.maxLength = 16000; edit.disabled = value.source_expired === true;
@@ -392,7 +394,7 @@ export function mountHousehold(household: HTMLElement, tasks: HTMLElement, optio
       if (results[0].status === "fulfilled") {
         settings = obj(results[0].value);
         if (!settingsDirty) { zone.value = str(settings.timezone, "UTC"); retention.value = String(Math.max(1, num(settings.retention_secs, 86400) / 86400)); history.input.checked = settings.history_enabled === true; cloud.input.checked = settings.allow_cloud === true; }
-        settingsNote.textContent = `当前家庭时区 ${str(settings.timezone)} · 策略修订 ${num(settings.policy_revision)} · ${settings.raw_audio_retained === true ? "原始录音已保留" : "不保留原始录音"}`;
+        settingsNote.textContent = `当前家庭时区 ${str(settings.timezone)} · 策略修订 ${num(settings.policy_revision)} · ${settings.raw_audio_retained === true ? "原始录音已保留" : "不保留完整录音"}`;
       }
       if (results[1].status === "fulfilled") {
         const days = arr(results[1].value).map(obj); if (!days.some(day => day.daily_conversation_id === dailyId)) dailyId = str(days[0]?.daily_conversation_id);

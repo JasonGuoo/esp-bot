@@ -133,7 +133,7 @@ impl Store {
         db.query_row("SELECT id,timezone,timezone_source,history_enabled,retention_secs,allow_cloud,policy_revision FROM households WHERE singleton=1",[],|r|Ok(json!({
             "household_id":r.get::<_,String>(0)?,"timezone":r.get::<_,String>(1)?,"timezone_source":r.get::<_,String>(2)?,
             "history_enabled":r.get::<_,bool>(3)?,"retention_secs":r.get::<_,i64>(4)?,"allow_cloud":r.get::<_,bool>(5)?,"policy_revision":r.get::<_,u64>(6)?,
-            "graphiti_enabled":self.config.graphiti.enabled,"graphiti_configured":self.config.graphiti.enabled&&self.config.graphiti.config_file.as_ref().is_some_and(|p|p.is_file()),"raw_audio_retained":false,"schema_version":5
+            "graphiti_enabled":self.config.graphiti.enabled,"graphiti_configured":self.config.graphiti.enabled&&self.config.graphiti.config_file.as_ref().is_some_and(|p|p.is_file()),"raw_audio_retained":false,"schema_version":6
         }))).map_err(db_error)
     }
 
@@ -184,6 +184,9 @@ impl Store {
             tx.execute("INSERT INTO household_turns(id,external_turn_id,episode_id,utterance_id,input_kind,occurred_at_ms,recorded_at_ms,input_text,private_profile_id,allow_cloud,status,metadata_json,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?7)",
                 params![id,input.turn_id,episode,utterance,input.input_kind,input.occurred_at_ms,now_ms(),if retained{text.as_str()}else{""},input.private_profile_id,input.allow_cloud&&cloud,if text.is_empty(){"received"}else{"transcribed"},metadata]).map_err(db_error)?;
             tx.execute("INSERT INTO household_segments(id,turn_id,annotated_person_id,annotation_set,quality,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6)",params![format!("{id}:whole"),id,input.speaker_person_id,input.speaker_person_id.is_some(),if input.input_kind=="text"{"text"}else{"unknown"},now_ms()]).map_err(db_error)?;
+            if input.input_kind=="audio" && input.private_profile_id.is_none() {
+                tx.execute("UPDATE household_turns SET voice_review_generation=(SELECT voice_review_generation FROM households WHERE singleton=1 AND voice_review_enabled=1) WHERE id=?1",[&id]).map_err(db_error)?;
+            }
             if retained&&!text.is_empty(){tx.execute("INSERT INTO household_source_revisions(turn_id,revision,input_text,reason,at_ms) VALUES(?1,1,?2,'input',?3)",params![id,text,now_ms()]).map_err(db_error)?;}
             (id,episode,utterance,1)
         };
@@ -229,6 +232,10 @@ impl Store {
     }
 
     pub fn journal_identity(&self,turn:&str,source_revision:u64,candidate:Value)->Result<(),String>{
+        self.journal_identity_samples(turn,source_revision,candidate,&[])
+    }
+
+    pub(crate) fn journal_identity_samples(&self,turn:&str,source_revision:u64,candidate:Value,samples:&[super::VoiceSample])->Result<(),String>{
         let candidate=strip_embeddings(candidate);let raw=encoded(&candidate,65_536)?;
         let mut db=self.connection()?;let tx=db.transaction().map_err(db_error)?;let id=source_id(&tx,turn)?;
         let (revision,episode,expired):(u64,String,bool)=tx.query_row("SELECT source_revision,episode_id,source_expired FROM household_turns WHERE id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(db_error)?;
@@ -249,6 +256,7 @@ impl Store {
             tx.execute("INSERT INTO household_segments(id,turn_id,start_sample,end_sample,sample_rate,speaker_label,candidate_json,automatic_person_id,overlap,quality,updated_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(id) DO UPDATE SET start_sample=excluded.start_sample,end_sample=excluded.end_sample,sample_rate=excluded.sample_rate,speaker_label=excluded.speaker_label,candidate_json=excluded.candidate_json,automatic_person_id=excluded.automatic_person_id,overlap=excluded.overlap,quality=excluded.quality,updated_at_ms=excluded.updated_at_ms",
                 params![segment_id,id,start,end,rate,item["speaker_label"].as_str(),encoded(item,32_768)?,profile,item["overlap"].as_bool().unwrap_or(false),quality,now_ms()]).map_err(db_error)?;
         }
+        super::voice_album::collect_samples(&tx,&id,&segments,samples,self.config.speaker_threshold,self.config.match_margin)?;
         if segments.len()>1 {
             // The initial whole-clip placeholder carries no segment identity.
             // Preserve an explicit human whole-clip annotation for review.
@@ -291,6 +299,11 @@ impl Store {
 
     pub fn household_rpc(&self,method:&str,payload:&Value)->Result<Option<Value>,String>{
         let result=match method{
+            "household.voices"=>self.voice_album()?,
+            "household.voice.clips"=>self.voice_group_clips(payload)?,
+            "household.voice.listen"=>self.voice_sample_audio(payload)?,
+            "household.voice.settings"=>self.voice_review_settings(payload)?,
+            "household.voice.name"|"household.voice.separate"=>self.edit_voice_group(method,payload)?,
             "household.settings.get"=>self.household_settings()?,
             "household.settings.set"=>self.update_household_settings(payload)?,
             "household.days"=>self.household_days(payload["limit"].as_u64().unwrap_or(60).min(365) as usize)?,
@@ -318,6 +331,7 @@ impl Store {
         let db=self.connection()?;
         let ids=match method{
             "household.settings.set"=>Vec::new(),
+            "household.voice.name"|"household.voice.separate"=>super::voice_album::source_ids(&db,method,payload)?,
             "household.annotate"=>{
                 let segment=required(payload,"speaker_segment_id")?;validate_id(segment)?;
                 if let Some(person)=payload["person_id"].as_str(){super::profile_merge::active_profile(&db,person)?;}
@@ -419,12 +433,9 @@ impl Store {
         if let Some(p)=person{super::profile_merge::active_profile(&tx,p)?;}
         let (turn,episode,revision):(String,String,u64)=tx.query_row("SELECT s.turn_id,t.episode_id,t.source_revision FROM household_segments s JOIN household_turns t ON t.id=s.turn_id WHERE s.id=?1 AND t.forgotten=0 AND t.source_expired=0",[segment],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(db_error)?;
         if expected!=revision{return Err("source_revision_conflict".into());}
-        super::provenance::queue_household_cleanup(&tx,&turn)?;
-        tx.execute("UPDATE household_segments SET annotated_person_id=?1,annotation_set=?2,annotation_revision=annotation_revision+1,updated_at_ms=?3 WHERE id=?4",params![person,!reset,now_ms(),segment]).map_err(db_error)?;
-        tx.execute("INSERT INTO household_annotations(segment_id,person_id,revision,operation,at_ms) SELECT id,annotated_person_id,annotation_revision,?1,?2 FROM household_segments WHERE id=?3",params![if reset{"clear"}else{"set"},now_ms(),segment]).map_err(db_error)?;
-        tx.execute("UPDATE household_turns SET source_revision=source_revision+1,updated_at_ms=?1 WHERE id=?2",params![now_ms(),turn]).map_err(db_error)?;
-        tx.execute("INSERT INTO household_source_revisions(turn_id,revision,input_text,reason,at_ms) SELECT id,source_revision,input_text,'human_annotation',?1 FROM household_turns WHERE id=?2 AND input_text!=''",params![now_ms(),turn]).map_err(db_error)?;
-        revision_changed(&tx,&episode,true)?;super::household_jobs::queue_organize(&tx,&episode)?;tx.commit().map_err(db_error)?;
+        annotate_segment(&tx,segment,person,reset,&turn,&episode)?;
+        super::voice_album::individual_annotation(&tx,segment,person,reset)?;
+        tx.commit().map_err(db_error)?;
         Ok(json!({"ok":true,"conversation_turn_id":turn,"source_revision":revision+1,"templates_changed":false}))
     }
 
@@ -451,6 +462,7 @@ impl Store {
 
     pub fn purge_household_expired(&self)->Result<usize,String>{
         let mut db=self.connection()?;let tx=db.transaction().map_err(db_error)?;
+        super::voice_album::expire(&tx)?;
         let (enabled,ttl):(bool,i64)=tx.query_row("SELECT history_enabled,retention_secs FROM households WHERE singleton=1",[],|r|Ok((r.get(0)?,r.get(1)?))).map_err(db_error)?;
         let ids={let mut q=tx.prepare("SELECT id FROM household_turns WHERE forgotten=0 AND source_expired=0 AND ((?1=0 AND (input_text!='' OR assistant_text!='')) OR occurred_at_ms<=?2)").map_err(db_error)?;let rows=q.query_map(params![enabled,now_ms().saturating_sub(ttl.saturating_mul(1000))],|r|r.get::<_,String>(0)).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?};
         for id in &ids{forget_one(&tx,id,enabled)?;}
@@ -548,12 +560,21 @@ fn ensure_day(db:&Connection,at_ms:i64)->Result<String,String>{
 
 fn turn_row(r:&rusqlite::Row<'_>)->rusqlite::Result<Value>{Ok(json!({"conversation_turn_id":r.get::<_,String>(0)?,"turn_id":r.get::<_,String>(1)?,"episode_id":r.get::<_,String>(2)?,"utterance_id":r.get::<_,String>(3)?,"input_kind":r.get::<_,String>(4)?,"occurred_at_ms":r.get::<_,i64>(5)?,"recorded_at_ms":r.get::<_,i64>(6)?,"source_revision":r.get::<_,u64>(7)?,"text":r.get::<_,String>(8)?,"assistant_generated":r.get::<_,String>(9)?,"private_profile_id":r.get::<_,Option<String>>(10)?,"allow_cloud":r.get::<_,bool>(11)?,"status":r.get::<_,String>(12)?,"source_expired":r.get::<_,bool>(13)?,"metadata":parse(r.get(14)?),"audio_available":false}))}
 fn segments(db:&Connection,id:&str)->Result<Value,String>{
-    let mut q=db.prepare("SELECT id,start_sample,end_sample,sample_rate,speaker_label,candidate_json,automatic_person_id,annotated_person_id,annotation_set,annotation_revision,overlap,quality FROM household_segments WHERE turn_id=?1 ORDER BY start_sample,id").map_err(db_error)?;
-    let rows=q.query_map([id],|r|Ok(json!({"speaker_segment_id":r.get::<_,String>(0)?,"start_sample":r.get::<_,Option<i64>>(1)?,"end_sample":r.get::<_,Option<i64>>(2)?,"sample_rate":r.get::<_,Option<i64>>(3)?,"speaker_label":r.get::<_,Option<String>>(4)?,"candidate":parse(r.get(5)?),"automatic_person_id":r.get::<_,Option<String>>(6)?,"annotated_person_id":r.get::<_,Option<String>>(7)?,"annotation_set":r.get::<_,bool>(8)?,"annotation_revision":r.get::<_,u64>(9)?,"overlap":r.get::<_,bool>(10)?,"quality":r.get::<_,String>(11)?}))).map_err(db_error)?;Ok(json!(rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?))
+    let mut q=db.prepare("SELECT id,start_sample,end_sample,sample_rate,speaker_label,candidate_json,automatic_person_id,annotated_person_id,annotation_set,annotation_revision,overlap,quality,(SELECT group_id FROM voice_clips WHERE segment_id=household_segments.id) FROM household_segments WHERE turn_id=?1 ORDER BY start_sample,id").map_err(db_error)?;
+    let rows=q.query_map([id],|r|Ok(json!({"speaker_segment_id":r.get::<_,String>(0)?,"start_sample":r.get::<_,Option<i64>>(1)?,"end_sample":r.get::<_,Option<i64>>(2)?,"sample_rate":r.get::<_,Option<i64>>(3)?,"speaker_label":r.get::<_,Option<String>>(4)?,"candidate":parse(r.get(5)?),"automatic_person_id":r.get::<_,Option<String>>(6)?,"annotated_person_id":r.get::<_,Option<String>>(7)?,"annotation_set":r.get::<_,bool>(8)?,"annotation_revision":r.get::<_,u64>(9)?,"overlap":r.get::<_,bool>(10)?,"quality":r.get::<_,String>(11)?,"voice_group_id":r.get::<_,Option<i64>>(12)?}))).map_err(db_error)?;Ok(json!(rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?))
 }
 fn receipts(db:&Connection,id:&str)->Result<Value,String>{let mut q=db.prepare("SELECT event_key,kind,payload_json,at_ms FROM household_receipts WHERE turn_id=?1 ORDER BY at_ms LIMIT 256").map_err(db_error)?;let rows=q.query_map([id],|r|Ok(json!({"event_key":r.get::<_,String>(0)?,"kind":r.get::<_,String>(1)?,"payload":parse(r.get(2)?),"at_ms":r.get::<_,i64>(3)?}))).map_err(db_error)?;Ok(json!(rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?))}
 fn required<'a>(v:&'a Value,key:&str)->Result<&'a str,String>{v[key].as_str().filter(|s|!s.is_empty()).ok_or_else(||format!("{key}_required"))}
 fn safe_metadata(v:&Value)->Result<String,String>{encoded(&strip_embeddings(v.clone()),32_768)}
+pub(super) fn annotate_segment(db:&Connection,segment:&str,person:Option<&str>,reset:bool,turn:&str,episode:&str)->Result<(),String>{
+        super::provenance::queue_household_cleanup(db,turn)?;
+        db.execute("UPDATE household_segments SET annotated_person_id=?1,annotation_set=?2,annotation_revision=annotation_revision+1,updated_at_ms=?3 WHERE id=?4",params![person,!reset,now_ms(),segment]).map_err(db_error)?;
+        db.execute("INSERT INTO household_annotations(segment_id,person_id,revision,operation,at_ms) SELECT id,annotated_person_id,annotation_revision,?1,?2 FROM household_segments WHERE id=?3",params![if reset{"clear"}else{"set"},now_ms(),segment]).map_err(db_error)?;
+        db.execute("UPDATE household_turns SET source_revision=source_revision+1,updated_at_ms=?1 WHERE id=?2",params![now_ms(),turn]).map_err(db_error)?;
+        db.execute("INSERT INTO household_source_revisions(turn_id,revision,input_text,reason,at_ms) SELECT id,source_revision,input_text,'human_annotation',?1 FROM household_turns WHERE id=?2 AND input_text!=''",params![now_ms(),turn]).map_err(db_error)?;
+        revision_changed(db,episode,true)?;super::household_jobs::queue_organize(db,episode)?;Ok(())
+}
+
 fn strip_embeddings(mut v:Value)->Value{match &mut v{Value::Object(map)=>{for key in ["embedding","wav_base64","pcm_base64","image_base64","audio","token","api_key","text","transcript","content","prompt","message","caption","response","output"]{map.remove(key);}for value in map.values_mut(){*value=strip_embeddings(value.take());}},Value::Array(values)=>{for value in values{*value=strip_embeddings(value.take());}},_=>{}}v}
 fn terms(query:&str)->BTreeSet<String>{let q=query.to_lowercase();let chars:Vec<_>=q.chars().collect();let mut out=BTreeSet::new();for x in q.split_whitespace(){if x.chars().count()<=64{out.insert(x.to_owned());}}for w in chars.windows(2).take(128){out.insert(w.iter().collect());}out}
 
@@ -599,6 +620,7 @@ fn forget_one(db:&Connection,id:&str,expired:bool)->Result<(),String>{
 /// not the family's entire shared day. Shared turns become unattributed; all
 /// derived assertions about this person are invalidated and source-suppressed.
 pub(super) fn forget_profile_data(db:&Connection,profile:&str)->Result<(),String>{
+    db.execute("DELETE FROM voice_clips WHERE segment_id IN(SELECT id FROM household_segments WHERE automatic_person_id=?1 OR annotated_person_id=?1)",[profile]).map_err(db_error)?;
     let private={let mut q=db.prepare("SELECT id FROM household_turns WHERE private_profile_id=?1 AND forgotten=0").map_err(db_error)?;let rows=q.query_map([profile],|r|r.get::<_,String>(0)).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?};
     for turn in private{forget_one(db,&turn,false)?;}
     db.execute("UPDATE household_turns SET private_profile_id=NULL WHERE private_profile_id=?1 AND forgotten=1",[profile]).map_err(db_error)?;

@@ -28,6 +28,28 @@ pub struct MemoryJob { pub id: String, pub transcript: String }
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct ExtractedFact { pub content: String, pub category: String, pub scope: String, pub quote: String }
 
+pub(super) fn insert_profile(db:&Connection,input:NewProfile,max_profiles:usize)->Result<Profile,String> {
+    let name=clean_text(&input.display_name,80,false,"display_name")?;
+    let count: i64 = db.query_row("SELECT count(*) FROM profiles", [], |r| r.get(0)).map_err(db_error)?;
+    if count >= max_profiles as i64 {
+        return Err("profile capacity reached; remove an unused profile first".into());
+    }
+    let now = now_ms();
+    let profile = Profile {
+        id: format!("person_{}", Uuid::new_v4().simple()),
+        display_name: name,
+        is_child: input.is_child,
+        created_at_ms: now,
+        updated_at_ms: now,
+        merged_into: None,
+    };
+    db.execute(
+        "INSERT INTO profiles(id, display_name, is_child, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![profile.id, profile.display_name, profile.is_child, now, now],
+    ).map_err(db_error)?;
+    Ok(profile)
+}
+
 impl Store {
     /// `data_dir` must be a dedicated application-owned memory directory.
     pub fn open(data_dir: PathBuf, config: MemoryConfig) -> Result<Arc<Self>, String> {
@@ -54,7 +76,7 @@ impl Store {
                 tx.execute_batch(include_str!("schema.sql")).map_err(db_error)?;
                 tx.commit().map_err(db_error)?;
             }
-            1 | 2 | 3 | 4 | 5 => {}
+            1..=6 => {}
             _ => return Err(format!("unsupported memory database schema version {version}")),
         }
         if version < 2 {
@@ -103,6 +125,11 @@ impl Store {
             tx.execute_batch(include_str!("household_schema.sql")).map_err(db_error)?;
             tx.commit().map_err(db_error)?;
         }
+        if version < 6 {
+            let tx=db.transaction().map_err(db_error)?;
+            tx.execute_batch(include_str!("voice_schema.sql")).map_err(db_error)?;
+            tx.commit().map_err(db_error)?;
+        }
         let store = Arc::new(Self { config, db: Mutex::new(db), path });
         store.initialize_household()?;
         store.purge_expired()?;
@@ -114,26 +141,9 @@ impl Store {
     }
 
     pub fn create_profile(&self, input: NewProfile) -> Result<Profile, String> {
-        let name = clean_text(&input.display_name, 80, false, "display_name")?;
         let mut db = self.connection()?;
-        let tx = db.transaction().map_err(db_error)?;
-        let count: i64 = tx.query_row("SELECT count(*) FROM profiles", [], |r| r.get(0)).map_err(db_error)?;
-        if count >= self.config.max_profiles as i64 {
-            return Err("profile capacity reached; remove an unused profile first".into());
-        }
-        let now = now_ms();
-        let profile = Profile {
-            id: format!("person_{}", Uuid::new_v4().simple()),
-            display_name: name,
-            is_child: input.is_child,
-            created_at_ms: now,
-            updated_at_ms: now,
-            merged_into: None,
-        };
-        tx.execute(
-            "INSERT INTO profiles(id, display_name, is_child, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![profile.id, profile.display_name, profile.is_child, now, now],
-        ).map_err(db_error)?;
+        let tx=db.transaction().map_err(db_error)?;
+        let profile=insert_profile(&tx,input,self.config.max_profiles)?;
         bump_revision(&tx)?;
         tx.commit().map_err(db_error)?;
         Ok(profile)
@@ -615,7 +625,7 @@ impl Store {
         };
         Ok(json!({
             "path": self.path,
-            "schema_version": 5,
+            "schema_version": 6,
             "revision": count("SELECT revision FROM data_revision WHERE singleton = 1")?,
             "profiles": count("SELECT count(*) FROM profiles")?,
             "memories": count("SELECT count(*) FROM memories")?,

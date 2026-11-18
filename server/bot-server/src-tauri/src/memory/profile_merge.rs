@@ -57,6 +57,10 @@ impl Store {
         tx.execute("UPDATE household_turns SET private_profile_id=?1 WHERE private_profile_id=?2",params![target,source]).map_err(db_error)?;
         tx.execute("UPDATE household_model_conversations SET private_profile_id=?1 WHERE private_profile_id=?2",params![target,source]).map_err(db_error)?;
         tx.execute("UPDATE household_segments SET automatic_person_id=CASE WHEN automatic_person_id=?1 THEN ?2 ELSE automatic_person_id END,annotated_person_id=CASE WHEN annotated_person_id=?1 THEN ?2 ELSE annotated_person_id END,annotation_revision=annotation_revision+1,updated_at_ms=?3 WHERE automatic_person_id=?1 OR annotated_person_id=?1",params![source,target,now_ms()]).map_err(db_error)?;
+        // Move review excerpts together while keeping prior enrollment records independent.
+        tx.execute("UPDATE voice_clips SET group_annotation_revision=(SELECT annotation_revision FROM household_segments WHERE id=segment_id) WHERE group_annotation_revision IS NOT NULL AND group_id IN(SELECT id FROM voice_groups WHERE person_id IN(?1,?2))",params![source,target]).map_err(db_error)?;
+        tx.execute("UPDATE voice_clips SET group_id=(SELECT id FROM voice_groups WHERE person_id=?2 ORDER BY id LIMIT 1) WHERE group_id IN(SELECT id FROM voice_groups WHERE person_id=?1) AND EXISTS(SELECT 1 FROM voice_groups WHERE person_id=?2)",params![source,target]).map_err(db_error)?;
+        tx.execute("UPDATE voice_groups SET person_id=?1,revision=revision+1 WHERE person_id=?2",params![target,source]).map_err(db_error)?;
         let derived={let mut q=tx.prepare("SELECT id,episode_id,subject_ids_json FROM household_derived WHERE private_profile_id=?1 OR EXISTS(SELECT 1 FROM json_each(subject_ids_json) WHERE value=?1)").map_err(db_error)?;let rows=q.query_map([source],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?};
         let mut episodes=BTreeSet::new();
         for (id,episode,raw) in derived{

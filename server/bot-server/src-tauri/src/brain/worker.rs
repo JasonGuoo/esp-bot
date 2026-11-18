@@ -24,12 +24,14 @@ pub struct ModelWorkerConfig {
     pub rma_qwen_model: Option<PathBuf>,
     /// Local pyannote Community-1 snapshot; never downloaded during a turn.
     pub diarization_model: Option<PathBuf>,
+    /// Optional isolated Python with pyannote and SpeechBrain for the voice lane.
+    pub speaker_python: Option<PathBuf>,
 }
 
 impl Default for ModelWorkerConfig {
     fn default() -> Self {
         Self { python: "python3".into(), script: None, model_dir: None, request_timeout_seconds: 120, voice: None,
-            asr_backend: "whisper".into(), rma_qwen_python: None, rma_qwen_worker: None, rma_qwen_model: None, diarization_model: None }
+            asr_backend: "whisper".into(), rma_qwen_python: None, rma_qwen_worker: None, rma_qwen_model: None, diarization_model: None, speaker_python: None }
     }
 }
 
@@ -52,7 +54,7 @@ impl Drop for Process {
 pub struct ModelWorker {
     config: ModelWorkerConfig,
     data_root: PathBuf,
-    lanes: [Mutex<Option<Process>>; 5],
+    lanes: [Mutex<Option<Process>>; 6],
     cancel: watch::Sender<u64>,
 }
 
@@ -69,12 +71,12 @@ impl ModelWorker {
 
     fn lane(&self, op: &str) -> &Mutex<Option<Process>> {
         &self.lanes[match op {
-            "transcribe" => 0, "speaker_embed" | "face_embed" | "diarize" => 1,
+            "transcribe" => 0, "speaker_embed" | "diarize" | "voice_health" => 1, "face_embed" => 5,
             "tts" => 2, "display_image" | "prepare_image" | "render_chart" => 3, _ => 4,
         }]
     }
 
-    fn spawn(&self) -> Result<Process, String> {
+    fn spawn(&self, op:&str) -> Result<Process, String> {
         let script = self.config.script.as_ref().filter(|p| p.is_file())
             .ok_or("local_worker_not_configured: set models.script to local-models/worker.py")?;
         let model_dir = self.config.model_dir.as_ref().ok_or("local_worker_model_dir_missing")?;
@@ -82,7 +84,10 @@ impl ModelWorker {
         let cache_dir = self.data_root.join("runtime/cache");
         super::settings::private_dir(&temp_dir)?;
         super::settings::private_dir(&cache_dir)?;
-        let mut command = Command::new(&self.config.python);
+        let python=if matches!(op,"diarize"|"speaker_embed"|"voice_health") {
+            self.config.speaker_python.as_deref().unwrap_or_else(||std::path::Path::new(&self.config.python))
+        } else {std::path::Path::new(&self.config.python)};
+        let mut command = Command::new(python);
         // The worker may live inside the signed app bundle. Python must not
         // create __pycache__ there and invalidate the app's sealed resources.
         command.arg("-B").arg("-u").arg(script).arg("--model-dir").arg(model_dir)
@@ -123,9 +128,10 @@ impl ModelWorker {
             _ = cancelled.changed() => return Err("cancelled".into()),
         };
         if self.generation() != generation { return Err("cancelled".into()); }
-        if slot.is_none() { *slot = Some(self.spawn()?); }
+        if slot.is_none() { *slot = Some(self.spawn(op)?); }
         let request_id = uuid::Uuid::new_v4().to_string();
-        let mut bytes = serde_json::to_vec(&json!({"id":request_id,"op":op,"payload":payload})).map_err(|e| e.to_string())?;
+        let worker_op=if op=="voice_health" {"health"}else{op};
+        let mut bytes = serde_json::to_vec(&json!({"id":request_id,"op":worker_op,"payload":payload})).map_err(|e| e.to_string())?;
         if bytes.len() + 1 > MAX_LINE { return Err("local_worker_request_too_large".into()); }
         bytes.push(b'\n');
         // Own the child across await: if the caller future is dropped, Drop
@@ -172,7 +178,15 @@ impl ModelWorker {
     pub async fn health(&self) -> Value {
         if !self.configured() { return json!({"configured":false,"ready":false,"error":"local_worker_not_configured"}); }
         match self.call("health", json!({})).await {
-            Ok(result) => json!({"configured":true,"ready":true,"models":result}),
+            Ok(mut result) => {
+                if self.config.speaker_python.is_some() {
+                    match self.call("voice_health",json!({})).await {
+                        Ok(voice) => for kind in ["speaker","diarization"] {result["models"][kind]=voice["models"][kind].clone();},
+                        Err(error) => for kind in ["speaker","diarization"] {result["models"][kind]=json!({"available":false,"error":error});},
+                    }
+                }
+                json!({"configured":true,"ready":true,"models":result})
+            },
             Err(error) => json!({"configured":true,"ready":false,"error":error}),
         }
     }

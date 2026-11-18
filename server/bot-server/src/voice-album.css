@@ -1,0 +1,29 @@
+.va-area { max-width: 860px; margin: 0 auto; display: grid; gap: 18px; }
+.va-area h2, .va-area h3, .va-area p { margin: 0; }
+.va-area h2 { font-size: 22px; line-height: 1.4; }
+.va-area h3 { font-size: 16px; line-height: 1.5; }
+.va-area>.cc-button { justify-self: start; }
+.va-head, .va-fields { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.va-head { justify-content: space-between; }
+.va-area .cc-box { margin: 0; padding: 18px 20px; }
+.va-intro, .va-form, .va-section, .va-clips { display: grid; gap: 12px; }
+.va-area .va-intro { max-width: 650px; line-height: 1.8; }
+.va-intro .cc-button { justify-self: start; }
+.va-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 12px; }
+.va-card { background: #1d2a24; color: #e6eee9; border: 1px solid #405449; border-radius: 10px; padding: 16px 18px; display: grid; gap: 8px; text-align: left; font: inherit; cursor: pointer; }
+.va-card:hover, .va-card:focus-visible { border-color: #8ed1a6; }
+.va-card strong { font-size: 17px; }
+.va-card span, .va-clip-info span, .va-options, .va-status { font-size: 13px; color: #b6c7bc; }
+.va-card .va-link { color: #a1e2b2; }
+.va-clip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border-top: 1px solid #39483f; padding-top: 10px; }
+.va-clip-info { display: grid; gap: 4px; margin-right: auto; }
+.va-clip audio { width: 100%; height: 34px; }
+.va-fields input, .va-fields select { max-width: 100%; min-height: 36px; }
+.va-status { max-width: 860px; margin: 10px auto; }
+.va-status:empty { display: none; }
+.va-options { padding: 14px 0; border-top: 1px solid #39483f; }
+.va-options summary { cursor: pointer; width: fit-content; }
+.va-options p, .va-options .cc-button { margin: 10px 6px 0 0; }
+.va-callout { color: #efd6a6; }
+.va-more summary { cursor: pointer; color: #a1e2b2; font-size: 13px; padding: 5px 0; }
+.va-more .va-clip { margin-top: 8px; }

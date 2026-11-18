@@ -59,8 +59,17 @@ impl BrainHost {
         }
         if method.starts_with("acceptance.") {return acceptance::dispatch(&self.config_dir,method,&payload);}
         if method=="household.graph.status" {return Ok(tokio::time::timeout(std::time::Duration::from_secs(3),brain.graphiti.health()).await.unwrap_or(json!({"ready":false,"state":"busy"})));}
+        if method=="household.voices" {
+            let mut album=brain.memory.household_rpc(method,&payload)?.ok_or("unsupported_household_method")?;
+            let models=&brain.config.models;
+            album["models_configured"]=json!(brain.models.configured()
+                && models.diarization_model.as_ref().is_some_and(|p|p.join("config.yaml").is_file())
+                && models.model_dir.as_ref().is_some_and(|p|p.join("speaker/ecapa-voxceleb/embedding_model.ckpt").is_file())
+                && models.speaker_python.as_ref().is_none_or(|p|p.is_file()));
+            return Ok(album);
+        }
         if method.starts_with("household.") {
-            let mutation=matches!(method,"household.settings.set"|"household.annotate"|"household.correct"|"household.forget"|"household.memory.confirm"|"household.memory.forget");
+            let mutation=matches!(method,"household.settings.set"|"household.voice.name"|"household.voice.separate"|"household.annotate"|"household.correct"|"household.forget"|"household.memory.confirm"|"household.memory.forget");
             if mutation {
                 brain.cancel_scoped(CancelScope::All,"memory_changed").await?;
                 let _gate=brain.turn_gate.write().await;

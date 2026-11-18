@@ -323,12 +323,15 @@ impl Brain {
         let job=tokio::spawn(async move{
             let Some(brain)=weak.upgrade() else{return};
             let result=async{
+                let mut samples=Vec::new();
                 let mut candidate=if brain.config.models.diarization_model.is_some(){
+                    let pcm=if brain.memory.voice_collection_for(&id)? {super::media::decode_output(&wav).ok()}else{None};
                     let mut value=brain.models.call("diarize",json!({"wav_base64":wav})).await?;
                     if let Some(segments)=value["segments"].as_array_mut(){
-                        for segment in segments {
+                        for (index,segment) in segments.iter_mut().enumerate() {
                             if segment.get("embedding").is_some() && !segment["overlap"].as_bool().unwrap_or(true){
                                 let request=identity_request(memory::IdentityKind::Speaker,segment)?;
+                                if let Some(sample)=pcm.as_deref().and_then(|pcm|voice_excerpt(pcm,index,segment,&request)){samples.push(sample);}
                                 segment["match"]=serde_json::to_value(brain.memory.identify(request)?).map_err(|e|e.to_string())?;
                             }
                             if let Some(object)=segment.as_object_mut(){object.remove("embedding");}
@@ -350,7 +353,7 @@ impl Brain {
                         segment["asr_segments"]=json!(aligned);segment["text_alignment"]=json!("segment_overlap_only");
                     }
                 }
-                brain.memory.journal_identity(&id,revision,candidate.clone())?;
+                brain.memory.journal_identity_samples(&id,revision,candidate.clone(),&samples)?;
                 brain.emit("identity.observed",Some(&id),json!({"candidate":candidate,"source_revision":revision}));
                 Ok::<(),String>(())
             }.await;
@@ -358,6 +361,23 @@ impl Brain {
         });
         jobs.insert(turn_id,job);Ok(())
     }
+}
+
+/// Copy a bounded excerpt of the original PCM at the model's sample offsets.
+fn voice_excerpt(pcm: &[u8], index: usize, segment: &Value, identity: &memory::IdentityRequest) -> Option<memory::VoiceSample> {
+    if !identity.quality_ok || segment["single_speaker_verified"] != true || segment["overlap"] != false || segment["sample_rate"] != 16000 {
+        return None;
+    }
+    let start = usize::try_from(segment["start_sample"].as_u64()?).ok()?;
+    let end = usize::try_from(segment["end_sample"].as_u64()?).ok()?;
+    if end > pcm.len() / 2 { return None; }
+    let count = end.checked_sub(start)?.min(6 * 16000);
+    if count < 3 * 16000 { return None; }
+    Some(memory::VoiceSample {
+        index, model_id: identity.model_id.clone(), embedding: identity.embedding.clone(),
+        wav: super::media::pcm_wav(&pcm[start * 2..(start + count) * 2]),
+        duration_ms: (count / 16) as u32,
+    })
 }
 
 fn explicit_print_request(transcript:&str,quote:&str)->bool{

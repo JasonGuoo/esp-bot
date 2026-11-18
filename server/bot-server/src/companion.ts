@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LocalCamera, PcmRecorder, base64ToBuffer, readImageFile, readWavFile, type CapturedWav } from "./capture";
 import { CONSOLE_PANELS, consoleTemplate, type ConsolePanel } from "./console-layout";
+import { mountVoiceAlbum } from "./voice-album";
 import { mountHousehold, readArtifactContent } from "./household";
 import { deviceDeliveryText, deviceReplyMetrics, renderActivity, renderCapabilities, renderDeviceStatus, renderRuntimeMetrics, renderTurnTimings, turnStageMetric, harnessTimingMetric, type DeviceDisplayReport } from "./console-presenters";
 import "./companion.css";
@@ -127,6 +128,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   let turnBusy = false;
   let backendCancellable = false;
   let householdPlaying = false;
+  let voicePlaying = false;
   let stopBusy = false;
   let operationBusy = false;
   let statusBusy = false;
@@ -175,8 +177,10 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   const request = async <T = unknown>(method: string, payload: unknown = {}): Promise<T> => {
     return invoke<T>("companion_request", { method, payload });
   };
+  const voiceAlbum = mountVoiceAlbum($("#cc-panel-voices"), request, () => void refreshFamily(), playing => { voicePlaying = playing; updateControls(); });
   const householdController = mountHousehold($("#cc-panel-household"), $("#cc-panel-tasks"), {
     request, notice, profiles: () => profiles, onProfilesChange: refreshFamily,
+    openVoiceGroup: (id) => { activatePanel("voices"); voiceAlbum.open(id); },
     onPlaybackChange: (playing) => { householdPlaying = playing; updateControls(); },
   });
 
@@ -242,6 +246,9 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     if (next === "devices") void refreshCredentials().catch((error) => notice(errorText(error), true));
     if (next === "tools") void refreshPermissions();
     householdController.setPanel(next, visible);
+    voiceAlbum.show(next === "voices" && visible);
+    $("#cc-refresh-status").hidden = next === "voices";
+    updateControls();
   }
   function updateControls(): void {
     const blocked = turnBusy || operationBusy || captureConverting;
@@ -256,8 +263,10 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     // Device turns may be waiting, presenting or listening after foreground
     // inference has returned. Only the backend's live lifecycle is authoritative;
     // a retained result card and unrelated configuration writes are not work to stop.
-    $<HTMLButtonElement>("#cc-stop").disabled = stopBusy || !(turnBusy || recordPurpose !== null
-      || captureConverting || cameraDialog.open || audio !== null || householdPlaying || backendCancellable);
+    const stopButton = $<HTMLButtonElement>("#cc-stop");
+    stopButton.disabled = stopBusy || !(turnBusy || recordPurpose !== null
+      || captureConverting || cameraDialog.open || audio !== null || householdPlaying || voicePlaying || backendCancellable);
+    stopButton.hidden = panel === "voices" && stopButton.disabled;
     memberFocus.disabled = blocked;
     $<HTMLButtonElement>("#cc-record").disabled = blocked || (recordPurpose !== null && recordPurpose !== "chat");
     $<HTMLButtonElement>("#cc-choose-wav").disabled = blocked || recordPurpose !== null;
@@ -333,7 +342,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     turnGeneration += 1;
     const turn = activeTurn;
     activeTurn = null; turnBusy = false;
-    cancelCapture(); closeCamera(); stopPlayback(); householdController.stopMedia(); clearToken();
+    cancelCapture(); closeCamera(); stopPlayback(); householdController.stopMedia(); voiceAlbum.stop(); clearToken();
     wavDraft = null; renderDraft(); phase("idle", "已停止本地采集和播放。");
     updateControls();
     try {
@@ -1060,6 +1069,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     const checkValue = (selector: string, checked: boolean): void => {
       if (canPopulate(selector)) $<HTMLInputElement>(selector).checked = checked;
     };
+    inputValue("#cc-diarization-model", models.diarization_model); inputValue("#cc-speaker-python", models.speaker_python);
     inputValue("#cc-local-python", models.python); inputValue("#cc-local-script", models.script);
     inputValue("#cc-local-model-dir", models.model_dir); inputValue("#cc-local-voice", models.voice); inputValue("#cc-local-timeout", models.request_timeout_seconds);
     inputValue("#cc-asr-backend", string(models.asr_backend, "whisper"));
@@ -1286,6 +1296,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     while (section) { section.open = true; section = section.parentElement?.closest("details") ?? null; }
   }, true);
   on("#cc-notice-dismiss", () => notice(""));
+  on("#cc-family-voices", () => activatePanel("voices"));
   on("#cc-review-permissions", () => activatePanel("tools"));
   on("#cc-review-questions", () => activatePanel("talk"));
   on("#cc-tools-refresh", async () => { await refreshStatus(); await refreshPermissions(); });
@@ -1315,7 +1326,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     }, "cc-route-form");
   });
   form("#cc-local-form", "正在保存本地模型环境…", async () => {
-    const update = { python: formInput("#cc-local-python"), script: optionalPath("#cc-local-script"), model_dir: optionalPath("#cc-local-model-dir"), voice: formInput("#cc-local-voice") || null, request_timeout_seconds: formNumber("#cc-local-timeout", 1, 600), asr_backend: formInput("#cc-asr-backend"), rma_qwen_python: optionalPath("#cc-rma-qwen-python"), rma_qwen_worker: optionalPath("#cc-rma-qwen-worker"), rma_qwen_model: optionalPath("#cc-rma-qwen-model") };
+    const update = { diarization_model: optionalPath("#cc-diarization-model"), speaker_python: optionalPath("#cc-speaker-python"), python: formInput("#cc-local-python"), script: optionalPath("#cc-local-script"), model_dir: optionalPath("#cc-local-model-dir"), voice: formInput("#cc-local-voice") || null, request_timeout_seconds: formNumber("#cc-local-timeout", 1, 600), asr_backend: formInput("#cc-asr-backend"), rma_qwen_python: optionalPath("#cc-rma-qwen-python"), rma_qwen_worker: optionalPath("#cc-rma-qwen-worker"), rma_qwen_model: optionalPath("#cc-rma-qwen-model") };
     if (update.asr_backend === "rma_qwen" && (!update.rma_qwen_python || !update.rma_qwen_worker || !update.rma_qwen_model)) throw new Error("使用 RMA Qwen 时，请填写 RMA Python、Worker 和模型目录。");
     await patchConfiguration((config) => { config.models = { ...object(config.models), ...update }; }, "cc-local-form");
     latestModelHealth = null; renderCapabilities(container); $("#cc-models-json").textContent = "本地环境已改变，请重新检查能力状态。";
@@ -1509,7 +1520,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   function localCleanup(): void {
     keyInput.value = "";
     turnGeneration += 1; mediaGeneration += 1; recorder.cancel(); camera.close();
-    stopPlayback(); householdController.stopMedia(); clearReplayClips(); clearToken(); samples = []; wavDraft = null;
+    stopPlayback(); householdController.stopMedia(); voiceAlbum.stop(); clearReplayClips(); clearToken(); samples = []; wavDraft = null;
   }
   const onPageHide = () => {
     const turn = activeTurn;
@@ -1525,6 +1536,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       const data = object(event.payload); const kind = string(data.kind);
       const labels: Record<string, string> = { "service.started": "对话服务已启动", "service.stopped": "对话服务已停止", "turn.started": "开始处理一次主动输入", "turn.completed": "本轮任务已完成", "turn.failed": "本轮任务未完成", "turn.cancelled": "本轮任务已取消", "harness_permission_required": "工具操作等待确认", "service.start_failed": "对话服务启动未完成" };
       if (labels[kind]) addActivity(labels[kind]);
+      if (kind === "identity.observed") voiceAlbum.changed();
       if (kind.includes("permission")) void refreshPermissions();
       if (kind.includes("question")) void refreshQuestions();
       if (["service.started", "service.stopped", "harness_started", "harness_stopped"].includes(kind)) { void refreshStatus(); void refreshPermissions(); }
@@ -1534,7 +1546,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
         || ["turn.started", "turn.completed", "turn.failed", "turn.cancelled"].includes(kind)) void refreshStatus();
       if (kind === "service.started") phase("idle", "服务已启动，可以开始对话。");
       if (kind === "service.stopped") {
-        backendCancellable = false;
+        backendCancellable = false; voiceAlbum.stop();
         cancelCapture(); closeCamera(); stopPlayback(); householdController.stopMedia(); phase("idle", "服务已停止。");
         activeDeviceTurn = null;
         resultDeviceTurn = null;
@@ -1672,10 +1684,11 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       if (!visible) { keyInput.value = ""; cancelCapture(); closeCamera(); stopPlayback(); clearToken(); }
       else { void refreshStatus(); void refreshPermissions(); }
       householdController.setPanel(panel, visible);
+      voiceAlbum.show(panel === "voices" && visible);
     },
     dispose(): void {
       if (disposed) return;
-      disposed = true; localCleanup(); householdController.dispose(); unsubscribe?.(); unsubscribeLan?.();
+      disposed = true; voiceAlbum.show(false); localCleanup(); householdController.dispose(); unsubscribe?.(); unsubscribeLan?.();
       window.clearInterval(statusTimer); window.clearInterval(permissionTimer);
       window.removeEventListener("pagehide", onPageHide);
     },

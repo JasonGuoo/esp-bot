@@ -5,6 +5,8 @@
 //! Matching supplies a candidate and cannot authorize profile memory or wake.
 
 mod identity;
+mod voice_album;
+pub(crate) use voice_album::VoiceSample;
 mod store;
 mod types;
 mod household_types;

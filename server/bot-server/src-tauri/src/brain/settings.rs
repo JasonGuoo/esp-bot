@@ -101,6 +101,7 @@ pub fn validate(config: &BrainConfig) -> Result<(), String> {
     config.memory.validate()?;
     config.tasks.validate()?;
     config.presentation.validate()?;
+    if config.models.speaker_python.as_ref().is_some_and(|p|!p.is_absolute()){return Err("speaker_python_path_must_be_absolute".into());}
     if config.models.diarization_model.as_ref().is_some_and(|p|!p.is_absolute()){return Err("diarization_path_must_be_absolute".into());}
     if !(100..=4000).contains(&config.conversation.max_reply_characters) { return Err("reply_limit_must_be_100_to_4000".into()); }
     if !(30..=1800).contains(&config.conversation.idle_session_seconds) { return Err("session_idle_must_be_30_to_1800_seconds".into()); }

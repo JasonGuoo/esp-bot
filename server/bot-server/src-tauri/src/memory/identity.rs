@@ -225,7 +225,7 @@ pub fn fuse_identity(face: Option<&MatchResult>, speaker: Option<&MatchResult>) 
     FusedIdentity { status: status.into(), profile_id, reason: reason.into(), authorizes_profile_memory: false }
 }
 
-fn checked_model_id(value: &str) -> Result<String, String> {
+pub(super) fn checked_model_id(value: &str) -> Result<String, String> {
     let model_id = clean_text(value, 256, false, "model_id")?;
     if !model_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_/.:@+".contains(&byte)) {
         return Err("model_id must be a stable ASCII weights/preprocessing identifier".into());
@@ -233,7 +233,7 @@ fn checked_model_id(value: &str) -> Result<String, String> {
     Ok(model_id)
 }
 
-fn normalize(input: &[f32]) -> Result<Vec<f32>, String> {
+pub(super) fn normalize(input: &[f32]) -> Result<Vec<f32>, String> {
     if !(MIN_DIMENSION..=MAX_DIMENSION).contains(&input.len()) || input.iter().any(|value| !value.is_finite()) {
         return Err("embedding must contain 32..4096 finite float values".into());
     }
@@ -253,15 +253,15 @@ fn centroid(vectors: &[Vec<f32>], dimension: usize) -> Result<Vec<f32>, String> 
     normalize(&average)
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
+pub(super) fn cosine(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum::<f64>().clamp(-1.0, 1.0) as f32
 }
 
-fn encode(vector: &[f32]) -> Vec<u8> {
+pub(super) fn encode(vector: &[f32]) -> Vec<u8> {
     vector.iter().flat_map(|value| value.to_le_bytes()).collect()
 }
 
-fn decode(bytes: &[u8], dimension: usize) -> Result<Vec<f32>, String> {
+pub(super) fn decode(bytes: &[u8], dimension: usize) -> Result<Vec<f32>, String> {
     if !(MIN_DIMENSION..=MAX_DIMENSION).contains(&dimension) || bytes.len() != dimension * 4 {
         return Err("stored identity template has an invalid dimension".into());
     }
