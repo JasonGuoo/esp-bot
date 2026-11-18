@@ -364,7 +364,8 @@ fn build_body(route: &Route, cfg: &Config, messages: &[Message]) -> Value {
     if !cfg.system_prompt.is_empty() {
         msgs.push(json!({ "role": "system", "content": cfg.system_prompt }));
     }
-    msgs.extend(messages.iter().map(|m| json!({ "role": m.role, "content": m.content })));
+    // "delta" context is for the persistent Codex thread only; stateless routes get the full context.
+    msgs.extend(messages.iter().filter(|m| m.role != "delta").map(|m| json!({ "role": m.role, "content": m.content })));
     let mut body = json!({
         "model": route.model,
         "messages": msgs,
@@ -472,9 +473,15 @@ async fn drive(core: Core, messages: Vec<Message>, cancel: CancellationToken, ou
     // Per-turn context supplied by the caller as `system` messages (e.g. a brain's memory recall).
     // HTTP routes receive them as system messages after the configured prompt; the Codex thread
     // only takes one text input per turn, so the context is prefixed to the user text there.
+    // A caller may add role "delta" messages: only what the thread has not seen yet. The Codex
+    // engine sends them instead of the full context when its thread is not new.
     let codex_text = {
-        let context: Vec<&str> = messages.iter().filter(|m| m.role == "system" && !m.content.trim().is_empty()).map(|m| m.content.as_str()).collect();
-        if context.is_empty() { last_user.clone() } else { format!("{}\n\n{}", context.join("\n"), last_user) }
+        let join = |role: &str| -> String {
+            let context: Vec<&str> = messages.iter().filter(|m| m.role == role && !m.content.trim().is_empty()).map(|m| m.content.as_str()).collect();
+            if context.is_empty() { last_user.clone() } else { format!("{}\n\n{}", context.join("\n"), last_user) }
+        };
+        let delta = messages.iter().any(|m| m.role == "delta").then(|| join("delta"));
+        codex::TurnText { full: join("system"), delta }
     };
     let label = |c: &Cand| match c {
         Cand::Codex => core.codex.label(),

@@ -954,3 +954,37 @@ async fn shutdown_stops_codex_until_reopen() {
     let Some(Event::Done { timings, .. }) = evs.last() else { panic!("{evs:?}") };
     assert_eq!(timings.engine.as_deref(), Some("codex"));
 }
+
+async fn collect_messages(core: &Core, messages: Vec<fast_responder::Message>) -> Vec<Event> {
+    let mut turn = core.respond_fresh(messages, CancellationToken::new());
+    let mut evs = Vec::new();
+    while let Some(e) = turn.next().await {
+        let end = e.is_terminal();
+        evs.push(e);
+        if end { break; }
+    }
+    evs
+}
+
+#[tokio::test]
+async fn a_known_thread_gets_the_delta_and_a_new_thread_the_full_context() {
+    let (c, log) = core(EngineMode::CodexOnly, OK, None, 1000);
+    c.warmup_codex().await;
+    let ask = |q: &str| vec![
+        fast_responder::Message { role: "system".into(), content: "CTX-FULL".into() },
+        fast_responder::Message { role: "delta".into(), content: "CTX-DELTA".into() },
+        fast_responder::Message::user(q),
+    ];
+    let text = |i: usize| log.turn_inputs.lock().unwrap()[i]["input"][0]["text"].as_str().unwrap_or("").to_owned();
+    let base = log.turn_inputs.lock().unwrap().len();
+    collect_messages(&c, ask("一")).await;
+    assert!(text(base).starts_with("CTX-FULL") && text(base).ends_with("一"), "primed thread is new: {}", text(base));
+    assert!(!c.codex().input_stats().last_delta);
+    collect_messages(&c, ask("二")).await;
+    assert!(text(base + 1).starts_with("CTX-DELTA") && !text(base + 1).contains("CTX-FULL"), "{}", text(base + 1));
+    assert!(c.codex().input_stats().last_delta);
+    c.codex().reset_thread(false).await;
+    collect_messages(&c, ask("三")).await;
+    assert!(text(base + 2).starts_with("CTX-FULL"), "a replacement thread needs everything: {}", text(base + 2));
+    assert_eq!(c.codex().input_stats().submitted, 3);
+}

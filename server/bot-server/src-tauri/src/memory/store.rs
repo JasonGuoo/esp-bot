@@ -885,6 +885,34 @@ mod background_tests {
     }
 
     #[test]
+    fn first_turn_of_a_day_gets_a_short_summary_of_the_previous_day() {
+        use crate::memory::{HouseholdExtraction, JournalInput};
+        let dir = std::env::temp_dir().join(format!("xiaodai-yesterday-{}", Uuid::new_v4()));
+        let store = Store::open(dir.clone(), MemoryConfig::default()).unwrap();
+        store.update_household_settings(&json!({"history_enabled":true,"allow_cloud":true,"retention_days":7})).unwrap();
+        let turn = |id: &str, at: i64, text: &str| store.journal_input(&JournalInput {
+            turn_id:id.into(), activation_id:format!("visit-{id}"), utterance_id:None, text:text.into(), occurred_at_ms:at,
+            input_kind:"text".into(), speaker_person_id:None, private_profile_id:None, allow_cloud:true, metadata:json!({}),
+        }).unwrap();
+        let yesterday = turn("y1", now_ms() - 86_400_000, "我们去看了恐龙展");
+        store.journal_finish("y1","completed",None,json!({})).unwrap();
+        store.connection().unwrap().execute("UPDATE household_jobs SET available_at_ms=0 WHERE kind='organize'",[]).unwrap();
+        let job = store.next_household_job(false).unwrap().unwrap();
+        let extraction: HouseholdExtraction = serde_json::from_value(json!({"items":[{"kind":"event","content":"一家人去看了恐龙展",
+            "subject_entity_ids":[],"assertion_kind":"observed","sources":[{"conversation_turn_id":yesterday.conversation_turn_id,
+            "source_revision":yesterday.source_revision,"quote":"我们去看了恐龙展"}]}]})).unwrap();
+        assert!(store.complete_household_job(&job,&extraction).unwrap());
+        let today = turn("t1", now_ms(), "早上好");
+        let summary = store.household_previous_day_summary(&today.daily_conversation_id,true).unwrap().expect("first turn of the day");
+        assert!(summary.starts_with("昨天") && summary.contains("- 家里：一家人去看了恐龙展"), "{summary}");
+        assert!(store.household_previous_day_summary(&yesterday.daily_conversation_id,true).unwrap().is_none(), "no earlier day");
+        turn("t2", now_ms(), "再聊聊");
+        assert!(store.household_previous_day_summary(&today.daily_conversation_id,true).unwrap().is_none(), "only the first turn");
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn anonymous_derived_fact_does_not_claim_self_reported_identity() {
         use crate::memory::{HouseholdExtraction, JournalInput};
         let dir = std::env::temp_dir().join(format!("xiaodai-anonymous-{}", Uuid::new_v4()));

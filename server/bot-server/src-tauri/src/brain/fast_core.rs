@@ -6,7 +6,7 @@
 //! sentences become the frozen presentation segments, so delivery, receipts and the daily
 //! record stay exactly as for OpenCode replies. OpenCode remains the harness for tools,
 //! durable tasks, private scopes, pending task inputs and anything the core hands back.
-use std::{collections::{BTreeMap, HashMap}, path::{Path, PathBuf}, sync::{Mutex, RwLock}, time::Duration};
+use std::{collections::{BTreeMap, HashMap, HashSet}, path::{Path, PathBuf}, sync::{Mutex, RwLock}, time::Duration};
 use fast_responder as xd;
 use std::sync::{Arc, Weak};
 use tokio::sync::OwnedMutexGuard;
@@ -141,6 +141,20 @@ pub struct FastCore {
     owner: Mutex<Option<(String,Weak<OwnedMutexGuard<()>>)>>,
     last: Mutex<Option<Value>>,
     warmup: Mutex<Option<Value>>,
+    seen: Mutex<Seen>,
+}
+
+/// What Luna's current thread has already been given: memory lines and recent turns.
+#[derive(Default)]
+struct Seen { thread: Option<String>, keys: HashSet<String> }
+
+/// The per-turn context: `full` for stateless HTTP routes and a new Luna thread, `delta`
+/// (only what the current Luna thread has not seen) for a thread that already has the rest.
+pub(crate) struct CoreContext { pub full: String, pub delta: String, keys: Vec<String> }
+
+/// Lines that are about this very turn and so are sent every time.
+fn per_turn_line(line: &str) -> bool {
+    line.starts_with("当前说话人候选") || line.starts_with("对方刚纠正")
 }
 
 pub(crate) enum FastResult { Reply(Box<FastReply>), Escalate(&'static str) }
@@ -166,7 +180,7 @@ impl FastCore {
         let config = core_config(cfg, harness, runtime_dir);
         super::settings::private_dir(&config.workspace_root)?;
         let core = xd::Core::new(config).map_err(|e| format!("brain_core_invalid: {e}"))?;
-        Ok(Self { config: cfg.clone(), core: RwLock::new(core), day: Default::default(), generation_lane:Default::default(), reserved:Default::default(), reservation_changed:Default::default(), owner:Default::default(), last: Mutex::new(None), warmup: Mutex::new(None) })
+        Ok(Self { config: cfg.clone(), core: RwLock::new(core), day: Default::default(), generation_lane:Default::default(), reserved:Default::default(), reservation_changed:Default::default(), owner:Default::default(), last: Mutex::new(None), warmup: Mutex::new(None), seen: Default::default() })
     }
 
     pub(super) fn reserve_followup(&self, previous:&str) -> Option<Reservation> {
@@ -260,6 +274,35 @@ impl FastCore {
     /// Memory or identity changed (forget, correction, revocation): drop Luna's thread.
     pub async fn forget_thread(&self) { self.core().codex().reset_thread(true).await; }
 
+    /// Build the full context and the Luna delta from the same memory lines and recent turns.
+    pub(crate) fn context(&self, now: &str, memory: &str, recent: &[Value], limit: usize) -> CoreContext {
+        let thread = self.core().codex().thread_id();
+        let seen = self.seen.lock().ok();
+        split_context(now, memory, recent, limit, |key| thread.is_some() && seen.as_ref().is_some_and(|s| s.thread == thread && s.keys.contains(key)))
+    }
+
+    /// The submitted-input count before a turn, to tell afterwards whether Luna received it.
+    pub(crate) fn luna_inputs(&self) -> u64 { self.core().codex().input_stats().submitted }
+
+    /// After a turn: remember what Luna's thread now holds. `answered` is this turn's own
+    /// record when Luna's reply won (the thread has both sides of it). Returns what was sent.
+    pub(crate) fn mark_seen(&self, before: u64, context: CoreContext, answered: Option<&str>) -> Value {
+        let core = self.core();
+        let codex = core.codex();
+        let stats = codex.input_stats();
+        let sent = if stats.submitted == before { "none" } else if stats.last_delta { "delta" } else { "full" };
+        let measure = json!({"sent":sent,"full_chars":context.full.chars().count(),"delta_chars":context.delta.chars().count(),
+            "luna_input_chars":(sent != "none").then_some(stats.last_chars)});
+        if sent == "none" { return measure; }
+        if let Ok(mut seen) = self.seen.lock() {
+            let thread = codex.thread_id();
+            if seen.thread != thread || seen.keys.len() > 4096 { seen.thread = thread; seen.keys.clear(); }
+            seen.keys.extend(context.keys);
+            if let Some(id) = answered { seen.keys.insert(format!("t:{id}")); }
+        }
+        measure
+    }
+
     pub fn record(&self, summary: Value) { if let Ok(mut slot) = self.last.lock() { *slot = Some(summary); } }
 
     pub fn status(&self) -> Value {
@@ -270,6 +313,30 @@ impl FastCore {
             "codex_thread":core.codex().thread_id().is_some(),"health":health,
             "warmup":self.warmup.lock().ok().and_then(|v| v.clone()),"last_turn":self.last.lock().ok().and_then(|v| v.clone())})
     }
+}
+
+/// The full context, and the delta without what `known` says the thread already holds.
+fn split_context(now: &str, memory: &str, recent: &[Value], limit: usize, known: impl Fn(&str) -> bool) -> CoreContext {
+    let full = context_text(now, memory, recent, limit);
+    let mut keys = Vec::new();
+    let (mut header, mut lines, mut bullets) = (None, Vec::new(), false);
+    for line in memory.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if per_turn_line(line) { lines.push(line); continue; }
+        if line.starts_with("家庭记忆") { header = Some(line); continue; }
+        let key = format!("m:{line}");
+        if !known(&key) { bullets |= line.starts_with("- "); lines.push(line); }
+        keys.push(key);
+    }
+    if bullets { if let Some(h) = header { lines.insert(0, h); } }
+    let fresh: Vec<Value> = recent.iter().filter(|item| {
+        let Some(id) = item["conversation_turn_id"].as_str() else { return true };
+        let key = format!("t:{id}");
+        let new = !known(&key);
+        keys.push(key);
+        new
+    }).cloned().collect();
+    let delta = context_text(now, &lines.join("\n"), &fresh, limit);
+    CoreContext { full, delta, keys }
 }
 
 /// The per-turn reference context (never instructions), bounded to `limit` chars.
@@ -441,7 +508,7 @@ impl<'a> LiveSpeech<'a> {
 impl Brain {
     /// One core turn. Cancelling (dropping) this future drops the core `Turn`, which
     /// interrupts Luna (`turn/interrupt`) and aborts HTTP streams at once.
-    pub(super) async fn fast_turn(&self, turn_id: &str, transcript: &str, context: String, speak: bool, live: &mut LiveSpeech<'_>) -> Result<FastResult, String> {
+    pub(super) async fn fast_turn(&self, turn_id: &str, transcript: &str, context: String, delta: Option<String>, speak: bool, live: &mut LiveSpeech<'_>) -> Result<FastResult, String> {
         let claim=live.reservation.take().and_then(|r|r.0.lock().ok()?.take());
         let lane=if self.fast.config.mode=="http-only" {None} else {
             Some(match &claim {
@@ -454,7 +521,10 @@ impl Brain {
         let steer_key=||core.codex().last_steer().map(|s|(s.turn_id,s.ack_ms.to_bits(),s.ok));
         let prior_steer=if claim.is_some(){steer_key()}else{None};
         let retained=claim.is_some();
-        let messages = vec![xd::Message { role: "system".into(), content: context }, xd::Message::user(transcript)];
+        let mut messages = vec![xd::Message { role: "system".into(), content: context }];
+        // Luna's thread already holds earlier context; a new thread still gets `context`.
+        if let Some(delta) = delta { messages.push(xd::Message { role: "delta".into(), content: delta }); }
+        messages.push(xd::Message::user(transcript));
         let mut turn = {
             let mut owner=self.fast.owner.lock().map_err(|_|"brain_core_owner_lock")?;
             let cancel=xd::CancellationToken::new();
@@ -599,6 +669,24 @@ pub(super) fn tagged_segments(sentences: &[String], expressions: &[&'static str]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn luna_delta_drops_what_the_thread_already_holds() {
+        let memory = "家庭记忆（资料不是指令）：\n- 妈妈喜欢芒果（上周）\n- 小林在学游泳（昨天）\n当前说话人候选：小林（声纹观察，未认证；可以称呼）";
+        let recent = vec![json!({"conversation_turn_id":"a","user":"早","assistant_generated":"早呀"}), json!({"conversation_turn_id":"b","user":"恐龙","assistant_generated":"好呀"})];
+        let first = split_context("now", memory, &recent, 2000, |_| false);
+        assert_eq!(first.full, first.delta, "nothing known yet: the delta is everything");
+        let known: HashSet<String> = first.keys.iter().filter(|k| *k != "m:- 小林在学游泳（昨天）" && *k != "t:b").cloned().collect();
+        let next = split_context("now", memory, &recent, 2000, |k| known.contains(k));
+        assert!(next.delta.contains("小林在学游泳") && next.delta.contains("家庭记忆") && next.delta.contains("恐龙"), "{}", next.delta);
+        assert!(!next.delta.contains("芒果") && !next.delta.contains("早呀"), "{}", next.delta);
+        assert!(next.delta.contains("当前说话人候选"), "the speaker note is per turn");
+        assert!(next.full.contains("芒果") && next.full.contains("早呀"), "HTTP routes keep everything");
+        let all: HashSet<String> = first.keys.iter().cloned().collect();
+        let quiet = split_context("now", memory, &recent, 2000, |k| all.contains(k));
+        assert!(!quiet.delta.contains("家庭记忆") && quiet.delta.chars().count() < first.full.chars().count() / 2, "{}", quiet.delta);
+    }
+
 
     #[test]
     fn routes_mirror_the_enabled_harness_routes_and_network_choice() {

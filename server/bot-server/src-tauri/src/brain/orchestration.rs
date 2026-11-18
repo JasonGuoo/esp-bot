@@ -140,6 +140,13 @@ impl Brain {
             destination:memory::ContextDestination::Cloud,query:transcript.clone(),include_household:true})?;
         let family_items=self.memory.household_context_items(&transcript,true)?;
         let mut family=memory_text::bullets(&family_items,crate::time::now_ms() as i64,MEMORY_NOTE_CHARS);
+        // The first turn of a household day brings a short summary of the previous one.
+        if input.profile_id.is_none() {
+            if let Ok(Some(summary))=self.memory.household_previous_day_summary(&journal.daily_conversation_id,true) {
+                family.push('\n');family.push_str(&summary);
+                self.emit("memory.previous_day_summary",Some(&input.turn_id),json!({"chars":summary.chars().count()}));
+            }
+        }
         let mut graph_hits=Value::Null;
         let revision=self.context_revision(input.profile_id.as_deref())?;
         let mut recent=self.memory.household_recent_context(&journal.daily_conversation_id,true)?;
@@ -218,8 +225,10 @@ impl Brain {
                 let local=chrono::DateTime::from_timestamp_millis(crate::time::now_ms() as i64).unwrap_or_default().with_timezone(&zone);
                 let now=local.format("%Y-%m-%d %H:%M %A").to_string();
                 let evening={use chrono::Timelike; let hour=local.hour(); !(6..21).contains(&hour)};
-                let mut context=fast_core::context_text(&now,&format!("{}\n{}",legacy.text,family),&bounded_recent,self.config.brain_core.memory_context_chars);
-                if let Some(note)=&supplement_note {context.push_str("\n");context.push_str(note);}
+                let mut core_context=self.fast.context(&now,&format!("{}\n{}",legacy.text,family),&bounded_recent,self.config.brain_core.memory_context_chars);
+                if let Some(note)=&supplement_note {for text in [&mut core_context.full,&mut core_context.delta]{text.push('\n');text.push_str(note);}}
+                let (context,delta)=(core_context.full.clone(),(core_context.delta!=core_context.full).then(||core_context.delta.clone()));
+                let luna_before=self.fast.luna_inputs();
                 let plan_context=PlanContext { household_id:journal.household_id.clone(), daily_conversation_id:journal.daily_conversation_id.clone(),
                     conversation_turn_id:journal.conversation_turn_id.clone(), task_id:None };
                 let mut speech=fast_core::LiveSpeech::new(work.output, plan_context, &source_refs, work.supplement.take().and_then(|s|s.reservation));
@@ -227,11 +236,13 @@ impl Brain {
                 speech.evening=evening;
                 speech.supplement=supplement_note.is_some();
                 speech.origin=started;
-                let result=self.timed_stage(&input.turn_id,"brain_core",&mut timings,self.fast_turn(&input.turn_id,&transcript,context,speak,&mut speech)).await;
+                let result=self.timed_stage(&input.turn_id,"brain_core",&mut timings,self.fast_turn(&input.turn_id,&transcript,context,delta,speak,&mut speech)).await;
+                let luna_won=matches!(&result,Ok(fast_core::FastResult::Reply(r)) if r.summary["winner_engine"]=="codex");
+                let luna_context=self.fast.mark_seen(luna_before,core_context,luna_won.then_some(journal.conversation_turn_id.as_str()));
                 for (mark,ms) in std::mem::take(&mut speech.marks) {timings.marks_ms.insert(mark.into(),ms);}
                 match result? {
-                    fast_core::FastResult::Reply(reply)=>{timings.brain=Some(reply.summary.clone());fast_reply=Some(*reply);},
-                    fast_core::FastResult::Escalate(reason)=>{timings.brain=Some(json!({"engine":"opencode","reason":reason}));},
+                    fast_core::FastResult::Reply(reply)=>{let mut brain=reply.summary.clone();brain["luna_context"]=luna_context;timings.brain=Some(brain);fast_reply=Some(*reply);},
+                    fast_core::FastResult::Escalate(reason)=>{timings.brain=Some(json!({"engine":"opencode","reason":reason,"luna_context":luna_context}));},
                 }
             },
             Err(reason)=>{self.skip_stage(&input.turn_id,"brain_core",reason,&mut timings);timings.brain=Some(json!({"engine":"opencode","reason":reason}));},

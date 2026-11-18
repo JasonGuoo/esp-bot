@@ -19,7 +19,7 @@ pub mod net;
 pub mod sse;
 pub mod splitter;
 
-pub use crate::codex::{CodexEngine, CodexWarmup, InterruptStats, SteerStats};
+pub use crate::codex::{CodexEngine, CodexWarmup, InputStats, InterruptStats, SteerStats, TurnText};
 pub use crate::config::{BargeIn, CodexConfig, Config, EngineMode, GrokBotDelegate, Route, DEFAULT_WORKSPACE_ROOT};
 pub use crate::health::{EngineStats, HealthConfig, HealthSnapshot, LunaState, Sample, SampleOutcome};
 pub use crate::net::{ActiveInterface, HttpNetwork};

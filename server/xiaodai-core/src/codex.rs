@@ -547,6 +547,7 @@ struct Inner {
     next_active: AtomicI64,
     interrupt: Mutex<Option<InterruptStats>>,
     steer: Mutex<Option<SteerStats>>,
+    inputs: Mutex<InputStats>,
     /// Health-probe thread: (connection identity, thread id). Separate from the conversation.
     probe: tokio::sync::Mutex<Option<(usize, String)>>,
     /// Set by `shutdown`: no (re)spawn until `reopen`.
@@ -697,6 +698,7 @@ impl CodexEngine {
                 next_active: AtomicI64::new(1),
                 interrupt: Mutex::new(None),
                 steer: Mutex::new(None),
+                inputs: Mutex::new(InputStats::default()),
                 probe: tokio::sync::Mutex::new(None),
                 closed: std::sync::atomic::AtomicBool::new(false),
             }),
@@ -743,6 +745,19 @@ impl CodexEngine {
 
     pub fn last_steer(&self) -> Option<SteerStats> {
         self.inner.steer.lock().unwrap().clone()
+    }
+
+    /// What reached the conversation thread: how many inputs, and whether the last one was
+    /// the caller's delta or the full context.
+    pub fn input_stats(&self) -> InputStats {
+        self.inner.inputs.lock().unwrap().clone()
+    }
+
+    fn note_input(&self, delta: bool, chars: usize) {
+        let mut s = self.inner.inputs.lock().unwrap();
+        s.submitted += 1;
+        s.last_delta = delta;
+        s.last_chars = chars;
     }
 
     /// Wait (poll) until the last interrupt saw its `turn/completed`, or timeout.
@@ -1090,7 +1105,7 @@ impl CodexEngine {
     }
 
     /// The conversation thread for the next turn (rotates only if `max_turns_per_thread` > 0).
-    async fn thread_for_turn(&self, conn: &Arc<RpcConn>) -> Result<(String, String, String), String> {
+    async fn thread_for_turn(&self, conn: &Arc<RpcConn>) -> Result<(String, String, String, bool), String> {
         let mut st = self.inner.state.lock().await;
         let (m, e) = (st.model.clone().unwrap_or_default(), st.effort.clone().unwrap_or_default());
         let max = self.inner.cfg.max_turns_per_thread;
@@ -1100,8 +1115,10 @@ impl CodexEngine {
             st.thread_turns = 0;
             st.threads_started += 1;
         }
+        // A primed or brand-new thread has not seen any caller context yet.
+        let fresh = st.thread_turns == 0;
         st.thread_turns += 1;
-        Ok((st.thread.clone().unwrap_or_default(), m, e))
+        Ok((st.thread.clone().unwrap_or_default(), m, e, fresh))
     }
 
     /// `turn/steer` into the active turn; on success the turn's output is handed to this caller.
@@ -1139,7 +1156,7 @@ impl CodexEngine {
     /// One user utterance. Steers into a running turn (policy `steer`), or interrupts it (policy
     /// `interrupt`) and starts a new turn on the same thread. Sends Token/Reasoning, then
     /// Finished/Failed (unless cancelled) or Superseded (a later utterance took over).
-    async fn turn(&self, text: String, cancel: CancellationToken, idx: usize, tx: mpsc::UnboundedSender<(usize, AttemptMsg)>, allow_steer: bool) {
+    async fn turn(&self, input: TurnText, cancel: CancellationToken, idx: usize, tx: mpsc::UnboundedSender<(usize, AttemptMsg)>, allow_steer: bool) {
         let mut gate = self.inner.gate.lock().await;
         let conn = match self.ensure_ready().await {
             Ok(c) => c,
@@ -1154,7 +1171,10 @@ impl CodexEngine {
                 let tid = self.thread_id().unwrap_or_default();
                 match (self.inner.cfg.barge_in, a.turn_id.clone()) {
                     (BargeIn::Steer, Some(turn_id)) if allow_steer && !cancel.is_cancelled() => {
-                        if self.steer(&conn, &a, &tid, &turn_id, &text, &cancel, idx, &tx).await {
+                        // A steer joins a running turn, so the thread already holds the context.
+                        let text = input.delta.as_deref().unwrap_or(&input.full);
+                        if self.steer(&conn, &a, &tid, &turn_id, text, &cancel, idx, &tx).await {
+                            self.note_input(input.delta.is_some(), text.chars().count());
                             drop(gate);
                             a.done.cancelled().await;
                             if !a.steer_unanswered.load(Ordering::SeqCst) {
@@ -1177,7 +1197,7 @@ impl CodexEngine {
         if cancel.is_cancelled() {
             return;
         }
-        let (tid, model, effort) = match self.thread_for_turn(&conn).await {
+        let (tid, model, effort, fresh) = match self.thread_for_turn(&conn).await {
             Ok(x) => x,
             Err(e) => {
                 let _ = tx.send((idx, AttemptMsg::Failed(e)));
@@ -1187,7 +1207,12 @@ impl CodexEngine {
         let id = self.inner.next_active.fetch_add(1, Ordering::SeqCst);
         let act = Active::new(id, Sink { idx, tx, cancel });
         *self.inner.active.lock().unwrap() = Some(act.clone());
-        let params = self.turn_params(&tid, &text, &model, &effort);
+        let text = match &input.delta {
+            Some(delta) if !fresh => delta,
+            _ => &input.full,
+        };
+        self.note_input(!fresh && input.delta.is_some(), text.chars().count());
+        let params = self.turn_params(&tid, text, &model, &effort);
         let (started_tx, started_rx) = oneshot::channel::<Result<(), String>>();
         let timeout = Duration::from_millis(self.inner.cfg.turn_timeout_ms);
         let h = tokio::spawn(run_turn(conn, tid, params, act, timeout, Some(self.inner.clone()), Some(started_tx)));
@@ -1382,7 +1407,22 @@ async fn run_turn(
 
 /// Attempt wrapper for the core: returns as soon as `cancel` fires (the turn task keeps running
 /// in the background just long enough to send `turn/interrupt` and see `turn/completed`).
-pub(crate) async fn attempt(engine: CodexEngine, text: String, cancel: CancellationToken, idx: usize, tx: mpsc::UnboundedSender<(usize, AttemptMsg)>, allow_steer: bool) {
+/// One utterance for the conversation thread. `delta` is the caller's context for a thread
+/// that already holds the earlier context; a new thread always receives `full`.
+#[derive(Clone, Debug, Default)]
+pub struct TurnText {
+    pub full: String,
+    pub delta: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct InputStats {
+    pub submitted: u64,
+    pub last_delta: bool,
+    pub last_chars: usize,
+}
+
+pub(crate) async fn attempt(engine: CodexEngine, text: TurnText, cancel: CancellationToken, idx: usize, tx: mpsc::UnboundedSender<(usize, AttemptMsg)>, allow_steer: bool) {
     let (done_tx, done_rx) = oneshot::channel::<()>();
     let c = cancel.clone();
     tokio::spawn(async move {
