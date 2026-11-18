@@ -383,6 +383,7 @@ impl Store {
                 NewProfile {
                     display_name: name,
                     is_child: false,
+                    age_band: None,
                 },
                 self.config.max_profiles,
             )?;
@@ -599,6 +600,7 @@ mod tests {
             .create_profile(NewProfile {
                 display_name: "私密".into(),
                 is_child: false,
+                age_band: None,
             })
             .unwrap();
         let rev = input(&store, "private", now, Some(person.id));

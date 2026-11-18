@@ -10,7 +10,8 @@ import "./console.css";
 
 type JsonObject = Record<string, unknown>;
 type DeviceTurnView = { id: string; device: string; text: DeviceDisplayReport; image: DeviceDisplayReport };
-type Profile = { id: string; display_name: string; is_child: boolean; merged_into?: string | null };
+type Profile = { id: string; display_name: string; is_child: boolean; merged_into?: string | null; age_band?: string | null };
+const AGE_LABELS: Record<string, string> = { toddler: "幼儿", child: "小朋友", tween: "大孩子", teen: "青少年", adult: "大人", senior: "长辈" };
 type MemoryRecord = {
   id: string; scope: "household" | "profile"; profile_id: string | null; content: string;
   category: string; source: string; source_ref: string | null; confirmed: boolean;
@@ -679,13 +680,14 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       memberFocus.add(new Option(profile.display_name, profile.id));
       const row = element("div", "cc-manage-row");
       const meta = element("div", "cc-manage-meta");
-      meta.append(element("strong", "", profile.display_name), element("span", "cc-caption", profile.is_child ? "儿童档案 · 手动指定" : "家庭成员"));
+      meta.append(element("strong", "", profile.display_name), element("span", "cc-caption", [profile.is_child ? "儿童档案 · 手动指定" : "家庭成员", profile.age_band ? AGE_LABELS[profile.age_band] ?? "" : ""].filter(Boolean).join(" · ")));
       const actions = element("div", "cc-inline");
       actions.append(button(profile.id === selectedProfile ? "已选择" : "选择此人", () => changeProfile(profile.id)),
         button("编辑", () => {
           editingProfileId = profile.id;
           $<HTMLInputElement>("#cc-profile-edit-name").value = profile.display_name;
           $<HTMLInputElement>("#cc-profile-edit-child").checked = profile.is_child;
+          $<HTMLSelectElement>("#cc-profile-edit-age").value = profile.age_band ?? "";
           profileDialog.showModal();
         }),
         button("删除", () => perform("正在删除档案与关联数据…", async () => {
@@ -1316,7 +1318,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   memberFocus.addEventListener("change", () => { void changeProfile(memberFocus.value || null); });
   form("#cc-profile-edit-form", "正在更新成员档案…", async () => {
     if (!editingProfileId) return;
-    const profile = { display_name: formInput("#cc-profile-edit-name"), is_child: $<HTMLInputElement>("#cc-profile-edit-child").checked };
+    const profile = { display_name: formInput("#cc-profile-edit-name"), is_child: $<HTMLInputElement>("#cc-profile-edit-child").checked, age_band: $<HTMLSelectElement>("#cc-profile-edit-age").value };
     await stopConsole(false); await request("profile.update", { profile_id: editingProfileId, profile });
     profileDialog.close(); editingProfileId = null; resetConversationView(); await refreshFamily(); notice("成员档案已更新。");
   });
@@ -1445,7 +1447,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     event.preventDefault();
     void perform("正在创建家庭档案…", async () => {
       const name = $<HTMLInputElement>("#cc-profile-name").value.trim();
-      await request("profile.create", { display_name: name, is_child: $<HTMLInputElement>("#cc-profile-child").checked });
+      await request("profile.create", { display_name: name, is_child: $<HTMLInputElement>("#cc-profile-child").checked, age_band: $<HTMLSelectElement>("#cc-profile-age").value || null });
       $<HTMLInputElement>("#cc-profile-name").value = ""; await refreshFamily(); notice("档案已创建。点击“选择此人”后用于本轮对话。");
     });
   });

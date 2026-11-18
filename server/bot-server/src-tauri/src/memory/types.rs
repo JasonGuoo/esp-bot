@@ -110,6 +110,9 @@ pub struct NewProfile {
     pub display_name: String,
     #[serde(default = "yes")]
     pub is_child: bool,
+    /// Guardian-set: toddler, child, tween, teen, adult or senior. Never inferred.
+    #[serde(default)]
+    pub age_band: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -122,6 +125,8 @@ pub struct Profile {
     /// Archived alias metadata remains visible for historical attribution.
     #[serde(default)]
     pub merged_into: Option<String>,
+    #[serde(default)]
+    pub age_band: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

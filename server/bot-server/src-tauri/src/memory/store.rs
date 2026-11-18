@@ -35,6 +35,7 @@ pub(super) fn insert_profile(db:&Connection,input:NewProfile,max_profiles:usize)
         return Err("profile capacity reached; remove an unused profile first".into());
     }
     let now = now_ms();
+    let age_band = age_band(input.age_band.as_deref())?;
     let profile = Profile {
         id: format!("person_{}", Uuid::new_v4().simple()),
         display_name: name,
@@ -42,12 +43,32 @@ pub(super) fn insert_profile(db:&Connection,input:NewProfile,max_profiles:usize)
         created_at_ms: now,
         updated_at_ms: now,
         merged_into: None,
+        age_band: age_band.clone(),
     };
     db.execute(
         "INSERT INTO profiles(id, display_name, is_child, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![profile.id, profile.display_name, profile.is_child, now, now],
     ).map_err(db_error)?;
+    set_age_band(db, &profile.id, age_band.as_deref())?;
     Ok(profile)
+}
+
+/// Guardian-entered age bands; never inferred.
+pub const AGE_BANDS: [&str; 6] = ["toddler", "child", "tween", "teen", "adult", "senior"];
+
+fn age_band(value: Option<&str>) -> Result<Option<String>, String> {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some(v) if AGE_BANDS.contains(&v) => Ok(Some(v.to_owned())),
+        Some(_) => Err("age_band must be toddler, child, tween, teen, adult or senior".into()),
+    }
+}
+
+fn set_age_band(db: &Connection, id: &str, band: Option<&str>) -> Result<(), String> {
+    match band {
+        Some(band) => db.execute("INSERT INTO profile_details(profile_id,age_band,updated_at_ms) VALUES(?1,?2,?3) ON CONFLICT(profile_id) DO UPDATE SET age_band=excluded.age_band,updated_at_ms=excluded.updated_at_ms", params![id, band, now_ms()]),
+        None => db.execute("DELETE FROM profile_details WHERE profile_id=?1", [id]),
+    }.map(|_| ()).map_err(db_error)
 }
 
 impl Store {
@@ -130,6 +151,9 @@ impl Store {
             tx.execute_batch(include_str!("voice_schema.sql")).map_err(db_error)?;
             tx.commit().map_err(db_error)?;
         }
+        // Additive tables that older builds simply ignore, so user_version stays 6 and a
+        // rollback to an older App still opens this database.
+        db.execute_batch(include_str!("additive_schema.sql")).map_err(db_error)?;
         let store = Arc::new(Self { config, db: Mutex::new(db), path });
         store.initialize_household()?;
         store.purge_expired()?;
@@ -152,15 +176,18 @@ impl Store {
     pub fn update_profile(&self, id: &str, input: NewProfile) -> Result<Profile, String> {
         validate_id(id)?;
         let name = clean_text(&input.display_name, 80, false, "display_name")?;
+        // Absent keeps the current band; "" clears it.
+        let band = input.age_band.as_deref().map(|raw| age_band(Some(raw))).transpose()?;
         let mut db = self.connection()?;
         let tx = db.transaction().map_err(db_error)?;
         super::profile_merge::active_profile(&tx, id)?;
+        if let Some(band) = band { set_age_band(&tx, id, band.as_deref())?; }
         tx.execute(
             "UPDATE profiles SET display_name = ?1, is_child = ?2, updated_at_ms = ?3 WHERE id = ?4",
             params![name, input.is_child, now_ms(), id],
         ).map_err(db_error)?;
         let result = tx.query_row(
-            "SELECT id, display_name, is_child, created_at_ms, updated_at_ms FROM profiles WHERE id = ?1",
+            "SELECT p.id, p.display_name, p.is_child, p.created_at_ms, p.updated_at_ms, NULL, d.age_band FROM profiles p LEFT JOIN profile_details d ON d.profile_id=p.id WHERE p.id = ?1",
             [id], profile_row,
         ).map_err(db_error)?;
         bump_revision(&tx)?;
@@ -171,7 +198,7 @@ impl Store {
     pub fn list_profiles(&self) -> Result<Vec<Profile>, String> {
         let db = self.connection()?;
         let mut stmt = db.prepare(
-            "SELECT p.id,p.display_name,p.is_child,p.created_at_ms,p.updated_at_ms,a.target_profile_id FROM profiles p LEFT JOIN profile_aliases a ON a.source_profile_id=p.id ORDER BY p.created_at_ms,p.id",
+            "SELECT p.id,p.display_name,p.is_child,p.created_at_ms,p.updated_at_ms,a.target_profile_id,d.age_band FROM profiles p LEFT JOIN profile_aliases a ON a.source_profile_id=p.id LEFT JOIN profile_details d ON d.profile_id=p.id ORDER BY p.created_at_ms,p.id",
         ).map_err(db_error)?;
         let rows = stmt.query_map([], profile_row).map_err(db_error)?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)
@@ -719,7 +746,8 @@ pub(super) fn enum_column<T: DeserializeOwned>(row: &Row<'_>, column: usize) -> 
 fn profile_row(row: &Row<'_>) -> rusqlite::Result<Profile> {
     Ok(Profile { id: row.get(0)?, display_name: row.get(1)?, is_child: row.get(2)?,
         created_at_ms: row.get(3)?, updated_at_ms: row.get(4)?,
-        merged_into: if row.as_ref().column_count()>5 {row.get(5)?}else{None} })
+        merged_into: if row.as_ref().column_count()>5 {row.get(5)?}else{None},
+        age_band: if row.as_ref().column_count()>6 {row.get(6)?}else{None} })
 }
 
 fn memory_row(row: &Row<'_>) -> rusqlite::Result<MemoryRecord> {
@@ -909,6 +937,52 @@ mod background_tests {
         turn("t2", now_ms(), "再聊聊");
         assert!(store.household_previous_day_summary(&today.daily_conversation_id,true).unwrap().is_none(), "only the first turn");
         drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dated_memories_and_guardian_age_bands_use_additive_tables() {
+        use crate::memory::{HouseholdExtraction, JournalInput};
+        let dir = std::env::temp_dir().join(format!("xiaodai-dated-{}", Uuid::new_v4()));
+        let store = Store::open(dir.clone(), MemoryConfig::default()).unwrap();
+        store.update_household_settings(&json!({"history_enabled":true,"allow_cloud":true})).unwrap();
+        let receipt = store.journal_input(&JournalInput { turn_id:"d1".into(), activation_id:"v".into(), utterance_id:None,
+            text:"妈妈生日快到了，周末去野餐".into(), occurred_at_ms:now_ms(), input_kind:"text".into(), speaker_person_id:None,
+            private_profile_id:None, allow_cloud:true, metadata:json!({}) }).unwrap();
+        store.journal_finish("d1","completed",None,json!({})).unwrap();
+        let today: String = store.connection().unwrap().query_row("SELECT local_date FROM household_days WHERE id=?1",[&receipt.daily_conversation_id],|r|r.get(0)).unwrap();
+        let today = chrono::NaiveDate::parse_from_str(&today,"%Y-%m-%d").unwrap();
+        let tomorrow = today.succ_opt().unwrap();
+        let src = json!([{"conversation_turn_id":receipt.conversation_turn_id,"source_revision":receipt.source_revision,"quote":"妈妈生日快到了"}]);
+        store.connection().unwrap().execute("UPDATE household_jobs SET available_at_ms=0 WHERE kind='organize'",[]).unwrap();
+        let job = store.next_household_job(false).unwrap().unwrap();
+        let extraction: HouseholdExtraction = serde_json::from_value(json!({"items":[
+            {"kind":"fact","content":"妈妈的生日","when":tomorrow.format("--%m-%d").to_string(),"subject_entity_ids":[],"assertion_kind":"reported_by_other","sources":src},
+            {"kind":"event","content":"周末去野餐","when":today.format("%Y-%m-%d").to_string(),"subject_entity_ids":[],"assertion_kind":"observed","sources":src},
+            {"kind":"event","content":"很久以前的事","when":"2001-01-01","subject_entity_ids":[],"assertion_kind":"observed","sources":src},
+            {"kind":"fact","content":"日期写错了","when":"下周三","subject_entity_ids":[],"assertion_kind":"observed","sources":src}
+        ]})).unwrap();
+        assert!(store.complete_household_job(&job,&extraction).unwrap());
+        let dated = store.household_dated_items(&receipt.daily_conversation_id,7,true).unwrap();
+        assert_eq!(dated, vec![(0,"周末去野餐".to_owned()),(1,"妈妈的生日".to_owned())]);
+        let version: i64 = store.connection().unwrap().query_row("PRAGMA user_version",[],|r|r.get(0)).unwrap();
+        assert_eq!(version, 6, "additive tables must not bump the schema version");
+        let kid = store.create_profile(NewProfile { display_name:"小林".into(), is_child:true, age_band:Some("child".into()) }).unwrap();
+        assert_eq!(kid.age_band.as_deref(), Some("child"));
+        let kept = store.update_profile(&kid.id, NewProfile { display_name:"小林林".into(), is_child:true, age_band:None }).unwrap();
+        assert_eq!(kept.age_band.as_deref(), Some("child"), "an edit without the field keeps the band");
+        assert!(store.update_profile(&kid.id, NewProfile { display_name:"小林".into(), is_child:true, age_band:Some("baby".into()) }).is_err());
+        let cleared = store.update_profile(&kid.id, NewProfile { display_name:"小林".into(), is_child:true, age_band:Some(String::new()) }).unwrap();
+        assert_eq!(cleared.age_band, None);
+        store.update_profile(&kid.id, NewProfile { display_name:"小林".into(), is_child:true, age_band:Some("tween".into()) }).unwrap();
+        assert_eq!(store.list_profiles().unwrap().iter().find(|p| p.id == kid.id).unwrap().age_band.as_deref(), Some("tween"));
+        store.delete_profile(&kid.id).unwrap();
+        let left: i64 = store.connection().unwrap().query_row("SELECT count(*) FROM profile_details",[],|r|r.get(0)).unwrap();
+        assert_eq!(left, 0, "details go with the profile");
+        drop(store);
+        let reopened = Store::open(dir.clone(), MemoryConfig::default()).unwrap();
+        assert_eq!(reopened.household_dated_items(&receipt.daily_conversation_id,7,true).unwrap().len(), 2);
+        drop(reopened);
         fs::remove_dir_all(dir).unwrap();
     }
 

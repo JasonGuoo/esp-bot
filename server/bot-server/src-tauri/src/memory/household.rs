@@ -43,7 +43,16 @@ const SPEAKER_SQL: &str = "(SELECT CASE WHEN COUNT(*)>0 AND SUM(s.overlap)=0
     FROM household_segments s WHERE s.turn_id=t.id)";
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TurnSpeaker { pub person_id: String, pub display_name: String, pub nameable: bool }
+pub struct TurnSpeaker { pub person_id: String, pub display_name: String, pub nameable: bool, pub age_band: Option<String> }
+
+/// `YYYY-MM-DD` → (Some(date), None); `--MM-DD` → (None, Some("MM-DD")); otherwise None.
+pub(super) fn parse_when(when:&str)->Option<(Option<String>,Option<String>)>{
+    let when=when.trim();
+    if let Some(md)=when.strip_prefix("--") {
+        return chrono::NaiveDate::parse_from_str(&format!("2024-{md}"),"%Y-%m-%d").ok().map(|d|(None,Some(d.format("%m-%d").to_string())));
+    }
+    chrono::NaiveDate::parse_from_str(when,"%Y-%m-%d").ok().map(|d|(Some(d.format("%Y-%m-%d").to_string()),None))
+}
 
 pub(super) fn source_id(db:&Connection, external:&str) -> Result<String,String> {
     validate_id(external)?;
@@ -305,6 +314,35 @@ impl Store {
         Ok(items)
     }
 
+    /// Dated memories from today through `days` ahead, relative to the local date of
+    /// `daily_id`: (days from today, content), soonest first. Yearly dates recur.
+    pub fn household_dated_items(&self,daily_id:&str,days:i64,allow_cloud:bool)->Result<Vec<(i64,String)>,String>{
+        let db=self.connection()?;
+        let Some(today)=db.query_row("SELECT local_date FROM household_days WHERE id=?1",[daily_id],|r|r.get::<_,String>(0)).optional().map_err(db_error)? else{return Ok(Vec::new())};
+        let Ok(today)=chrono::NaiveDate::parse_from_str(&today,"%Y-%m-%d") else{return Ok(Vec::new())};
+        let mut stmt=db.prepare("SELECT x.content,d.on_date,d.yearly FROM household_derived_dates d JOIN household_derived x ON x.id=d.derived_id
+            WHERE x.valid=1 AND x.private_profile_id IS NULL AND (?1=0 OR x.allow_cloud=1) LIMIT 500").map_err(db_error)?;
+        let rows=stmt.query_map([allow_cloud],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,r.get::<_,Option<String>>(2)?))).map_err(db_error)?;
+        let mut items=Vec::new();
+        for row in rows {
+            let (content,on_date,yearly)=row.map_err(db_error)?;
+            let date=match (on_date,yearly) {
+                (Some(d),_)=>chrono::NaiveDate::parse_from_str(&d,"%Y-%m-%d").ok(),
+                (None,Some(md))=>{use chrono::Datelike;
+                    let this=|year:i32|chrono::NaiveDate::parse_from_str(&format!("{year}-{md}"),"%Y-%m-%d").ok()
+                        .or_else(||(md=="02-29").then(||chrono::NaiveDate::from_ymd_opt(year,2,28)).flatten());
+                    this(today.year()).filter(|d|*d>=today).or_else(||this(today.year()+1))},
+                _=>None,
+            };
+            let Some(date)=date else{continue};
+            let ahead=(date-today).num_days();
+            if (0..=days).contains(&ahead) {items.push((ahead,content));}
+        }
+        items.sort();
+        items.dedup_by(|a,b|a.1==b.1);
+        Ok(items)
+    }
+
     /// A short summary of the previous household day, only for the first turn of a day
     /// (the day of `daily_id` holds at most this one turn): up to three items for each of
     /// up to four people, from that day's organised memory. None otherwise.
@@ -348,7 +386,8 @@ impl Store {
             FROM household_turns t WHERE t.id=?1 AND t.forgotten=0 AND t.source_expired=0"),[conversation_turn_id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(db_error)?;
         let Some((Some(person),verified))=row else{return Ok(None)};
         let name:Option<String>=db.query_row("SELECT display_name FROM profiles WHERE id=?1",[&person],|r|r.get(0)).optional().map_err(db_error)?;
-        Ok(name.map(|display_name|TurnSpeaker{person_id:person,display_name,nameable:verified}))
+        let age_band:Option<String>=db.query_row("SELECT age_band FROM profile_details WHERE profile_id=?1",[&person],|r|r.get(0)).optional().map_err(db_error)?;
+        Ok(name.map(|display_name|TurnSpeaker{person_id:person,display_name,nameable:verified,age_band}))
     }
 
     /// "我不是小林": keep a correction candidate on this turn's voice for the

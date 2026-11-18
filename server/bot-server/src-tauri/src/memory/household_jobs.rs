@@ -218,6 +218,11 @@ impl Store {
             let confirmation_key=digest(&json!([item.kind,content,subjects,refs]));
             tx.execute("INSERT INTO household_derived(id,episode_id,input_version,kind,content,subject_ids_json,topic_id,evidence,assertion_kind,sources_json,confirmed,allow_cloud,private_profile_id,created_at_ms,learning_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",params![id,job.episode_id,job.input_version,item.kind,content,encoded(&json!(subjects),4096)?,topic,item.evidence,assertion,encoded(&json!(refs),32768)?,previous.get(&confirmation_key).copied().unwrap_or(false),allowed,owner,now_ms(),encoded(&json!(item.learning),16384)?]).map_err(db_error)?;
             for quote in &item.sources{tx.execute("INSERT INTO household_derived_sources(derived_id,turn_id,source_revision) VALUES(?1,?2,?3)",params![id,quote.conversation_turn_id,quote.source_revision]).map_err(db_error)?;}
+            if matches!(item.kind.as_str(),"event"|"fact") {
+                if let Some((on_date,yearly))=item.when.as_deref().and_then(super::household::parse_when) {
+                    tx.execute("INSERT INTO household_derived_dates(derived_id,on_date,yearly) VALUES(?1,?2,?3)",params![id,on_date,yearly]).map_err(db_error)?;
+                }
+            }
         }
         queue_graph_ingest(&tx,&job.episode_id,&job.input_version)?;
         tx.execute("UPDATE household_episodes SET processed_version=?1 WHERE id=?2",params![job.input_version,job.episode_id]).map_err(db_error)?;

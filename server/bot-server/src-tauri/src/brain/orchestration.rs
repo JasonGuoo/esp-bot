@@ -141,7 +141,11 @@ impl Brain {
         let family_items=self.memory.household_context_items(&transcript,true)?;
         let mut family=memory_text::bullets(&family_items,crate::time::now_ms() as i64,MEMORY_NOTE_CHARS);
         // The first turn of a household day brings a short summary of the previous one.
+        // Every core turn is inside an engaged session, so dated memories may be mentioned.
         if input.profile_id.is_none() {
+            if let Some(note)=self.memory.household_dated_items(&journal.daily_conversation_id,7,true).ok().as_deref().and_then(memory_text::dated_note) {
+                family.push('\n');family.push_str(&note);
+            }
             if let Ok(Some(summary))=self.memory.household_previous_day_summary(&journal.daily_conversation_id,true) {
                 family.push('\n');family.push_str(&summary);
                 self.emit("memory.previous_day_summary",Some(&input.turn_id),json!({"chars":summary.chars().count()}));

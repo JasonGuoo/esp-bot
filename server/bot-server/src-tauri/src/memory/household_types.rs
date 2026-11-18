@@ -89,6 +89,9 @@ pub struct HouseholdItem {
     #[serde(default)] pub evidence: Option<String>,
     #[serde(default)] pub assertion_kind: Option<String>,
     #[serde(default)] pub learning: Option<LearningEvidence>,
+    /// Optional date of an event/fact: `YYYY-MM-DD`, or `--MM-DD` for a yearly date
+    /// such as a birthday. Anything else is ignored.
+    #[serde(default)] pub when: Option<String>,
     pub sources: Vec<SourceQuote>,
 }
 

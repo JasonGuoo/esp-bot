@@ -57,6 +57,8 @@ def main(protocol):
             "\"sources\":[{\"conversation_turn_id\":\"源甲\",\"source_revision\":1,\"quote\":\"阿明喜欢画恐龙\"}]}]}。"
             "示例只解释格式，不是事实。必须只引用实际输入中的id、revision和原句。"
             "不能收录密码、令牌或敏感推断，也不能把助手已生成的话当作真实播放。"
+            "event或fact有明确日期时可加when：具体某天写YYYY-MM-DD，每年重复的日子（如生日）写--MM-DD；"
+            "相对说法（明天、下周三）按输入local_date换算，日期不确定就不要填when。"
             "topic_key可填不含日期的简短主题。learning的evidence可为introduced、self_reported、correct_with_help、correct_independently、retained_later。"
             "高级等级须在learning中逐字引用实际题目和回答及对应question_source_id、answer_source_id和hint_level；"
             "有提示须引用hint_source_id和hint_quote，跨日保留还须prior_answer_source_id；"
