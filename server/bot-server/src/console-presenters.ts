@@ -155,6 +155,7 @@ export function renderTurnTimings(value: unknown): HTMLElement | null {
   const MARKS: Record<string, string> = { asr_done: "听懂", memory_context_ready: "记忆就绪", first_sentence: "首句文字", first_tts_audio: "首句语音" };
   const timeline = Object.entries(MARKS).filter(([key]) => typeof marks[key] === "number").map(([key, label]) => `${label} ${ms(marks[key])}`);
   if (timeline.length) details.append(node("p", "cc-caption", `时间线（Mac 收到后）· ${timeline.join(" → ")}`));
+  if (text(timing.persona)) details.append(node("p", "cc-caption", `人设版本 · ${text(timing.persona)}`));
   details.append(node("p", "cc-caption", "小呆大脑耗时含 Luna 与 HTTP 路线竞速及边出句边合成语音；OpenCode 耗时包含模型、工具、路线回退及人工确认等待；均不包含设备判停、上传和屏幕绘制。"));
   return details;
 }

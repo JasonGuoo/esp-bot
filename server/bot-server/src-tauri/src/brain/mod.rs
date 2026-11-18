@@ -23,6 +23,7 @@ pub mod fast_core;
 mod emotion;
 mod voice_lines;
 mod latency;
+pub mod persona;
 mod acceptance;
 
 use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex as StdMutex, RwLock, atomic::{AtomicBool, Ordering}}, time::Instant};

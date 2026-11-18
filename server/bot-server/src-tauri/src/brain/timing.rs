@@ -18,6 +18,8 @@ pub struct TurnTimings {
     /// first_sentence and first_tts_audio. Device-side marks arrive in receipts.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub marks_ms: BTreeMap<String, u64>,
+    /// The shared persona version that answered, for tone comparisons.
+    pub persona: &'static str,
     /// Which brain answered: the Xiaodai core (winner route, time to first text/sentence,
     /// every engine attempt, Luna state) or OpenCode with the routing reason. Content-free.
     #[serde(skip_serializing_if = "Option::is_none")]
