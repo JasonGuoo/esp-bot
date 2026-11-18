@@ -30,6 +30,8 @@ struct bot_runtime {
     bot_ambient_light_t ambient;
     bot_responses_state_t responses;
     const bot_response_entry_t *response, *last_response;
+    /* The Mac's validated per-segment emotion hint; preferred only while SPEAKING. */
+    char segment_expression[BOT_EXPRESSION_MAX_BYTES + 1];
     bool response_playback_done;
     uint32_t response_started_ms, response_timeout_ms;
     uint32_t waking_since_ms, last_wake_ms, wake_barrier_ms, next_session_id;
@@ -72,6 +74,10 @@ static void reset_expression(bot_runtime_t *runtime)
         return;
     }
     const char *expression = "idle";
+    const bot_conversation_t conversation = runtime->state.conversation;
+    if (runtime->state.behavior != BOT_BEHAVIOR_ENGAGED ||
+        (conversation != BOT_CONVERSATION_THINKING && conversation != BOT_CONVERSATION_SPEAKING))
+        runtime->segment_expression[0] = '\0'; /* a hint never outlives its answer */
     switch (runtime->state.behavior) {
     case BOT_BEHAVIOR_BORED: expression = "bored"; break;
     case BOT_BEHAVIOR_DROWSY: expression = "drowsy"; break;
@@ -83,7 +89,9 @@ static void reset_expression(bot_runtime_t *runtime)
         case BOT_CONVERSATION_LISTENING: expression = "listening"; break;
         case BOT_CONVERSATION_SUBMITTED: expression = "listening"; break;
         case BOT_CONVERSATION_THINKING: expression = "thinking"; break;
-        case BOT_CONVERSATION_SPEAKING: expression = "speaking"; break;
+        case BOT_CONVERSATION_SPEAKING:
+            expression = runtime->segment_expression[0] ? runtime->segment_expression : "speaking";
+            break;
         case BOT_CONVERSATION_WAITING: expression = "curious"; break;
         default: break;
         }
@@ -1179,6 +1187,10 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
         if (!known_expression(command->data.expression)) return BOT_COMMAND_REJECTED_INVALID;
         memset(state->expression, 0, sizeof(state->expression));
         memcpy(state->expression, command->data.expression, strlen(command->data.expression));
+        if (state->conversation == BOT_CONVERSATION_THINKING ||
+            state->conversation == BOT_CONVERSATION_SPEAKING ||
+            state->conversation == BOT_CONVERSATION_SUBMITTED)
+            memcpy(runtime->segment_expression, state->expression, sizeof(runtime->segment_expression));
         break;
     case BOT_COMMAND_SET_CAPTION:
     case BOT_COMMAND_FAILURE_CAPTION:
@@ -1220,6 +1232,7 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
         memcpy(state->reading_text, command->data.caption, sizeof(state->reading_text));
         state->reading_token = state->token;
         state->wait_stage = BOT_WAIT_NONE;
+        runtime->segment_expression[0] = '\0'; /* this segment's own hint follows it */
         state->reading_sequence = command->presentation_sequence;
         state->reading_notice[0] = state->image_notice[0] = '\0';
         if (state->conversation != BOT_CONVERSATION_SPEAKING)

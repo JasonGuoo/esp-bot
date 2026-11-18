@@ -2,6 +2,7 @@
 #include "bot_runtime.h"
 #include <assert.h>
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 struct bot_bus {
@@ -895,6 +896,51 @@ static void test_managed_playback_does_not_arm_followup(bool completion_arrives_
     bot_runtime_destroy(runtime);
 }
 
+static void test_segment_emotion_is_honoured_while_speaking(void)
+{
+    bot_bus_t bus={0};bot_runtime_t *runtime=NULL;bot_runtime_snapshot_t state;
+    assert(bot_runtime_create(&bus,NULL,NULL,NULL,1000,&runtime)==ESP_OK);
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_AUDIO_HEALTH,.source=BOT_SOURCE_AUDIO,
+        .observed_ms=1010,.data.health={.available=true}});
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_LINK_STATE,.source=BOT_SOURCE_LINK,
+        .observed_ms=1020,.data.link={.connected=true,.authenticated=true,.encrypted=true}});
+    post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,.source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1030,.data.touch={.intentional=true}});
+    bot_runtime_get_snapshot(runtime,&state);bot_session_token_t token=state.token;
+    bus.command=(bot_command_t){.kind=BOT_COMMAND_THINKING,.token=token,.received_ms=1040};
+    bus.has_command=true;bot_runtime_step(runtime,1040);
+    /* Mac order per segment: PRESENTATION_SEGMENT, then its SET_EXPRESSION (if any). */
+    const char *hints[]={"worried","", "laughing","not-an-expression"};
+    const char *shown[]={"worried","speaking","laughing","speaking"};
+    for (unsigned i=0;i<4;i++) {
+        uint32_t now=1700+i*100;
+        bus.command=(bot_command_t){.kind=BOT_COMMAND_PRESENTATION_SEGMENT,.token=token,
+            .received_ms=now,.presentation_sequence=i+1,.data.caption="一句话"};
+        bus.has_command=true;bot_runtime_step(runtime,now);
+        if (hints[i][0]) {
+            bus.command=(bot_command_t){.kind=BOT_COMMAND_SET_EXPRESSION,.token=token,.received_ms=now+1};
+            snprintf(bus.command.data.expression,sizeof(bus.command.data.expression),"%s",hints[i]);
+            bus.has_command=true;bot_runtime_step(runtime,now+1);
+        }
+        post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_PLAYBACK_STARTED,.source=BOT_SOURCE_AUDIO,
+            .observed_ms=now+10,.token=token,.data.playback={.id=i+1,.purpose=BOT_PLAYBACK_CONTENT,.presentation_managed=true}});
+        bot_runtime_step(runtime,now+12); /* later ticks keep the runtime's choice */
+        bot_runtime_get_snapshot(runtime,&state);
+        assert(state.conversation==BOT_CONVERSATION_SPEAKING);
+        if (strcmp(state.expression,shown[i])) fprintf(stderr,"segment %u shows %s\n",i,state.expression);
+        assert(strcmp(state.expression,shown[i])==0);
+        post_event(&bus,runtime,(bot_event_t){.kind=BOT_EVENT_PLAYBACK_DONE,.source=BOT_SOURCE_AUDIO,
+            .observed_ms=now+20,.token=token,.data.playback={.id=i+1,.purpose=BOT_PLAYBACK_CONTENT,.presentation_managed=true}});
+        bot_runtime_get_snapshot(runtime,&state);
+        assert(state.conversation==BOT_CONVERSATION_THINKING && strcmp(state.expression,"thinking")==0);
+    }
+    bus.command=(bot_command_t){.kind=BOT_COMMAND_PRESENTATION_DONE,.token=token,.received_ms=2200};
+    bus.has_command=true;bot_runtime_step(runtime,2200);
+    bot_runtime_get_snapshot(runtime,&state);
+    assert(state.followup_armed && strcmp(state.expression,"laughing")!=0);
+    bot_runtime_destroy(runtime);
+}
+
 static void test_wait_feedback_and_interruption(bool replace, bool supplement, bool spoken)
 {
     bot_bus_t bus = {0};
@@ -1036,6 +1082,7 @@ int main(void)
     test_settings_close_commits_last_edit();
     test_managed_playback_does_not_arm_followup(false);
     test_managed_playback_does_not_arm_followup(true);
+    test_segment_emotion_is_honoured_while_speaking();
     test_processing_requires_server_ack(false);
     test_processing_requires_server_ack(true);
     test_passive_sound_reactions();
