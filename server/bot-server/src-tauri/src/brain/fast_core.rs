@@ -299,6 +299,16 @@ pub(crate) fn summary(t: &xd::Timings, outcome: &str) -> Value {
 /// presentation delivers the remaining sentences after that prefix's receipts.
 pub(super) const LISTENING_ACK: &str = "听到了。";
 
+/// Endings the core's sentence splitter (`xiaodai-core/src/splitter.rs`) treats as
+/// boundaries: hard stops, the closers it attaches (。” ！」 ……) and its soft splits.
+const SENTENCE_ENDS: &[char] = &['。','！','？','!','?','.','”','’','」','』','）',')','】','"','\'','…',
+    '，','、',',','；',';','：',':'];
+/// How long one live sentence may wait for room in the bounded device queue before
+/// the turn falls back to the frozen presentation for the remainder.
+const LIVE_QUEUE_WAIT: Duration = Duration::from_secs(5);
+
+fn complete_sentence(sentence:&str) -> bool { sentence.trim_end().ends_with(SENTENCE_ENDS) }
+
 pub(super) struct LiveSpeech<'a> {
     output: Option<tokio::sync::mpsc::Sender<super::gateway::TurnUpdate>>,
     context: super::presentation::PlanContext,
@@ -329,7 +339,7 @@ impl<'a> LiveSpeech<'a> {
         let planner=super::presentation::PresentationPlanner::new(cfg.clone())?;
         let frozen=planner.freeze(self.context.clone(),&scene,None,false)?;
         if self.sent+1>=cfg.max_segments || sentence!=scene.speech || frozen.segments.len()!=1
-            || frozen.segments[0].wait_for_first_frame || !sentence.ends_with(['。','！','？','!','?','.']) {
+            || frozen.segments[0].wait_for_first_frame || !complete_sentence(sentence) {
             self.output=None;
             return Ok(());
         }
@@ -343,7 +353,8 @@ impl<'a> LiveSpeech<'a> {
 
     async fn publish(&self, brain:&Brain, turn_id:&str, text:&str, audio:&Value, acknowledgement:bool,
                      scene:super::scene::Scene, output:&tokio::sync::mpsc::Sender<super::gateway::TurnUpdate>) -> Result<bool,String> {
-        let Ok(slot)=output.try_reserve() else {return Ok(false)};
+        // A bounded queue that waits: the gateway already serialises delivery on receipts.
+        let Ok(Ok(slot))=tokio::time::timeout(LIVE_QUEUE_WAIT,output.reserve()).await else {return Ok(false)};
         let cache=HashMap::from([(text.to_owned(),audio.clone())]);
         let (plan,mut parts,warnings)=brain.prepare_presentation(self.context.clone(),scene,None,
             &[],"",true,self.sources,None,Some(&cache)).await?;
@@ -577,19 +588,77 @@ mod tests {
         assert_eq!(speech.sent,0);
         assert!(matches!(speech.escalate("model_unavailable"),Ok(FastResult::Escalate(_))));
         speech.ready(&brain,"example","小猫找到了帽子。",&wav).await.unwrap();
-        speech.ready(&brain,"example","第二句。",&wav).await.unwrap(); // receiver is still busy
         let TurnUpdate::Sentence{turn_id,plan,segment,acknowledgement:false}=events.try_recv().unwrap() else {panic!("missing early speech")};
         assert_eq!(turn_id,"example");
         assert_eq!(segment.scene.speech,"小猫找到了帽子。");
         assert!(plan.segments[0].speech_asset_id.is_some());
-        speech.ready(&brain,"example","第三句。",&wav).await.unwrap();
-        assert!(events.try_recv().is_err());
-        assert_eq!(speech.sent,1);
+        // The queue waits for room instead of giving up on the rest of the turn.
+        let receiver=tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let TurnUpdate::Sentence{segment,..}=events.recv().await.unwrap() else {panic!("missing second sentence")};
+            (segment.scene.speech,events)
+        });
+        speech.ready(&brain,"example","小狗说：“我也要去！”",&wav).await.unwrap();
+        speech.ready(&brain,"example","第三句……",&wav).await.unwrap();
+        let (second,mut events)=receiver.await.unwrap();
+        assert_eq!(second,"小狗说：“我也要去！”");
+        let TurnUpdate::Sentence{segment,..}=events.try_recv().unwrap() else {panic!("missing third sentence")};
+        assert_eq!(segment.scene.speech,"第三句……");
+        assert_eq!(speech.sent,3);
+        assert!(speech.output.is_some());
+        assert!(complete_sentence("「好呀！」") && complete_sentence("然后，") && !complete_sentence("然后"));
         let (tx,mut rx)=tokio::sync::mpsc::channel(1);
         let mut visual=LiveSpeech::new(Some(tx),plan.context,&[],None);
         visual.ready(&brain,"example","请看这张图。",&wav).await.unwrap();
         assert_eq!(visual.sent,0);
         assert!(rx.try_recv().is_err());
+        drop(brain);
+        let _=std::fs::remove_dir_all(dir);
+    }
+
+    /// Fake device: one sentence at a time, the next only after the previous one's
+    /// simulated playback receipt, as the gateway gates live delivery.
+    #[tokio::test]
+    async fn fake_device_hears_a_six_sentence_story_with_dialogue_without_gaps() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use super::super::{gateway::{self,TurnUpdate},media,presentation::PlanContext};
+        let dir=std::env::temp_dir().join(format!("xiaodai-story-{}",uuid::Uuid::new_v4()));
+        let brain=Brain::new(dir.clone(),None,Arc::new(|_|{})).unwrap();
+        let context=PlanContext{household_id:"home".into(),daily_conversation_id:"day".into(),
+            conversation_turn_id:"source".into(),task_id:None};
+        let (output,mut events)=tokio::sync::mpsc::channel(gateway::LIVE_QUEUE);
+        let mut speech=LiveSpeech::new(Some(output),context,&[],None);
+        let wav=json!({"wav_base64":STANDARD.encode(media::pcm_wav(&[0;640])),"duration_ms":20});
+        let story="从前有一只小兔子。它问月亮：“你为什么不睡觉？”月亮笑着说：「我在给你照路呀！」小兔子想了想……\
+            它决定陪月亮一起看星星。星星眨眼说：“欢迎你！”最后，它们都说：“晚安！”";
+        let mut splitter=xd::splitter::SentenceSplitter::new(80);
+        let mut sentences=Vec::new();
+        for piece in story.chars().collect::<Vec<_>>().chunks(3) { sentences.extend(splitter.push(&piece.iter().collect::<String>())); }
+        sentences.extend(splitter.flush());
+        assert_eq!(sentences.len(),6,"{sentences:?}");
+        let device=tokio::spawn(async move {
+            let mut heard=Vec::new();
+            while let Some(TurnUpdate::Sentence{segment,acknowledgement:false,..})=events.recv().await {
+                tokio::time::sleep(Duration::from_millis(30)).await; // playback, then receipt
+                heard.push(segment.scene.speech);
+            }
+            heard
+        });
+        for sentence in &sentences { speech.ready(&brain,"story",sentence,&wav).await.unwrap(); }
+        assert!(speech.output.is_some(),"live streaming stayed on for the whole story");
+        assert_eq!(speech.sent,6);
+        drop(speech);
+        let heard=device.await.unwrap();
+        assert_eq!(heard,sentences);
+        // The final plan regroups the same sentences: nothing is repeated or cancelled.
+        let segments=segment_sentences(&sentences,story,brain.config.presentation.max_segments,brain.config.presentation.max_segment_chars);
+        let finals=segments.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(gateway::live_prefix_skip(&finals,&heard),(6,true));
+        let merged=[format!("{}{}",heard[0],heard[1]),heard[2].clone(),"新的结尾。".into()];
+        let merged=merged.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(gateway::live_prefix_skip(&merged,&heard[..3]),(2,true));
+        let changed=["别的开头。","第二句。","第三句。","还没说的第四句。"];
+        assert_eq!(gateway::live_prefix_skip(&changed,&heard[..3]),(3,false),"diverged: only the unsaid tail");
         drop(brain);
         let _=std::fs::remove_dir_all(dir);
     }

@@ -18,6 +18,25 @@ const MAX_JSON: usize = 4_500_000;
 const DEVICE_CAPTION_BYTES: usize = 383;
 const DISPLAY_REPLY_CAPABILITY: &str = "display.reply.v1";
 const AUDIO_REPLY_CAPABILITY: &str = "audio.reply.v1";
+/// Bounded per-peer turn-update queue: room for every live sentence a frozen plan can
+/// hold (`max_segments` ≤ 32), the wait acknowledgement and the completion.
+pub(super) const LIVE_QUEUE: usize = 36;
+
+/// How many final segments the live prefix already spoke. Exact when the final plan
+/// repeats the live sentences (or regroups the same text at a segment boundary);
+/// otherwise only the segments after the spoken count are delivered, never a repeat.
+pub(super) fn live_prefix_skip(final_speech:&[&str], spoken:&[String]) -> (usize, bool) {
+    if final_speech.len()>=spoken.len() && final_speech.iter().zip(spoken).all(|(a,b)|*a==b) { return (spoken.len(),true); }
+    let squash=|s:&str|s.chars().filter(|c|!c.is_whitespace()).collect::<String>();
+    let said:String=spoken.iter().map(|s|squash(s)).collect();
+    let mut covered=String::new();
+    for (index,part) in final_speech.iter().enumerate() {
+        covered.push_str(&squash(part));
+        if covered==said { return (index+1,true); }
+        if !said.starts_with(&covered) { break; }
+    }
+    (spoken.len().min(final_speech.len()),false)
+}
 
 pub struct RunningGateway {
     shutdown: watch::Sender<bool>,
@@ -437,7 +456,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
     let mut audio:Option<(media::AudioInput,RuntimeToken)>=None;
     let mut plain:Option<plain_audio::PlainAudio>=None;
     let mut recent_ids:VecDeque<String>=VecDeque::new();
-    let (completion_tx,mut completion_rx)=mpsc::channel::<TurnUpdate>(2);
+    let (completion_tx,mut completion_rx)=mpsc::channel::<TurnUpdate>(LIVE_QUEUE);
     let mut active:Option<ActivePeer>=None;
     let mut playback:Option<Playback>=None;
     let mut playback_receipt:Option<PlaybackReceipt>=None;
@@ -729,9 +748,14 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                 }
                                 if !turn.prefix.is_empty() {
                                     let state = delivery.as_ref().ok_or("live_presentation_missing")?;
-                                    let matches = output.prepared_segments.iter().map(|s| &s.scene.speech)
-                                        .take(turn.prefix.len()).eq(turn.prefix.iter());
-                                    if !matches || output.provider_id != super::fast_core::PROVIDER_ID
+                                    let final_speech=output.prepared_segments.iter().map(|s|s.scene.speech.as_str()).collect::<Vec<_>>();
+                                    let (skip,exact)=live_prefix_skip(&final_speech,&turn.prefix);
+                                    if !exact {
+                                        // Keep talking: deliver only what has not been said, and leave a trace.
+                                        brain.emit("device.presentation.prefix_diverged",Some(&completed.turn_id),json!({
+                                            "spoken_segments":turn.prefix.len(),"final_segments":final_speech.len(),"skipped":skip}));
+                                    }
+                                    if output.provider_id != super::fast_core::PROVIDER_ID
                                         || !brain.tasks.output_active(&state.lease_id)?
                                         || !brain.tasks.source_current(&state.plan.context.conversation_turn_id)? {
                                         brain.tasks.revoke_outputs(Some(&activation))?;
@@ -740,7 +764,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         delivery=None; playback=None; plain=None; display_result=None;
                                         continue;
                                     }
-                                    output.prepared_segments.drain(..turn.prefix.len());
+                                    output.prepared_segments.drain(..skip);
                                     if output.prepared_segments.is_empty() {
                                         // Its last immutable sentence already has its actual hardware/display receipt.
                                         let end = json!({"v":3,"type":"event","event":"presentation.end","runtime":completed.token,
