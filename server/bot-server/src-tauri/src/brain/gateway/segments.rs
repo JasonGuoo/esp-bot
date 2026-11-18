@@ -129,6 +129,23 @@ pub(super) fn restore(brain:&Brain,plan:&PresentationPlan)->Result<Vec<PreparedS
     }
     Ok(output)
 }
+/// A spoken, in-character line for a device turn that failed before anything was
+/// said. `None` keeps the device's caption-only failure path.
+pub(super) async fn prepare_failure(brain:&Brain,turn_id:&str,error:&str)->Result<Option<(PresentationPlan,Vec<PreparedSegment>)>,String>{
+    let Some((line,expression))=crate::brain::voice_lines::failure_line(error,turn_id) else{return Ok(None)};
+    let household=brain.memory.household_settings()?["household_id"].as_str().unwrap_or_default().to_owned();
+    let daily=brain.memory.daily_conversation_id(crate::time::now_ms() as i64)?;
+    let context=crate::brain::presentation::PlanContext{household_id:household,daily_conversation_id:daily,conversation_turn_id:turn_id.into(),task_id:None};
+    let cache=brain.failure_audio.lock().await.clone();
+    let prepared=tokio::time::timeout(Duration::from_secs(4),
+        brain.prepare_presentation(context,scene_for(line,expression),None,&[],"",true,&[],None,Some(&cache))).await
+        .map_err(|_|"failure_speech_timeout".to_string())??;
+    let (plan,segments,_)=prepared;
+    if segments.len()!=1 || segments[0].audio.is_none() {return Ok(None);}
+    if let Some(audio)=segments[0].audio.clone() {brain.failure_audio.lock().await.insert(line.into(),audio);}
+    Ok(Some((plan,segments)))
+}
+
 pub(super) fn scene_for(speech:&str,expression:&str)->crate::brain::scene::Scene{
     crate::brain::scene::normalize("",Some(&json!({"speech":speech,"expression":expression,"cards":[]})),4000,&[])
 }
@@ -266,4 +283,26 @@ pub(super) async fn prepare_progress(brain:Arc<Brain>,task:crate::brain::tasks::
     let segment=plan.segments.first_mut().ok_or("presentation_empty")?;segment.speech_asset_id=Some(asset.artifact_id);segment.dwell_ms=500;
     let prepared=vec![PreparedSegment{segment_id:segment.segment_id.clone(),scene:scene_for(message,"thinking"),audio:Some(audio),display_image:None,dwell_ms:500,media_kind:None}];
     brain.tasks.save_plan(&plan)?;Ok((plan,prepared))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_failed_turn_becomes_one_spoken_in_character_segment() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let dir=std::env::temp_dir().join(format!("xiaodai-failure-{}",uuid::Uuid::new_v4()));
+        let brain=Brain::new(dir.clone(),None,Arc::new(|_|{})).unwrap();
+        let (line,_)=crate::brain::voice_lines::failure_line("asr_no_speech","turn-1").unwrap();
+        let wav=json!({"wav_base64":STANDARD.encode(crate::brain::media::pcm_wav(&[0;640])),"duration_ms":20});
+        brain.failure_audio.lock().await.insert(line.into(),wav);
+        let (plan,segments)=prepare_failure(&brain,"turn-1","asr_no_speech").await.unwrap().expect("spoken");
+        assert_eq!(segments.len(),1);
+        assert_eq!(segments[0].scene.speech,line);
+        assert!(plan.segments[0].speech_asset_id.is_some());
+        assert!(prepare_failure(&brain,"turn-1","cancelled").await.unwrap().is_none(),"cancellation stays silent");
+        drop(brain);
+        let _=std::fs::remove_dir_all(dir);
+    }
 }

@@ -307,6 +307,11 @@ const SENTENCE_ENDS: &[char] = &['。','！','？','!','?','.','”','’','」'
 /// the turn falls back to the frozen presentation for the remainder.
 const LIVE_QUEUE_WAIT: Duration = Duration::from_secs(5);
 
+/// A known expression id as `'static` (the live path receives validated ids).
+fn expression_id(expression:&str) -> &'static str {
+    crate::face_catalog_generated::EXPRESSION_IDS.iter().copied().find(|e|*e==expression).unwrap_or("speaking")
+}
+
 fn complete_sentence(sentence:&str) -> bool { sentence.trim_end().ends_with(SENTENCE_ENDS) }
 
 pub(super) struct LiveSpeech<'a> {
@@ -314,6 +319,8 @@ pub(super) struct LiveSpeech<'a> {
     context: super::presentation::PlanContext,
     sources: &'a [String],
     sent: usize,
+    /// Sentences already handed to the device, with their expressions.
+    spoken: Vec<(String,&'static str)>,
     pub acknowledge:bool,
     pub supplement:bool,
     reservation:Option<Reservation>,
@@ -322,12 +329,25 @@ pub(super) struct LiveSpeech<'a> {
 impl<'a> LiveSpeech<'a> {
     pub fn new(output: Option<tokio::sync::mpsc::Sender<super::gateway::TurnUpdate>>,
                context: super::presentation::PlanContext, sources: &'a [String], reservation:Option<Reservation>) -> Self {
-        Self { output, context, sources, sent:0, acknowledge:false, supplement:false, reservation }
+        Self { output, context, sources, sent:0, spoken:Vec::new(), acknowledge:false, supplement:false, reservation }
     }
 
-    fn escalate(&self, reason: &'static str) -> Result<FastResult, String> {
-        if self.sent == 0 { Ok(FastResult::Escalate(reason)) }
-        else { Err(format!("partial_spoken_answer: {reason}")) }
+    /// Before anything was said the turn escalates. After that, the answer ends
+    /// gracefully: the spoken sentences plus a short in-character apology, so the
+    /// device never goes silent mid-story or shows a technical error.
+    fn escalate(&self, reason: &'static str, turn_id: &str, audio: &HashMap<String,Value>) -> Result<FastResult, String> {
+        if self.sent == 0 { return Ok(FastResult::Escalate(reason)); }
+        let apology=super::voice_lines::partial_apology(reason,turn_id);
+        let mut segments=self.spoken.clone();
+        segments.push((apology.to_owned(),"shy"));
+        let text=segments.iter().map(|s|s.0.as_str()).collect::<String>();
+        let structured=json!({"speech":text,"expression":segments[0].1,"cards":[],"outcome":"answered","effect":"none",
+            "presentation":{"segments":segments.iter().map(|(s,e)|json!({"speech":s,"expression":e,"visual":{"kind":"none"},"visual_required":false})).collect::<Vec<_>>()}});
+        let summary=json!({"engine":PROVIDER_ID,"outcome":"partial","reason":reason,"sentences":self.sent});
+        let reply=HarnessReply{text,provider_id:PROVIDER_ID.into(),model_id:String::new(),session_id:String::new(),
+            structured:Some(structured),evidence:Vec::new()};
+        let audio=self.spoken.iter().filter_map(|(s,_)|audio.get(s).map(|a|(s.clone(),a.clone()))).collect();
+        Ok(FastResult::Reply(Box::new(FastReply{reply,audio,summary})))
     }
 
     async fn ready(&mut self, brain: &Brain, turn_id: &str, sentence: &str, expression: &str, audio: &Value) -> Result<(), String> {
@@ -346,6 +366,7 @@ impl<'a> LiveSpeech<'a> {
         }
         if self.publish(brain, turn_id, sentence, audio, false, scene, &output).await? {
             self.sent+=1;
+            self.spoken.push((sentence.to_owned(),expression_id(expression)));
         } else {
             self.output=None;
         }
@@ -427,7 +448,7 @@ impl Brain {
                             turn.cancel();
                             self.emit("brain.escalated", Some(turn_id), json!({"reason":"core_requested","at_ms":ms}));
                             self.fast.record(json!({"engine":PROVIDER_ID,"outcome":"escalated","reason":"core_requested","at_ms":ms}));
-                            return live.escalate("core_requested");
+                            return live.escalate("core_requested",turn_id,&audio);
                         }
                         let (tag,text)=super::emotion::take(&text);
                         if text.is_empty() { pending_tag=tag.or(pending_tag); continue; } // a tag on its own line
@@ -449,13 +470,15 @@ impl Brain {
                             self.emit("turn.supplement_route",Some(turn_id),json!({"reason":if landed{"luna_steered"}else{"context_continuation"}}));
                         }
                         active_lane.take(); done=Some((text,timings));
+                        // The TTS drain gets its own budget instead of what generation left.
+                        deadline.as_mut().reset(tokio::time::Instant::now()+Duration::from_millis(self.fast.config.turn_timeout_ms));
                     },
                     Some(xd::Event::Cancelled { .. }) => return Err("cancelled".into()),
                     Some(xd::Event::Error { message, timings }) => {
                         let mut s = summary(&timings, "failed"); s["error"] = json!(message.chars().take(160).collect::<String>());
                         self.emit("brain.escalated", Some(turn_id), json!({"reason":"core_failed"}));
                         self.fast.record(s);
-                        return live.escalate("core_failed");
+                        return live.escalate("core_failed",turn_id,&audio);
                     }
                 },
                 Some((sentence, expression, result)) = tts.next(), if !tts.is_empty() => {
@@ -472,7 +495,7 @@ impl Brain {
                     turn.cancel();
                     self.emit("brain.escalated", Some(turn_id), json!({"reason":"core_timeout"}));
                     self.fast.record(json!({"engine":PROVIDER_ID,"outcome":"timeout"}));
-                    return live.escalate("core_timeout");
+                    return live.escalate("core_timeout",turn_id,&audio);
                 }
             }
         };
@@ -480,7 +503,7 @@ impl Brain {
         let text=super::emotion::strip(&text);
         if escalate && text.contains(ESCALATE_MARK) {
             self.fast.record(json!({"engine":PROVIDER_ID,"outcome":"escalated","reason":"core_requested"}));
-            return live.escalate("core_requested");
+            return live.escalate("core_requested",turn_id,&audio);
         }
         let mut summary = summary(&timings, "answered");
         summary["sentences"] = json!(sentences.len());
@@ -605,7 +628,7 @@ mod tests {
         let TurnUpdate::Sentence{segment,acknowledgement:true,..}=events.try_recv().unwrap() else {panic!("missing wait acknowledgement")};
         assert_eq!(segment.scene.speech,LISTENING_ACK);
         assert_eq!(speech.sent,0);
-        assert!(matches!(speech.escalate("model_unavailable"),Ok(FastResult::Escalate(_))));
+        assert!(matches!(speech.escalate("core_failed","example",&HashMap::new()),Ok(FastResult::Escalate(_))));
         speech.ready(&brain,"example","小猫找到了帽子。","excited",&wav).await.unwrap();
         let TurnUpdate::Sentence{turn_id,plan,segment,acknowledgement:false}=events.try_recv().unwrap() else {panic!("missing early speech")};
         assert_eq!(turn_id,"example");
@@ -626,6 +649,17 @@ mod tests {
         assert_eq!(segment.scene.speech,"第三句……");
         assert_eq!(speech.sent,3);
         assert!(speech.output.is_some());
+        // A failure after speech ends the answer gracefully instead of a technical error.
+        let audio=HashMap::from([("小猫找到了帽子。".to_string(),wav.clone())]);
+        let Ok(FastResult::Reply(partial))=speech.escalate("core_timeout","example",&audio) else {panic!("graceful partial reply")};
+        let segments=partial.reply.structured.as_ref().unwrap()["presentation"]["segments"].as_array().unwrap().clone();
+        assert_eq!(segments.len(),4);
+        assert_eq!(segments[0]["speech"],"小猫找到了帽子。");
+        assert_eq!(segments[0]["expression"],"excited");
+        assert_eq!(segments[3]["speech"],super::super::voice_lines::partial_apology("core_timeout","example"));
+        assert!(partial.reply.text.starts_with("小猫找到了帽子。") && partial.audio.len()==1);
+        let Ok(FastResult::Reply(handoff))=speech.escalate("core_requested","example",&audio) else {panic!("handoff")};
+        assert!(handoff.reply.text.ends_with("你可以再问我一次哦。"));
         assert!(complete_sentence("「好呀！」") && complete_sentence("然后，") && !complete_sentence("然后"));
         let (tx,mut rx)=tokio::sync::mpsc::channel(1);
         let mut visual=LiveSpeech::new(Some(tx),plan.context,&[],None);

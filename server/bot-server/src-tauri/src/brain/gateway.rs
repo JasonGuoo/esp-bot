@@ -839,13 +839,33 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                             }
                         },
                         Err(error)=>{
+                            // Nothing of the answer was said yet: say an in-character line instead
+                            // of a silent technical caption. The code stays in the journal.
+                            let presentation=engagement.as_ref().and_then(|e|e.output.as_ref()).is_some_and(|o|o.presentation);
+                            let spoken=if completed.audio_requested && presentation && turn.prefix.is_empty() {
+                                segments::prepare_failure(&brain,&completed.turn_id,&error).await.unwrap_or_else(|code|{
+                                    brain.emit("device.failure_speech.unavailable",Some(&completed.turn_id),json!({"code":code}));None})
+                            } else {None};
                             if turn.acknowledgement_sent || !turn.prefix.is_empty() {
                                 if let Some(session)=&engagement {brain.tasks.revoke_outputs(Some(&session.conversation_id))?;}
-                                send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.cancelled",
-                                    "runtime":completed.token,"code":"live_answer_interrupted"}).to_string())).await?;
+                                if spoken.is_none() {
+                                    send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.cancelled",
+                                        "runtime":completed.token,"code":"live_answer_interrupted"}).to_string())).await?;
+                                }
                                 delivery=None;playback=None;plain=None;display_result=None;
                             }
-                            brain.emit("device.turn.failed",Some(&completed.turn_id),json!({"device_id":device_id,"code":error.split(':').next().unwrap_or("turn_failed")}));
+                            brain.emit("device.turn.failed",Some(&completed.turn_id),json!({"device_id":device_id,
+                                "code":error.split(':').next().unwrap_or("turn_failed"),"spoken":spoken.is_some()}));
+                            if let (Some((plan,prepared)),Some(session))=(spoken,engagement.as_ref()) {
+                                let index=u32::from(turn.acknowledgement_sent)+1;
+                                if let Ok(mut next)=segments::Delivery::new(&brain,&device_id,&session.conversation_id,completed.token,
+                                    completed.turn_id.clone(),plan,prepared,vec![],true,index) {
+                                    next.total_sent=index-1;next.request_id=completed.id.clone();delivery=Some(next);
+                                    let response=json!({"v":3,"type":"response","id":completed.id,"ok":true,"runtime":completed.token,"payload":{"presentation_pending":true}});
+                                    if send(&mut socket,Message::Text(response.to_string())).await.is_err(){break;}
+                                    continue;
+                                }
+                            }
                             if send(&mut socket, Message::Text(response_error(&completed.id,&error))).await.is_err(){break;}
                         },
                     }
