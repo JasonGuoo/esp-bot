@@ -141,6 +141,7 @@ static void render(void *instance, const face_theme_t *theme,
     lv_obj_set_style_bg_color(r->root, lv_color_hex(theme->background), 0);
     int w = mini(width * 29 / 100, height * 50 / 100);
     int h = mini(height * 34 / 100, width * 26 / 100);
+    h += h * state->speech_level / 2304; /* eyes open up to ~11% with the voice */
     /* Keep both large silhouettes inside the display while making a sideways
      * look clearly visible at normal viewing distance. */
     const int dx = face_eve_gaze_offset_x(width, state->gaze_x);

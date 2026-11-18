@@ -23,6 +23,7 @@ typedef struct {
     bool transition_active;
     uint16_t transition_progress; /* 0..256, eased by LVGL */
     uint16_t blink_progress;      /* 0..256, eased by LVGL */
+    uint8_t speech_level;         /* 0..255 playback envelope plus the "aha" pop */
 } face_render_state_t;
 
 typedef struct face_renderer face_renderer_t;

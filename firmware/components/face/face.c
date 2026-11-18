@@ -34,6 +34,8 @@ struct face_view {
     face_render_state_t state;
     lv_timer_t *timer;
     uint32_t blink_start, gear_expire;
+    uint32_t expression_since, nod_until, aha_until;
+    uint8_t level_target;
     int last_layout_w, last_layout_h;
     int requested_gaze_x, requested_gaze_y;
     face_theme_applied_cb_t on_applied;
@@ -101,6 +103,22 @@ static void paint_chrome(face_view_t *f) {
     if (f->settings) face_settings_set_active_theme(f->settings, t->id);
 }
 
+/* One caption line, or two when the text needs them, so the end of a sentence
+ * is not cut off; the bar grows upward from a fixed bottom edge. */
+static void fit_caption(face_view_t *f, int w, int h) {
+    const lv_font_t *font = &xiaodai_font_sc_30;
+    lv_point_t size;
+    lv_text_get_size(&size, lv_label_get_text(f->caption), font, 0, 2, w * 82 / 100, LV_TEXT_FLAG_NONE);
+    const bool two = size.y > font->line_height + 4;
+    const int one_h = clamp(h * 13 / 100, 40, 62);
+    const int text_h = two ? one_h + font->line_height + 2 : one_h;
+    const int bottom = h * 96 / 100;
+    lv_obj_set_pos(f->caption_bar, w * 7 / 100, bottom - text_h);
+    lv_obj_set_size(f->caption_bar, w * 86 / 100, text_h);
+    lv_obj_set_pos(f->caption, w * 9 / 100, bottom - text_h + 7);
+    lv_obj_set_size(f->caption, w * 82 / 100, text_h - 12);
+}
+
 static void draw_face(face_view_t *f) {
     if (!f || !f->eyes) return;
     const int w = lv_obj_get_width(f->root);
@@ -110,13 +128,7 @@ static void draw_face(face_view_t *f) {
     lv_obj_set_pos(f->eyes_host, 0, 0);
     face_renderer_render(f->eyes, f->theme, &f->state, w, h);
 
-    int text_h = h * 13 / 100;
-    if (text_h > 62) text_h = 62;
-    const int cap_y = h * 83 / 100;
-    lv_obj_set_pos(f->caption_bar, w * 7 / 100, cap_y);
-    lv_obj_set_size(f->caption_bar, w * 86 / 100, text_h);
-    lv_obj_set_pos(f->caption, w * 9 / 100, cap_y + 7);
-    lv_obj_set_size(f->caption, w * 82 / 100, text_h - 12);
+    fit_caption(f, w, h);
     const int margin = w / 50;
     lv_obj_set_pos(f->result_panel, margin, 8);
     lv_obj_set_size(f->result_panel, w - 2 * margin, h - 16);
@@ -264,16 +276,36 @@ static void animation_tick(lv_timer_t *timer) {
     }
 
     const int factor = clamp(f->theme->gaze_smoothing, 1, 20);
-    int dx = f->requested_gaze_x - f->state.gaze_x;
-    int dy = f->requested_gaze_y - f->state.gaze_y;
+    int tx = f->requested_gaze_x, ty = f->requested_gaze_y;
+    if (f->state.expression == FACE_EX_THINKING) {
+        /* Thinking: look up and to the side, then slowly scan, as if searching. */
+        const uint32_t t = now - f->expression_since;
+        int scan = 0;
+        if (t > 700) {
+            const int p = (int)((t - 700) % 2800);
+            scan = p < 1400 ? p * 60 / 1400 - 30 : 30 - (p - 1400) * 60 / 1400;
+        }
+        tx = tx / 3 - 40 + scan;
+        ty = ty / 3 - 45;
+    }
+    if ((int32_t)(f->nod_until - now) > 0) ty += 45;
+    tx = clamp(tx, -100, 100); ty = clamp(ty, -100, 100);
+    int dx = tx - f->state.gaze_x;
+    int dy = ty - f->state.gaze_y;
     if (dx) {
-        f->state.gaze_x = face_gaze_approach(f->state.gaze_x, f->requested_gaze_x, factor);
+        f->state.gaze_x = face_gaze_approach(f->state.gaze_x, tx, factor);
         redraw = true;
     }
     if (dy) {
-        f->state.gaze_y = face_gaze_approach(f->state.gaze_y, f->requested_gaze_y, factor);
+        f->state.gaze_y = face_gaze_approach(f->state.gaze_y, ty, factor);
         redraw = true;
     }
+    int level = f->level_target;
+    const int32_t aha = (int32_t)(f->aha_until - now);
+    if (aha > 0 && 255 * aha / 380 > level) level = 255 * aha / 380;
+    const int current = f->state.speech_level;
+    const int next = level > current ? current + (level - current + 1) / 2 : current - (current - level + 3) / 4;
+    if (next != current) { f->state.speech_level = (uint8_t)next; redraw = true; }
     if (redraw) draw_face(f);
 
     if (!face_settings_is_open(f->settings) &&
@@ -322,6 +354,7 @@ face_view_t *face_create(lv_obj_t *parent) {
                        LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
     f->caption = lv_label_create(f->root);
     lv_label_set_long_mode(f->caption, LV_LABEL_LONG_MODE_DOTS);
+    lv_obj_set_style_text_line_space(f->caption, 2, 0);
     lv_label_set_text(f->caption, "");
     lv_obj_set_style_text_align(f->caption, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(f->caption, &xiaodai_font_sc_30, 0);
@@ -468,6 +501,10 @@ bool face_set_expression(face_view_t *f, const char *name) {
         if (strcmp(k_face_expression_ids[i], name) == 0) {
             if (f->state.expression == (face_expression_t)i) return true;
             lv_anim_delete(f, expression_anim_step);
+            f->expression_since = lv_tick_get();
+            /* "Aha": the eyes pop as the first answer arrives after thinking. */
+            if (f->state.expression == FACE_EX_THINKING && i != FACE_EX_IDLE && i != FACE_EX_LISTENING)
+                f->aha_until = f->expression_since + 380;
             f->state.expression = (face_expression_t)i;
             if (!expression_can_blink(f->state.expression)) {
                 lv_anim_delete(f, blink_anim_step);
@@ -506,6 +543,17 @@ bool face_set_expression(face_view_t *f, const char *name) {
     return false;
 }
 
+void face_set_speech_level(face_view_t *f, uint8_t level) {
+    if (f) f->level_target = level;
+}
+
+void face_nod(face_view_t *f) {
+    if (!f || !f->animation_active) return;
+    const uint32_t now = lv_tick_get();
+    f->nod_until = now + 240;
+    if (expression_can_blink(f->state.expression) && !f->blink_anim_running) start_blink(f, now);
+}
+
 void face_set_gaze(face_view_t *f, int x, int y) {
     if (!f) return;
     f->requested_gaze_x = clamp(x, -100, 100);
@@ -533,6 +581,8 @@ void face_set_subtitle(face_view_t *f, const char *text) {
     memcpy(buffer, text, n);
     buffer[n] = '\0';
     lv_label_set_text(f->caption, buffer);
+    const int w = lv_obj_get_width(f->root), h = lv_obj_get_height(f->root);
+    if (w >= 240 && h >= 180) fit_caption(f, w, h);
     visible(f->caption, true);
     visible(f->caption_bar, true);
 }

@@ -67,6 +67,7 @@ typedef struct {
 
 struct bot_audio {
     portMUX_TYPE lock;
+    volatile uint8_t playback_level; /* lock-free envelope for the face, 0..255 */
     bot_audio_config_t config;
     char model_name[BOT_AUDIO_MODEL_NAME_BYTES + 1];
     char partition_label[17]; /* ESP partition labels are at most 16 bytes */
@@ -1106,10 +1107,16 @@ static esp_err_t output_silence(bot_audio_t *a, uint32_t frames)
     return ESP_OK;
 }
 
+uint8_t bot_audio_playback_level(bot_audio_t *a)
+{
+    return a ? a->playback_level : 0;
+}
+
 static void finish_playback(bot_audio_t *a, uint32_t id, bot_audio_token_t token,
                             bot_audio_event_kind_t kind, esp_err_t error)
 {
     esp_err_t amp_error = gpio_set_level(BSP_POWER_AMP_IO, 0);
+    a->playback_level = 0;
     /* Purge old DMA samples while muted. No later stream can begin until this
      * completes, so unmuting never intentionally replays the canceled tail. */
     esp_err_t flush = output_silence(a, a->dma_frames + BOT_AUDIO_PLAYBACK_SAMPLES);
@@ -1223,9 +1230,15 @@ static void playback_worker(void *context)
             clear_audio(&frame, sizeof(frame));
             continue;
         }
-        for (size_t i = 0; i < frame.count; ++i)
+        uint32_t magnitude = 0;
+        for (size_t i = 0; i < frame.count; ++i) {
             for (unsigned channel=0;channel<a->codec_channels;channel++)
                 stereo[i*a->codec_channels+channel]=muted?0:frame.samples[i];
+            magnitude += (uint32_t)abs(frame.samples[i]);
+        }
+        /* Mean magnitude, where ordinary speech is roughly 1000-5000. */
+        const uint32_t mean = frame.count && !muted ? magnitude / frame.count : 0;
+        a->playback_level = (uint8_t)(mean >= 5100 ? 255 : mean / 20);
         const uint32_t written_count = frame.count;
         esp_err_t err = esp_codec_dev_write(a->codec, stereo, frame.count * a->codec_channels * sizeof(int16_t));
         clear_audio(&frame, sizeof(frame));

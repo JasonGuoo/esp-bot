@@ -281,6 +281,8 @@ esp_err_t bot_audio_playback_end(bot_audio_t *audio, uint32_t playback_id);
  * Callback-safe; asynchronous completion is PLAYBACK_CANCELLED. */
 void bot_audio_playback_cancel(bot_audio_t *audio, uint32_t playback_id);
 void bot_audio_get_status(bot_audio_t *audio, bot_audio_status_t *out);
+/** Lock-free loudness (0..255) of the block being played; 0 when idle. */
+uint8_t bot_audio_playback_level(bot_audio_t *audio);
 
 #ifdef __cplusplus
 }

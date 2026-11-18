@@ -37,7 +37,12 @@ void face_set_gaze(face_view_t *view, int x, int y);
 /** Current eased eye position for diagnostics; caller holds the LVGL lock. */
 void face_get_gaze(const face_view_t *view, int *x, int *y);
 
-/** Set caption text or NULL/"" to hide; truncates at 383 UTF-8 bytes. */
+/** Playback loudness 0..255 (about every 20 ms); the eyes follow its envelope. */
+void face_set_speech_level(face_view_t *view, uint8_t level);
+/** A quick blink-and-dip "got it" when a turn is submitted. */
+void face_nod(face_view_t *view);
+
+/** Set caption text or NULL/"" to hide; two lines, truncates at 383 UTF-8 bytes. */
 void face_set_subtitle(face_view_t *view, const char *text);
 /** Show the current text reply in a scrollable view. Call with an empty string
  * when the reply is no longer current. Must be called under the display lock. */

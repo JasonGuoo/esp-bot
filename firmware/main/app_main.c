@@ -101,6 +101,7 @@ typedef struct {
     char rendered_caption[BOT_CAPTION_MAX_BYTES + 1];
     bot_session_token_t replace_token; /* read/written under the display lock */
     char rendered_expression[BOT_EXPRESSION_MAX_BYTES + 1];
+    bot_conversation_t rendered_conversation;
 } app_t;
 
 static void post(app_t *app, const bot_event_t *event) {
@@ -907,6 +908,11 @@ static void reconcile(app_t *app, uint32_t now_ms) {
             expression_changed = true;
         }
         face_set_gaze(app->face, gaze.eye_x, gaze.eye_y);
+        face_set_speech_level(app->face, bot_audio_playback_level(app->audio));
+        /* An instant non-verbal "got it" the moment a turn is submitted. */
+        if (s->conversation == BOT_CONVERSATION_SUBMITTED && app->rendered_conversation != BOT_CONVERSATION_SUBMITTED)
+            face_nod(app->face);
+        app->rendered_conversation = s->conversation;
         face_get_gaze(app->face, &rendered_gaze_x, &rendered_gaze_y);
         rendered_gaze_valid = true;
         face_set_stop_visible(app->face, s->behavior == BOT_BEHAVIOR_WAKING ||
