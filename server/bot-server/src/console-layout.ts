@@ -1,28 +1,34 @@
 import xiaodaiIcon from "../src-tauri/icons/xiaodai.png";
 
+// One line on the page; the longer explanation lives in the "?" tooltip.
 export const CONSOLE_PANELS = [
-  { id: "talk", label: "对话", group: "日常使用", description: "与小呆聊一聊，文字和声音都可以。" },
-  { id: "household", label: "家庭时间线", group: "日常使用", description: "一起聊过的事、人物标注和有来源的家庭记忆。" },
-  { id: "voices", label: "谁在说话", group: "日常使用", description: "试听相似的声音，给说话的人标上名字。" },
-  { id: "tasks", label: "任务与作品", group: "日常使用", description: "查看后台任务、图文音视频作品与真实呈现回执。" },
-  { id: "family", label: "家庭成员", group: "日常使用", description: "管理家庭成员的名字和档案。" },
-  { id: "memory", label: "补充记忆", group: "日常使用", description: "维护手动与既有记忆；家庭对话的记忆和来源请在家庭时间线查看。" },
-  { id: "models", label: "模型与密钥", group: "服务管理", description: "管理模型顺序、服务端点与 API Key。" },
-  { id: "local", label: "本地能力", group: "服务管理", description: "检查这台 Mac 的语音、视觉与身份模型。" },
-  { id: "tools", label: "工具与授权", group: "服务管理", description: "查看工具连接，确认每一次需要批准的操作。" },
-  { id: "devices", label: "设备连接", group: "服务管理", description: "查看机器人连接，管理安全网关和设备凭据。" },
-  { id: "settings", label: "运行设置", group: "服务管理", description: "查看运行状态，维护启动偏好与高级配置。" },
+  { id: "talk", label: "对话", hub: "talk", group: "陪伴", description: "和小呆聊一聊，文字和声音都可以。", hint: "不连接机器人也能在这台 Mac 上聊。回复会一句一句出现；勾选“朗读回复”会同时播放声音。" },
+  { id: "household", label: "家庭时间线", hub: "household", group: "陪伴", description: "一起聊过的事和家庭记忆。", hint: "按天查看对话、人物标注和带来源的家庭记忆，可以更正、确认或忘记。" },
+  { id: "tasks", label: "任务与作品", hub: "tasks", group: "陪伴", description: "后台任务和做好的作品。", hint: "资料整理、图片与媒体准备、打印都有独立进度，也能看到设备上真实呈现的回执。" },
+  { id: "family", label: "家庭成员", hub: "family", group: "家人", description: "家人的名字、年龄段和识别样本。", hint: "年龄段由家长填写，不会自动推断。成员用于标注共同对话；个人私密范围只在明确选择时开启。" },
+  { id: "voices", label: "谁在说话", hub: "family", group: "家人", description: "给听到的声音标上名字。", hint: "试听相似的声音片段，确认是谁之后再标注。" },
+  { id: "memory", label: "补充记忆", hub: "family", group: "家人", description: "手动添加或修改记忆。", hint: "后台自动整理的内容可能有误，可以随时修改或删除。家庭对话的记忆和来源在“家庭时间线”查看。" },
+  { id: "models", label: "模型与密钥", hub: "manage", group: "管理", description: "模型顺序、服务端点与 API Key。", hint: "密钥只在本次运行的会话里使用。" },
+  { id: "local", label: "本地能力", hub: "manage", group: "管理", description: "这台 Mac 的语音、视觉与身份模型。", hint: "检查本机模型是否就绪、是否已加载。" },
+  { id: "tools", label: "工具与授权", hub: "manage", group: "管理", description: "工具连接和待确认的操作。", hint: "每一次需要批准的工具操作都会在这里等待家长确认。" },
+  { id: "devices", label: "设备连接", hub: "manage", group: "管理", description: "机器人连接、安全网关和设备凭据。", hint: "设备凭据只显示一次，离开页面时会清除。" },
+  { id: "settings", label: "运行设置", hub: "manage", group: "管理", description: "运行状态、启动偏好与高级配置。", hint: "高级配置直接编辑 brain.json，保存前会校验。" },
 ] as const;
 
 export type ConsolePanel = typeof CONSOLE_PANELS[number]["id"];
 
-const navigation = ["日常使用", "服务管理"].map(group => `
-  <div class="cc-nav-group"><p class="cc-nav-label">${group}</p>
-    ${CONSOLE_PANELS.filter(page => page.group === group).map(page => `
-      <button type="button" class="cc-nav-item${page.id === "talk" ? " selected" : ""}" data-panel="${page.id}" aria-controls="cc-panel-${page.id}"${page.id === "talk" ? ' aria-current="page"' : ""}>
-        <span>${page.label}</span>${page.id === "tools" ? '<span id="cc-nav-pending" class="cc-nav-badge" hidden></span>' : ""}
-      </button>`).join("")}
-  </div>`).join("");
+// Friend pages first; everything administrative sits behind one "管理" entry.
+export const CONSOLE_HUBS = [
+  { id: "talk", label: "对话" }, { id: "household", label: "家庭时间线" }, { id: "family", label: "家人" },
+  { id: "tasks", label: "任务与作品" }, { id: "manage", label: "管理" },
+] as const;
+
+const navigation = `<div class="cc-nav-group">${CONSOLE_HUBS.map((hub, index) => {
+  const first = CONSOLE_PANELS.find(page => page.hub === hub.id)!;
+  return `${index === 4 ? '<div class="cc-nav-spacer"></div>' : ""}<button type="button" class="cc-nav-item${hub.id === "talk" ? " selected" : ""}" data-panel="${first.id}" data-hub="${hub.id}" aria-controls="cc-panel-${first.id}"${hub.id === "talk" ? ' aria-current="page"' : ""}>
+        <span>${hub.label}</span>${hub.id === "manage" ? '<span id="cc-nav-pending" class="cc-nav-badge" hidden></span>' : ""}
+      </button>`;
+}).join("")}</div>`;
 
 // Application-owned markup only. Runtime data is rendered as text by the controller.
 export const consoleTemplate = `
@@ -33,11 +39,12 @@ export const consoleTemplate = `
     <div class="cc-service-control"><div class="cc-service-label"><span class="cc-status-dot" id="cc-service-dot"></span><span id="cc-service-pill" role="status">正在连接本机服务</span></div><p id="cc-service-caption">Mac 本地服务</p><div class="cc-service-buttons"><button type="button" class="cc-button primary" id="cc-start">启动服务</button><button type="button" class="cc-button quiet" id="cc-service-stop">停止服务</button></div><span id="cc-updated-at" class="cc-caption">状态自动更新</span></div>
   </aside>
   <div class="cc-workspace">
-    <header class="cc-page-header"><div><span class="cc-eyebrow" id="cc-page-group">日常使用</span><h1 id="cc-page-title">对话</h1><p id="cc-page-description">与小呆聊一聊，文字和声音都可以。</p></div><div class="cc-header-actions"><p id="cc-phase" role="status">聊一聊，或者一起发现一个小原理。</p><div class="cc-inline"><button type="button" class="cc-button quiet" id="cc-refresh-status">刷新状态</button><button type="button" class="cc-button stop" id="cc-stop">停止互动</button></div></div></header>
+    <header class="cc-page-header"><div><span class="cc-eyebrow" id="cc-page-group">陪伴</span><h1 id="cc-page-title">对话</h1><p class="cc-page-line"><span id="cc-page-description">和小呆聊一聊，文字和声音都可以。</span><button type="button" class="cc-help" id="cc-page-help" aria-label="说明">?</button></p><nav class="cc-subtabs" id="cc-subtabs" aria-label="子页面" hidden></nav></div><div class="cc-header-actions"><p id="cc-phase" role="status">聊一聊，或者一起发现一个小原理。</p><div class="cc-inline"><button type="button" class="cc-button quiet" id="cc-refresh-status">刷新状态</button><button type="button" class="cc-button stop" id="cc-stop">停止互动</button></div></div></header>
     <div class="cc-notice-wrap" id="cc-notice-wrap" hidden><p id="cc-notice" class="cc-notice" role="status" aria-live="polite" hidden></p><button type="button" id="cc-notice-dismiss" class="cc-button quiet" aria-label="关闭提示">关闭</button></div>
     <div class="cc-approval-banner" id="cc-approval-banner" hidden><span id="cc-approval-summary"></span><button type="button" class="cc-button" id="cc-review-permissions">查看待授权操作</button></div>
     <div class="cc-approval-banner" id="cc-question-banner" hidden><span>小呆有问题需要你的回答，任务正在等待。</span><button type="button" class="cc-button" id="cc-review-questions">查看问题</button></div>
       <section class="cc-panel cc-talk" id="cc-panel-talk" aria-labelledby="cc-page-title">
+        <div class="cc-friend"><div class="cc-live-face" id="cc-live-face" data-expression="idle" aria-hidden="true"><svg viewBox="0 0 800 480" id="cc-live-face-svg"></svg></div><div class="cc-friend-side"><p class="cc-mirror" id="cc-mirror" role="status">小呆在这台 Mac 上陪你</p><div class="cc-today" id="cc-today" aria-label="今天"></div></div></div>
         <div class="cc-approval-banner" id="cc-model-setup" hidden><span>对话需要一条已启用的模型路线和密钥。这里输入的密钥只用于本次运行。</span><button type="button" class="cc-button" id="cc-model-setup-open">去配置模型</button></div>
 <div class="cc-conversation-bar"><label for="cc-profile">本轮说话人</label><select id="cc-profile"><option value="">未指定 · 家庭共同对话</option></select><label class="cc-check"><input type="checkbox" id="cc-private-scope" disabled>使用所选成员的个人私密范围</label><button type="button" class="cc-button quiet" id="cc-new-conversation">新对话</button><button type="button" class="cc-button quiet" id="cc-forget-conversation">忘记这段</button></div>
         <div id="cc-questions" class="cc-questions" hidden></div>

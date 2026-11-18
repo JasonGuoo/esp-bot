@@ -567,8 +567,9 @@ impl Brain {
                         if text.is_empty() { pending_tag=tag.or(pending_tag); continue; } // a tag on its own line
                         let expression=tag.or(pending_tag.take()).unwrap_or_else(||super::emotion::from_keywords(&text));
                         live.mark("first_sentence");
+                        // The console shows the text as it streams; diagnostics keep only the numeric fields.
                         self.emit("brain.sentence", Some(turn_id), json!({"index":index,"elapsed_ms":ms,"chars":text.chars().count(),
-                            "expression":expression,"tagged":tag.is_some()}));
+                            "expression":expression,"tagged":tag.is_some(),"text":text}));
                         prefetch_prefix &= sentences.len()<self.config.presentation.max_segments
                             && text.chars().count()<=self.config.presentation.max_segment_chars;
                         if speak && prefetch_prefix {

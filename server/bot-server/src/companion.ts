@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { LocalCamera, PcmRecorder, base64ToBuffer, readImageFile, readWavFile, type CapturedWav } from "./capture";
 import { CONSOLE_PANELS, consoleTemplate, type ConsolePanel } from "./console-layout";
+import { mountLiveFace } from "./live-face";
 import { mountVoiceAlbum } from "./voice-album";
 import { mountHousehold, readArtifactContent } from "./household";
 import { deviceDeliveryText, deviceReplyMetrics, renderActivity, renderBrainCore, renderCapabilities, renderDeviceStatus, renderRuntimeMetrics, renderTurnTimings, turnStageMetric, harnessTimingMetric, type DeviceDisplayReport } from "./console-presenters";
@@ -175,6 +176,11 @@ export function mountCompanion(container: HTMLElement): CompanionController {
   let pendingPermissionCount = 0;
   let latestModelHealth: JsonObject | null = null;
 
+  const liveFace = mountLiveFace($("#cc-live-face"));
+  // The console turn whose sentences are arriving, shown as they stream.
+  let liveReply: { turn: string; row: HTMLElement; body: HTMLElement; sentences: number } | null = null;
+  let deviceMirror = "";
+  let todayItems: { kind: string; content: string }[] = [];
   const request = async <T = unknown>(method: string, payload: unknown = {}): Promise<T> => {
     return invoke<T>("companion_request", { method, payload });
   };
@@ -207,6 +213,54 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     const allowed = new Set(["idle", "happy", "curious", "thinking", "surprised", "sleepy", "shy", "listening", "speaking"]);
     const chosen = expression ?? (value === "error" ? "curious" : value);
     $("#cc-pet").dataset.expression = allowed.has(chosen) ? chosen : "idle";
+    liveFace.show(chosen);
+    mirror();
+  }
+  function mirror(): void {
+    const local = turnBusy ? "小呆正在和你聊" : recordPurpose ? "小呆正在听你说" : "";
+    $("#cc-mirror").textContent = local || deviceMirror || "小呆在这台 Mac 上陪你";
+  }
+  function showDevice(state: JsonObject): void {
+    const labels: Record<string, [string, string]> = {
+      listening: ["设备上的小呆正在听", "listening"], thinking: ["设备上的小呆正在想", "thinking"],
+      speaking: ["设备上的小呆正在说话", "speaking"], presenting: ["设备上的小呆正在展示回答", "happy"],
+      waiting_task: ["设备上的小呆在等后台任务", "curious"], idle: ["设备上的小呆在旁边待着", "idle"],
+      disconnected: ["", "idle"],
+    };
+    const [text, expression] = labels[string(state.phase)] ?? ["", "idle"];
+    deviceMirror = text;
+    if (!turnBusy && !recordPurpose) { liveFace.show(expression); mirror(); }
+  }
+  async function refreshToday(): Promise<void> {
+    try {
+      const days = list(await request("household.days", { limit: 1 }));
+      const day = object(days[0]);
+      const today = new Date().toLocaleDateString("sv-SE");
+      const items = string(day.date) === today && string(day.daily_conversation_id)
+        ? list(await request("household.memories", { daily_conversation_id: string(day.daily_conversation_id), limit: 8 })) : [];
+      todayItems = items.map(object).filter((item) => !item.private_profile_id && string(item.content))
+        .map((item) => ({ kind: string(item.kind), content: string(item.content) }));
+    } catch { todayItems = []; /* The service may still be starting; the strip stays empty. */ }
+    if (disposed) return;
+    const host = $("#cc-today");
+    host.replaceChildren(...todayItems.slice(0, 4).map((item) => {
+      const chip = element("span", "cc-today-item", item.content.length > 26 ? `${item.content.slice(0, 25)}…` : item.content);
+      chip.title = item.content; return chip;
+    }));
+    if (!todayItems.length) host.append(element("span", "cc-today-item", "今天还没有聊过的事"));
+    if (messages.querySelector(".cc-welcome")) { messages.querySelector(".cc-welcome")?.remove(); renderWelcome(); }
+  }
+  function suggestionTexts(): string[] {
+    const hour = new Date().getHours();
+    const timely = hour < 5 ? ["睡不着，陪我小声聊一会儿", "讲一个很短的晚安故事"]
+      : hour < 11 ? ["早上好！今天有什么好玩的计划？", "给我讲一个早上的冷知识"]
+      : hour < 14 ? ["午饭吃什么好呢？", "用恐龙讲一道数学题"]
+      : hour < 18 ? ["放学后玩点什么？", "为什么天空是蓝色的？"]
+      : hour < 21 ? ["一起编一个故事吧", "今天过得怎么样？听我说说"]
+      : ["讲一个睡前故事吧", "明天要记得什么事？"];
+    const recent = todayItems.filter((item) => item.kind === "topic" || item.kind === "event").slice(0, 1)
+      .map((item) => `接着聊聊：${item.content.length > 16 ? `${item.content.slice(0, 15)}…` : item.content}`);
+    return [...recent, ...timely].slice(0, 3);
   }
   function profileName(id: string | null): string {
     return id ? profiles.find((profile) => profile.id === id)?.display_name ?? `成员档案 ${id.slice(-6)}` : "家庭共享";
@@ -226,7 +280,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     }
     panel = page.id;
     for (const tab of Array.from(container.querySelectorAll<HTMLButtonElement>(".cc-nav-item"))) {
-      const active = tab.dataset.panel === next;
+      const active = tab.dataset.hub === page.hub;
       tab.classList.toggle("selected", active);
       if (active) tab.setAttribute("aria-current", "page"); else tab.removeAttribute("aria-current");
     }
@@ -238,6 +292,17 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     $("#cc-page-title").textContent = page.label;
     $("#cc-page-group").textContent = page.group;
     $("#cc-page-description").textContent = page.description;
+    $("#cc-page-help").title = page.hint;
+    $("#cc-page-help").setAttribute("aria-label", `说明：${page.hint}`);
+    const siblings = CONSOLE_PANELS.filter((candidate) => candidate.hub === page.hub);
+    const subtabs = $("#cc-subtabs");
+    subtabs.hidden = siblings.length < 2;
+    subtabs.replaceChildren(...(siblings.length < 2 ? [] : siblings.map((candidate) => {
+      const tab = button(candidate.label, () => activatePanel(candidate.id), `cc-subtab${candidate.id === next ? " selected" : ""}`);
+      if (candidate.id === next) tab.setAttribute("aria-current", "page");
+      return tab;
+    })));
+    if (next === "talk") void refreshToday();
     $("#cc-phase").hidden = next !== "talk" && !turnBusy && !recordPurpose && !captureConverting;
     $("#cc-approval-banner").hidden = pendingPermissionCount === 0 || next === "tools";
     $("#cc-question-banner").hidden = pendingQuestionCount === 0 || next === "talk";
@@ -367,7 +432,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     welcome.append(element("span", "cc-welcome-mark", "✦"), element("h2", "", "今天，从一个小问题开始"),
       element("p", "", "文字、声音和屏幕卡片一起用。不连接机器人，也能在这台 Mac 上聊。"));
     const suggestions = element("div", "cc-suggestions");
-    for (const text of ["为什么月亮会变形？", "用恐龙讲一道数学题", "陪我安排放学后的时间"]) {
+    for (const text of suggestionTexts()) {
       suggestions.append(button(text, () => { input.value = text; updateControls(); input.focus(); }, "cc-suggestion"));
     }
     welcome.append(suggestions); messages.append(welcome);
@@ -492,6 +557,10 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     const user = chatRow("user", draft ? `语音 · ${draft.seconds.toFixed(1)} 秒（正在识别）` : text);
     input.value = ""; wavDraft = null; renderDraft(); updateControls();
     notice(""); phase("thinking", draft ? "先在 Mac 上听懂这句话…" : undefined);
+    const typing = chatRow("assistant", "");
+    const dots = element("span", "cc-typing"); dots.append(element("i"), element("i"), element("i"));
+    typing.body.replaceChildren(dots); typing.body.setAttribute("aria-label", "小呆正在输入");
+    liveReply = { turn: turnId, row: typing.row, body: typing.body, sentences: 0 };
     try {
       const result = await request<TurnResult>("assistant.turn", {
         turn_id: turnId, conversation_id: currentConversation,
@@ -502,7 +571,9 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       if (generation !== turnGeneration || currentConversation !== conversationId || disposed) return;
       received = true;
       if (draft) user.body.textContent = result.transcript;
-      const reply = chatRow("assistant", result.scene.speech);
+      const reply = liveReply?.turn === turnId && liveReply.row.isConnected ? { row: liveReply.row, body: liveReply.body } : chatRow("assistant", "");
+      liveReply = null;
+      reply.body.removeAttribute("aria-label"); reply.body.textContent = result.scene.speech;
       for (const card of result.scene.cards.slice(0, 4)) reply.row.append(renderCard(card));
       const meta = element("div", "cc-reply-meta", `${result.provider_id} · ${result.model_id}`);
       reply.row.append(meta);
@@ -542,8 +613,12 @@ export function mountCompanion(container: HTMLElement): CompanionController {
         }));
       }
     } finally {
+      if (liveReply?.turn === turnId) {
+        if (!liveReply.sentences) liveReply.row.remove(); else liveReply.row.append(element("div", "cc-reply-meta", "这一轮没有完成，以上是已经说出的部分"));
+        liveReply = null;
+      }
       if (draft && !received) user.body.textContent = `语音 · ${draft.seconds.toFixed(1)} 秒（${generation === turnGeneration ? "本轮未完成" : "已停止"}）`;
-      if (generation === turnGeneration) { activeTurn = null; turnBusy = false; updateControls(); void refreshPermissions(); }
+      if (generation === turnGeneration) { activeTurn = null; turnBusy = false; updateControls(); mirror(); void refreshPermissions(); window.setTimeout(() => { if (!disposed) void refreshToday(); }, 4000); }
     }
   }
   function renderDraft(): void {
@@ -1556,7 +1631,19 @@ export function mountCompanion(container: HTMLElement): CompanionController {
         || kind.startsWith("device.playback.") || kind === "device.activity"
         || kind === "device.audio" || kind === "device.volume"
         || ["turn.started", "turn.completed", "turn.failed", "turn.cancelled"].includes(kind)) void refreshStatus();
-      if (kind === "service.started") phase("idle", "服务已启动，可以开始对话。");
+      if (kind === "service.started") { phase("idle", "服务已启动，可以开始对话。"); void refreshToday(); }
+      if (kind === "device.activity") showDevice(object(data.payload));
+      if (kind === "brain.sentence") {
+        const sentence = object(data.payload), text = string(sentence.text);
+        if (liveReply && liveReply.turn === string(data.turn_id) && text) {
+          // Sentences arrive in order while the answer is still being written.
+          if (!liveReply.sentences) { liveReply.body.textContent = ""; liveReply.body.removeAttribute("aria-label"); }
+          liveReply.body.append(document.createTextNode(text));
+          liveReply.sentences += 1;
+          messages.scrollTop = messages.scrollHeight;
+        }
+        if (string(sentence.expression) && (liveReply?.turn === string(data.turn_id) || (!turnBusy && deviceMirror))) liveFace.show(string(sentence.expression));
+      }
       if (kind === "service.stopped") {
         backendCancellable = false; voiceAlbum.stop();
         cancelCapture(); closeCamera(); stopPlayback(); householdController.stopMedia(); phase("idle", "服务已停止。");
@@ -1700,7 +1787,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     },
     dispose(): void {
       if (disposed) return;
-      disposed = true; voiceAlbum.show(false); localCleanup(); householdController.dispose(); unsubscribe?.(); unsubscribeLan?.();
+      disposed = true; liveFace.dispose(); voiceAlbum.show(false); localCleanup(); householdController.dispose(); unsubscribe?.(); unsubscribeLan?.();
       window.clearInterval(statusTimer); window.clearInterval(permissionTimer);
       window.removeEventListener("pagehide", onPageHide);
     },

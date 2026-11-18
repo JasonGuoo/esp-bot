@@ -163,3 +163,27 @@
   .cc-service-buttons { grid-template-columns: 1fr 1fr; margin-top: 10px; }
   .cc-service-label { font-size: 11px; }
 }
+
+/* Friend view: the live face, a mirror line and today's notes sit above the chat. */
+.cc-nav-spacer { height: 1px; margin: 14px 10px; background: #29372d; }
+.cc-page-line { display: flex; align-items: center; gap: 8px; }
+.cc-help { width: 18px; height: 18px; padding: 0; border: 1px solid #3b5143; border-radius: 50%; background: transparent; color: #9eb3a5; font-size: 11px; line-height: 16px; cursor: help; }
+.cc-help:hover, .cc-help:focus-visible { color: #e0eee4; border-color: #6c8c76; }
+.cc-subtabs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.cc-subtab { padding: 5px 11px; border: 1px solid #2f4236; border-radius: 999px; background: transparent; color: #aebfb3; font-size: 12px; }
+.cc-subtab.selected { background: #244231; border-color: #365a43; color: #c9f4dc; font-weight: 600; }
+.cc-friend { display: flex; align-items: center; gap: 18px; flex: none; padding: 14px 27px 10px; }
+.cc-live-face { flex: none; width: 220px; aspect-ratio: 800 / 480; border-radius: 18px; background: #000; box-shadow: 0 0 0 1px #1d2a22 inset; overflow: hidden; }
+.cc-live-face svg { display: block; width: 100%; height: 100%; transition: transform .25s ease; }
+.cc-live-face[data-expression="speaking"] svg { animation: cc-face-talk .5s ease-in-out infinite alternate; }
+@keyframes cc-face-talk { to { transform: scaleY(.94); } }
+.cc-friend-side { min-width: 0; flex: 1; }
+.cc-mirror { margin: 0 0 6px; color: #c9f4dc; font-size: 13px; }
+.cc-today { display: flex; flex-wrap: wrap; gap: 6px; }
+.cc-today-item { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px 9px; border-radius: 999px; background: #18241c; color: #9eb3a5; font-size: 11.5px; }
+.cc-typing { display: inline-flex; gap: 4px; padding: 4px 0; }
+.cc-typing i { width: 6px; height: 6px; border-radius: 50%; background: #7e9385; animation: cc-typing 1s ease-in-out infinite; }
+.cc-typing i:nth-child(2) { animation-delay: .15s; } .cc-typing i:nth-child(3) { animation-delay: .3s; }
+@keyframes cc-typing { 50% { opacity: .25; transform: translateY(-2px); } }
+@media (max-width: 760px) { .cc-live-face { width: 150px; } .cc-friend { padding: 10px 16px 6px; } }
+@media (prefers-reduced-motion: reduce) { .cc-live-face svg, .cc-typing i { animation: none !important; } }
