@@ -34,7 +34,12 @@ pub fn failure_line(error: &str, seed: &str) -> Option<(&'static str, &'static s
     if matches!(code, "asr_no_speech" | "no_speech" | "audio_too_quiet" | "audio_too_short") {
         return Some(pick(RETRY, seed));
     }
-    let transient = code == "all_routes_unavailable" || code.starts_with("brain_core") || code.starts_with("core_")
+    // Repeating the question cannot fix missing credentials or unavailable
+    // providers. Do not imply that we heard nothing or merely forgot the answer.
+    if code == "all_routes_unavailable" {
+        return Some(("我需要的服务现在不可用，请在 Mac 上检查模型设置。", "confused"));
+    }
+    let transient = code.starts_with("brain_core") || code.starts_with("core_")
         || code.starts_with("harness") || code.starts_with("opencode") || code.contains("timeout") || code == "model_error";
     (transient && !code.starts_with("tts")).then(|| pick(OOPS, seed))
 }
@@ -52,6 +57,8 @@ mod tests {
     fn failures_map_to_in_character_lines_or_stay_captions() {
         assert!(RETRY.iter().any(|l| Some(*l) == failure_line("asr_no_speech", "t1")));
         assert!(OOPS.iter().any(|l| Some(*l) == failure_line("brain_core_closed", "t1")));
+        assert_eq!(failure_line("all_routes_unavailable", "t1"),
+            Some(("我需要的服务现在不可用，请在 Mac 上检查模型设置。", "confused")));
         assert!(failure_line("local_worker_timeout: asr", "t").is_some());
         for quiet in ["cancelled", "brain_busy", "brain_not_started", "profile_requires_local_console", "tts_timeout", "stale_runtime"] {
             assert_eq!(failure_line(quiet, "t"), None, "{quiet}");

@@ -11,7 +11,7 @@ pub const POOL: &[(&str, Kind)] = &[
     ("嗯……让我想想。", Kind::Thinking), ("我想想哦。", Kind::Thinking), ("嗯，等我一下下。", Kind::Thinking),
     ("好问题！", Kind::Question), ("这个问题有意思。", Kind::Question), ("嗯，这个嘛……", Kind::Question),
     ("好呀，听我讲。", Kind::Story), ("好嘞，故事来啦。", Kind::Story),
-    ("嗯，我小声说哦。", Kind::Evening), ("好，我轻轻地说。", Kind::Evening),
+    ("嗯，我想想。", Kind::Evening), ("好，我想一想。", Kind::Evening),
 ];
 /// Not repeated within this many acknowledgements.
 const NO_REPEAT: usize = 3;
@@ -71,5 +71,15 @@ mod tests {
         assert!(picks.windows(2).all(|w| w[0] != w[1]));
         assert_eq!(picks[..3].iter().collect::<std::collections::HashSet<_>>().len(), 3, "{picks:?}");
         assert!(POOL.iter().any(|p| p.0 == picks[3] && p.1 == Kind::Thinking), "question lines used up: neutral");
+    }
+
+    #[test]
+    fn evening_acknowledgements_do_not_describe_their_own_volume() {
+        let acks = Acks::default();
+        for (text, _) in POOL { acks.insert(text, serde_json::json!({"wav_base64":text})); }
+        for _ in 0..8 {
+            let (text, _) = acks.pick("你好", true).unwrap();
+            assert!(!["轻轻", "小声", "轻声"].iter().any(|word| text.contains(word)), "{text}");
+        }
     }
 }

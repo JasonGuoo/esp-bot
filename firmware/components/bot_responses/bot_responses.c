@@ -58,6 +58,15 @@ static bool recently_used(const bot_responses_state_t *state, uint16_t index, un
     return false;
 }
 
+/* These older recorded lines tell the user to speak quietly or claim that the
+ * robot will do so. Retire them without changing the matching audio catalogue;
+ * night-time gain is still applied to the remaining night/dark responses. */
+static bool retired_response(const bot_response_entry_t *entry) {
+    return strcmp(entry->id, "night_03") == 0 || strcmp(entry->id, "night_04") == 0 ||
+           strcmp(entry->id, "night_10") == 0 || strcmp(entry->id, "night_12") == 0 ||
+           strcmp(entry->id, "dark_07") == 0;
+}
+
 const bot_response_entry_t *bot_responses_select(bot_responses_state_t *state,
                                                 const bot_response_context_t *context) {
     if (!state || !context) return NULL;
@@ -73,7 +82,7 @@ const bot_response_entry_t *bot_responses_select(bot_responses_state_t *state,
         const unsigned avoid = pass == 0 ? BOT_RESPONSES_RECENT_COUNT : (pass == 1 ? 1U : 0U);
         uint32_t candidates = 0;
         for (size_t i = 0; i < bot_responses_count(); ++i) {
-            if (strcmp(k_bot_responses[i].scene, scene) != 0 ||
+            if (retired_response(&k_bot_responses[i]) || strcmp(k_bot_responses[i].scene, scene) != 0 ||
                 recently_used(state, (uint16_t)i, avoid)) continue;
             ++candidates;
             if (next_random(state) % candidates == 0) selected = i;
