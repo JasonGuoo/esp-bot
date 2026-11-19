@@ -1,5 +1,10 @@
 # UX plan implementation summary, 2026-11-18
 
+**2026-11-19 clarification:** the unprompted-greeting feature in phase 5 was subsequently
+disabled by owner direction. This document records the 2026-11-18 snapshot. Current behavior is
+described in [the behavior lifecycle](behavior-lifecycle.md).
+
+
 This summarises how [the merged UX review](review-ux-2026-11-18.md) was implemented. All work is
 on `main` with `[skip ci]` and has not been pushed. Each commit builds on its own.
 

@@ -205,8 +205,30 @@ export function renderDeviceStatus(root: HTMLElement, status: Data): void {
     row.append(meta, node("span", "cc-tag good", "在线")); host.append(row);
   }
   if (diagnostic.server_id) host.append(node("p", "cc-caption", `服务器标识：${text(diagnostic.server_id)}`));
+  const appBuild = object(status.app_build);
+  const appHash = text(appBuild.executable_sha256);
+  const app = find(root, "#cc-app-build");
+  app.textContent = appBuild.release
+    ? `Mac App ${text(appBuild.release)} · 源码 ${text(appBuild.source_revision, "未知")} · ${text(appBuild.profile, "未知构建")} · 可执行文件 ${appHash ? appHash.slice(0, 16) : "未读取"}`
+    : "Mac App 版本未报告";
+  app.title = appHash ? `Mac 可执行文件 SHA-256 ${appHash}` : "";
+
   const gateway = object(status.gateway);
   const secureDevices = list(gateway.devices);
+  const firmwareHost = find(root, "#cc-firmware-build"); firmwareHost.replaceChildren();
+  const volumeStates = list(status.device_volumes).map(object);
+  for (const id of secureDevices) {
+    const device = text(id);
+    const state = volumeStates.find((entry) => entry.device_id === device && entry.online === true);
+    const firmware = object(state?.firmware);
+    const hash = text(firmware.elf_sha256);
+    const row = node("p", "cc-caption", firmware.release
+      ? `${device} · 固件 ${text(firmware.release)} · ELF ${hash.slice(0, 16)}`
+      : `${device} · 固件版本未报告`);
+    if (hash) row.title = `固件 ELF SHA-256 ${hash}`;
+    firmwareHost.append(row);
+  }
+  if (!secureDevices.length) firmwareHost.append(node("p", "cc-caption", "设备未连接，无法读取实际运行的固件版本。"));
   find(root, "#cc-gateway-summary").textContent = gateway.running === true
     ? secureDevices.length ? `${secureDevices.length} 台设备已认证连接` : "WSS 网关已启动，等待设备"
     : status.gateway_enabled === true ? "已启用，等待服务启动" : "WSS 网关未启用";

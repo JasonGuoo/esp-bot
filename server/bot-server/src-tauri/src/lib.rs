@@ -11,6 +11,7 @@ mod face_catalog_generated;
 mod usb_debug;
 mod data_root;
 mod diagnostics;
+mod version;
 mod capture_permission;
 
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use tauri::{Emitter, Manager};
 
 /// Current companion console and the diagnostic link used by the current firmware.
 pub fn run() {
+    let _ = version::info();
     tauri::Builder::default()
         .on_permission_request(|webview, kind| {
             use tauri::webview::{PermissionKind, PermissionResponse};

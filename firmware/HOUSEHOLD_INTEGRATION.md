@@ -5,6 +5,17 @@ HC-14/#27. No ESP-IDF build, model inference, flashing, real-board audio/display
 run or CI was performed in this delivery environment. Regression cases were
 added to the existing optional runtime test source; they have not been run.
 
+## Release identity and passive wake
+
+`VERSION` is the shared release number. The running Mac executable reports its release,
+source baseline and executable SHA-256. Authenticated S31 audio status includes the firmware's
+ESP-IDF app-descriptor release and ELF SHA-256. The console displays the connected devices'
+reported values; missing values from older firmware are shown as unavailable.
+
+A wake phrase or deliberate touch starts interaction. The current server does not advertise
+`proactive.v1` or offer idle greetings. Current firmware does not request proactive offers and
+rejects them if an older server sends one. Existing reminder records remain in storage.
+
 ## Live spoken turns on the paired Mac
 
 On November 18 the installed App and the S31 exercised the live protocol over their paired connection. The gateway advertises `conversation.live.v1`. The device requests `output.live_turns` with segmented presentation and requires the server to confirm it. An older peer continues to use the existing presentation protocol.

@@ -1,4 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
+# ESP-IDF stores this release in the flashed app descriptor.
+set(espbot_version_file "${CMAKE_CURRENT_LIST_DIR}/../VERSION")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${espbot_version_file}")
+file(STRINGS "${espbot_version_file}" PROJECT_VER LIMIT_COUNT 1)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(esp_bot)
 

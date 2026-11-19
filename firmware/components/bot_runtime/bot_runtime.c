@@ -1250,37 +1250,14 @@ static void proactive_report(bot_runtime_t *runtime, uint32_t id, uint8_t status
     runtime->state.proactive_report_seq++;
 }
 
-/* Keep a proposal only; the moment is decided in proactive_step. Settings,
- * night or an active conversation delay it rather than reject it. */
-static bot_command_result_t accept_proactive_offer(bot_runtime_t *runtime, const bot_command_t *command,
-                                                  uint32_t now_ms)
-{
-    if (runtime->state.critical_fault) return BOT_COMMAND_REJECTED_FAULT;
-    if (!secure_link(runtime)) return BOT_COMMAND_REJECTED_UNTRUSTED;
-    if (!command->request_id || !command->ttl_ms || command->ttl_ms > 1800000U ||
-        command->request_id == runtime->state.proactive_offer_id ||
-        !command->data.caption[0] || !valid_text(command->data.caption, sizeof(command->data.caption)))
-        return BOT_COMMAND_REJECTED_INVALID;
-    if (!within_age(now_ms, command->received_ms, runtime->config.command_max_age_ms))
-        return BOT_COMMAND_REJECTED_EXPIRED;
-    if (runtime->proactive_pending && runtime->proactive_id != command->request_id)
-        proactive_report(runtime, runtime->proactive_id, 1); /* superseded, never spoken */
-    runtime->proactive_pending = true;
-    runtime->proactive_id = command->request_id;
-    runtime->proactive_received_ms = command->received_ms;
-    runtime->proactive_ttl_ms = command->ttl_ms;
-    runtime->proactive_show_if_absent = command->presentation_sequence & 1U;
-    memcpy(runtime->proactive_text, command->data.caption, sizeof(runtime->proactive_text));
-    return BOT_COMMAND_ACCEPTED;
-}
-
 static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_command_t *command,
                                            uint32_t now_ms)
 {
     bot_runtime_snapshot_t *state = &runtime->state;
     if (command->kind < BOT_COMMAND_SET_EXPRESSION || command->kind > BOT_COMMAND_PROACTIVE_OFFER)
         return BOT_COMMAND_REJECTED_INVALID;
-    if (command->kind == BOT_COMMAND_PROACTIVE_OFFER) return accept_proactive_offer(runtime, command, now_ms);
+    /* Unsolicited offers cannot start a session, including with an older Mac. */
+    if (command->kind == BOT_COMMAND_PROACTIVE_OFFER) return BOT_COMMAND_REJECTED_PASSIVE;
     if (state->critical_fault) return BOT_COMMAND_REJECTED_FAULT;
     if (state->settings_open) return BOT_COMMAND_REJECTED_SETTINGS;
     if (!secure_link(runtime)) return BOT_COMMAND_REJECTED_UNTRUSTED;

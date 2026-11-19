@@ -6,6 +6,7 @@ impl BrainHost {
     pub async fn dispatch(&self, method: &str, payload: Value) -> Result<Value, String> {
         if method == "service.status" {
             let mut status = match self.get() {Ok(brain)=>brain.status().await,Err(error)=>json!({"ready":false,"error":error,"config_path":self.config_dir.join("brain.json")})};
+            status["app_build"] = crate::version::info().clone();
             status["device_diagnostics"] = self.diagnostics.as_ref().map(|snapshot| snapshot())
                 .unwrap_or_else(|| json!({"running":false,"bots":[],"error":"diagnostics_not_built"}));
             return Ok(status);

@@ -597,6 +597,11 @@ cancel/close 会清空播放状态并返回确认；不能要求此路径一定�
 
 ### 8.1 Unprompted lines (`proactive.v1`, 2026-11-18)
 
+**Superseded on 2026-11-19:** the server does not advertise this capability or send offers, and
+new firmware rejects old proactive offers. An explicit wake or deliberate touch begins interaction.
+The following is retained as the earlier protocol record.
+
+
 UX review §12.2. The Mac proposes, the device's `bot_runtime` decides the moment,
 and the session only ever speaks. Old firmware never sees an offer (the Mac waits
 for `proactive.ready`); old Macs never advertise the capability, so new firmware

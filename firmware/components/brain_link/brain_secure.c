@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "esp_app_desc.h"
 #include "esp_timer.h"
 #include "http_parser.h"
 #include "esp_tls_errors.h"
@@ -703,7 +704,7 @@ static void text_message(const char *data,size_t n) {
             s.live_available=array_has_string(cJSON_GetObjectItemCaseSensitive(root,"capabilities"),"conversation.live.v1");
             s.live_session=false;
             s.presentation_supported=array_has_string(cJSON_GetObjectItemCaseSensitive(root,"capabilities"),"presentation.segments.v1");
-            s.proactive_supported=array_has_string(cJSON_GetObjectItemCaseSensitive(root,"capabilities"),"proactive.v1");
+            s.proactive_supported=false; /* Wake or touch is required for interaction. */
             s.proactive_ready_sent=false;
             s.phase=READY; portEXIT_CRITICAL(&s_lock);
             link_event(true); ESP_LOGI(TAG,"Authenticated Mac gateway connected");
@@ -1241,12 +1242,25 @@ static void volume_status_poll(const secure_state_t *state) {
     const bool applied=audio.codec_available && audio.controls_error==ESP_OK &&
         audio.controls_revision==audio.controls_applied_revision &&
         bot_voice_settings_equal(&audio.controls_applied,&state->voice_settings);
-    char id[24],message[420];request_id(id,sizeof(id));
+    const esp_app_desc_t *app=esp_app_get_description();
+    char release[sizeof(app->version)]={0}, digest[65];
+    static const char hex[]="0123456789abcdef";
+    for (size_t i=0; i<sizeof(release)-1 && app->version[i]; ++i) {
+        const char ch=app->version[i];
+        release[i]=((ch>='0' && ch<='9') || (ch>='a' && ch<='z') || (ch>='A' && ch<='Z') ||
+            ch=='.' || ch=='-' || ch=='_' || ch=='+') ? ch : '_';
+    }
+    for (size_t i=0; i<sizeof(app->app_elf_sha256); ++i) {
+        digest[2*i]=hex[app->app_elf_sha256[i] >> 4];
+        digest[2*i+1]=hex[app->app_elf_sha256[i] & 15];
+    }
+    digest[64]='\0';
+    char id[24],message[700];request_id(id,sizeof(id));
     int n=snprintf(message,sizeof(message),
-        "{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"device.audio.status\",\"payload\":{\"volume\":%u,\"muted\":%s,\"settings_open\":%s,\"hardware_applied\":%s,\"last_id\":%lu,\"last_result\":%u}}",
+        "{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"device.audio.status\",\"payload\":{\"volume\":%u,\"muted\":%s,\"settings_open\":%s,\"hardware_applied\":%s,\"last_id\":%lu,\"last_result\":%u,\"firmware\":{\"release\":\"%s\",\"elf_sha256\":\"%s\"}}}",
         id,(unsigned)state->voice_settings.volume_percent,state->voice_settings.muted?"true":"false",
         state->voice_settings_open?"true":"false",applied?"true":"false",
-        (unsigned long)state->remote_volume_request_id,(unsigned)state->remote_volume_result);
+        (unsigned long)state->remote_volume_request_id,(unsigned)state->remote_volume_result,release,digest);
     if (n<=0 || (size_t)n>=sizeof(message)) return;
     portENTER_CRITICAL(&s_lock);
     if (s.authenticated) {snprintf(s.volume_poll_id,sizeof(s.volume_poll_id),"%s",id);s.volume_poll_us=now;}

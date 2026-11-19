@@ -29,12 +29,21 @@ struct State {
     last_id: u32,
     pending: Option<Pending>,
     result: &'static str,
+    firmware: Option<Value>,
 }
 
 #[derive(Default)]
 pub(super) struct DeviceVolumes {
     states: Mutex<BTreeMap<String, State>>,
     next: AtomicU32,
+}
+
+fn firmware_report(report: &Value) -> Option<Value> {
+    let value = report.get("firmware")?;
+    let release = value["release"].as_str().filter(|s| !s.is_empty() && s.len() <= 31 &&
+        s.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'_' | b'+')))?;
+    let digest = value["elf_sha256"].as_str().filter(|s| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit()))?;
+    Some(json!({"release":release,"elf_sha256":digest}))
 }
 
 impl DeviceVolumes {
@@ -51,7 +60,8 @@ impl DeviceVolumes {
     fn value(id: &str, state: &State) -> Value {
         json!({"device_id":id,"volume":state.volume,"muted":state.muted,
             "settings_open":state.settings_open,"hardware_applied":state.applied,
-            "online":state.last_seen.elapsed()<=FRESH,"pending":state.pending.is_some(),"result":state.result})
+            "online":state.last_seen.elapsed()<=FRESH,"pending":state.pending.is_some(),"result":state.result,
+            "firmware":state.firmware})
     }
     pub fn status(&self) -> Vec<Value> {
         let Ok(mut states) = self.states.lock() else {
@@ -137,6 +147,7 @@ impl DeviceVolumes {
             .as_u64()
             .filter(|v| *v <= 2)
             .ok_or("device_volume_invalid")?;
+        let firmware = firmware_report(report);
         let mut states = self.states.lock().map_err(|_| "device_volume_lock")?;
         let new_connection = states
             .get(device)
@@ -151,6 +162,7 @@ impl DeviceVolumes {
             last_id: last,
             pending: None,
             result: "synced",
+            firmware: firmware.clone(),
         });
         if state.connection != connection {
             *state = State {
@@ -163,6 +175,7 @@ impl DeviceVolumes {
                 last_id: last,
                 pending: None,
                 result: "synced",
+                firmware: firmware.clone(),
             };
         }
         let before = Self::value(device, state);
@@ -173,6 +186,7 @@ impl DeviceVolumes {
         state.applied = applied;
         state.last_seen = Instant::now();
         state.last_id = last;
+        state.firmware = firmware;
         if let Some(pending) = &state.pending {
             if last == pending.id && result == 2 {
                 state.pending = None;
@@ -249,6 +263,20 @@ mod tests {
         assert!(!controls.disconnect("bot", "first"));
         assert!(controls.disconnect("bot", "second"));
     }
+    #[test]
+    fn firmware_version_is_bound_to_the_live_connection() {
+        let controls = DeviceVolumes::default();
+        let mut old = report(17,false,false,true,0,0);
+        controls.observe("bot","old",&old).unwrap();
+        assert!(controls.status()[0]["firmware"].is_null());
+        old["firmware"] = json!({"release":"0.2.0","elf_sha256":"a".repeat(64)});
+        controls.observe("bot","new",&old).unwrap();
+        assert_eq!(controls.status()[0]["firmware"]["release"],"0.2.0");
+        old["firmware"]["elf_sha256"] = json!("broken");
+        controls.observe("bot","next",&old).unwrap();
+        assert!(controls.status()[0]["firmware"].is_null());
+    }
+
     #[test]
     fn refuses_local_settings_and_rejects_invalid_reports() {
         let controls = DeviceVolumes::default();
