@@ -22,6 +22,9 @@ App 内嵌前端、Python worker 源码和工具示例，直接打开不依赖 V
 原生 macOS 标题栏负责拖动、缩放和窗口按钮。
 
 开发时使用 `npm run tauri dev`，前端固定为 `127.0.0.1:1421`，避免与本机另一应用占用的 1420 冲突。直接启动 debug 二进制仍需要 Vite。
+Vite 不监听 Rust 的 `src-tauri/target`、本地模型、Python 环境和 `runtime`，这些目录不是前端源码。
+在 macOS 上，即使没有可选的 `fsevents`，也使用系统文件事件而不是默认的高频轮询；前端源码和图标仍可热更新。
+若开发目录位于必须轮询的特殊文件系统，可显式设置 `CHOKIDAR_USEPOLLING=1`，但这可能增加 CPU 占用。
 依赖缓存完整时，可用 `npm run tauri build -- -- --offline` 完成离线构建。
 本项目不使用 GitHub CI / Actions 验证。
 
