@@ -632,7 +632,8 @@ never sends any of these.
    instead of arming a follow-up. A wake or tap replaces it with a normal session.
 6. An offer that ends unspoken is reported with `proactive.report`
    `{offer_id, status:"expired"|"shown"}` (`shown`: the device displayed the text
-   because `show_if_absent` was set). Reminders are retried once 30 min later.
+   because `show_if_absent` was set). Current reminder offers set `show_if_absent:false`
+   so a cancelled offer cannot later appear on the device. Reminders are retried once 30 min later.
 
 Every offer and its outcome (`offered`, `preparing`, `playing`, `spoken`, `declined`+reason,
 `expired`, `shown`, `lost`) is journalled with its trigger in the additive

@@ -6,7 +6,7 @@ import { mountLiveFace } from "./live-face";
 import { mountVoiceAlbum } from "./voice-album";
 import { mountHousehold, readArtifactContent } from "./household";
 import { mountProactive } from "./proactive";
-import { deviceDeliveryText, deviceReplyMetrics, renderActivity, renderBrainCore, renderCapabilities, renderDeviceStatus, renderRuntimeMetrics, renderTurnTimings, turnStageMetric, harnessTimingMetric, type DeviceDisplayReport } from "./console-presenters";
+import { deviceDeliveryText, deviceReplyMetrics, needsModelSetup, renderActivity, renderBrainCore, renderCapabilities, renderDeviceStatus, renderRuntimeMetrics, renderTurnTimings, turnStageMetric, harnessTimingMetric, type DeviceDisplayReport } from "./console-presenters";
 import "./companion.css";
 import "./console.css";
 
@@ -979,8 +979,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
       const value = object(await request("service.status"));
       if (disposed) return;
       const harness = object(value.harness);
-      modelSetupNeeded = harness.mode === "managed" && !list(harness.routes).map(object).some((route) =>
-        route.enabled === true && (route.inherited_provider === true || !route.credential_env || route.credential_present === true));
+      modelSetupNeeded = needsModelSetup(value);
       backendCancellable = list(value.device_activity).some((activity) => object(activity).cancellable === true)
         || list(value.active_turns).length > 0;
       serviceReady = value.ready === true && value.accepting_turns === true && harness.healthy === true;

@@ -1671,7 +1671,7 @@ mod tests {
             let message:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
             if message["event"]=="proactive.offer" {offer=message["payload"].clone();} else {assert_eq!((&message["id"],&message["ok"]),(&json!("ready1"),&json!(true)));}
         }
-        assert_eq!((offer["text"].as_str(),offer["show_if_absent"].as_bool(),offer["moment"].as_str()),(Some("提醒一下：该喝水啦"),Some(true),Some("reminder")));
+        assert_eq!((offer["text"].as_str(),offer["show_if_absent"].as_bool(),offer["moment"].as_str()),(Some("提醒一下：该喝水啦"),Some(false),Some("reminder")));
         let offer_id=offer["offer_id"].as_u64().unwrap();
         let proactive_token=json!({"epoch":9,"session_id":13,"turn_id":1,"focus_generation":0});
         let output=json!({"version":1,"audio":true,"cards":["text","image"],"presentation":{"version":1,"frame_ack":true},"live_turns":true});

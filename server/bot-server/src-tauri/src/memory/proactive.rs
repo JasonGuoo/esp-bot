@@ -70,6 +70,7 @@ pub const REMINDER_MAX_ATTEMPTS: u32 = 2;
 pub const REMINDER_RETRY_MS: i64 = 30 * 60 * 1000;
 /// Reminders that are this late are no longer offered at all.
 pub const REMINDER_STALE_MS: i64 = 3 * 60 * 60 * 1000;
+const REMINDER_CLAIM_MS: i64 = 180_000;
 
 fn reminder_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Reminder> {
     Ok(Reminder { id: r.get(0)?, profile_id: r.get(1)?, text: r.get(2)?, due_at_ms: r.get(3)?, state: r.get(4)?,
@@ -131,12 +132,19 @@ impl Store {
 
     pub fn cancel_reminder(&self, id: &str) -> Result<bool, String> {
         validate_id(id)?;
-        let changed = self.connection()?.execute("UPDATE proactive_reminders SET state='cancelled' WHERE id=?1 AND state='pending'", [id])
-            .map_err(db_error)?;
+        let mut db = self.connection()?;
+        let tx = db.transaction().map_err(db_error)?;
+        let changed = tx.execute("UPDATE proactive_reminders SET state='cancelled' WHERE id=?1 AND state='pending'", [id]).map_err(db_error)?;
+        if changed == 1 {
+            tx.execute("UPDATE proactive_journal SET status='declined',reason='reminder_cancelled'
+                WHERE trigger_source=?1 AND status='offered'", [format!("reminder:{id}")]).map_err(db_error)?;
+        }
+        tx.commit().map_err(db_error)?;
         Ok(changed == 1)
     }
 
     pub fn reminders(&self, limit: usize) -> Result<Vec<Reminder>, String> {
+        self.expire_stale_reminders(now_ms())?;
         let db = self.connection()?;
         let mut q = db.prepare(&format!("SELECT {REMINDER_COLUMNS} FROM proactive_reminders
             ORDER BY (state='pending') DESC, due_at_ms DESC LIMIT ?1")).map_err(db_error)?;
@@ -146,10 +154,28 @@ impl Store {
 
     /// The earliest reminder due now and not yet stale.
     pub fn due_reminder(&self, at_ms: i64) -> Result<Option<Reminder>, String> {
+        self.expire_stale_reminders(at_ms)?;
         let db = self.connection()?;
         db.query_row(&format!("SELECT {REMINDER_COLUMNS} FROM proactive_reminders WHERE state='pending'
             AND next_at_ms<=?1 AND due_at_ms>=?2 ORDER BY next_at_ms LIMIT 1"), params![at_ms, at_ms - REMINDER_STALE_MS], reminder_row)
             .optional().map_err(db_error)
+    }
+
+    /// A missed deadline must not remain pending forever in the console. An
+    /// in-flight claim can still finish; a crashed claim eventually expires.
+    fn expire_stale_reminders(&self, at_ms: i64) -> Result<(), String> {
+        let mut db = self.connection()?;
+        let tx = db.transaction().map_err(db_error)?;
+        tx.execute("UPDATE proactive_reminders SET state='missed'
+            WHERE state='pending' AND due_at_ms<?1 AND NOT EXISTS(
+                SELECT 1 FROM proactive_journal j WHERE j.trigger_source='reminder:' || proactive_reminders.id
+                  AND j.status IN ('preparing','playing') AND j.at_ms>?2)",
+            params![at_ms-REMINDER_STALE_MS,at_ms-REMINDER_CLAIM_MS]).map_err(db_error)?;
+        tx.execute("UPDATE proactive_journal SET status='expired',reason='reminder_stale'
+            WHERE status='offered' AND EXISTS(SELECT 1 FROM proactive_reminders r
+                WHERE r.state='missed' AND r.due_at_ms<?1 AND trigger_source='reminder:' || r.id)",
+            [at_ms-REMINDER_STALE_MS]).map_err(db_error)?;
+        tx.commit().map_err(db_error)
     }
 
     /// spoken: done. shown/expired: one retry 30 min later, then shown/missed.
@@ -179,7 +205,7 @@ impl Store {
                   AND j.status IN ('preparing','playing') AND j.at_ms>?5)
               AND EXISTS(SELECT 1 FROM proactive_reminders r WHERE r.id=?6 AND r.state='pending'
                   AND r.next_at_ms<=?1 AND r.due_at_ms>=?7)",
-            params![at_ms,offer_id,device_id,trigger,at_ms-180_000,reminder_id,at_ms-REMINDER_STALE_MS])
+            params![at_ms,offer_id,device_id,trigger,at_ms-REMINDER_CLAIM_MS,reminder_id,at_ms-REMINDER_STALE_MS])
             .map_err(db_error)?;
         Ok(changed==1)
     }
@@ -212,11 +238,15 @@ impl Store {
     pub fn journal_proactive(&self, offer_id: u32, at_ms: i64, local_date: &str, moment: &str, trigger: &str, line: &str,
                              device_id: &str, status: &str, reason: Option<&str>) -> Result<(), String> {
         let db = self.connection()?;
-        let updated = db.execute("UPDATE proactive_journal SET status=?2,reason=?3 WHERE offer_id=?1 AND device_id=?4",
+        let updated = db.execute("UPDATE proactive_journal SET status=?2,reason=?3 WHERE offer_id=?1 AND device_id=?4
+            AND NOT (status='declined' AND COALESCE(reason,'')='reminder_cancelled')
+            AND NOT (status='expired' AND COALESCE(reason,'')='reminder_stale')",
             params![offer_id, status, reason, device_id]).map_err(db_error)?;
         if updated == 0 {
             db.execute("INSERT INTO proactive_journal(offer_id,at_ms,local_date,moment,trigger_source,line,person_id,device_id,status,reason)
-                VALUES(?1,?2,?3,?4,?5,?6,NULL,?7,?8,?9)", params![offer_id, at_ms, local_date, moment, trigger, line, device_id, status, reason])
+                SELECT ?1,?2,?3,?4,?5,?6,NULL,?7,?8,?9 WHERE NOT EXISTS(
+                    SELECT 1 FROM proactive_journal WHERE offer_id=?1 AND device_id=?7)",
+                params![offer_id, at_ms, local_date, moment, trigger, line, device_id, status, reason])
                 .map_err(db_error)?;
         }
         Ok(())
@@ -224,8 +254,12 @@ impl Store {
 
     pub fn proactive_journal(&self, local_date: Option<&str>, limit: usize) -> Result<Vec<JournalLine>, String> {
         let db = self.connection()?;
-        let mut q = db.prepare("SELECT offer_id,at_ms,moment,trigger_source,line,status,reason FROM proactive_journal
-            WHERE (?1 IS NULL OR local_date=?1) ORDER BY at_ms DESC, id DESC LIMIT ?2").map_err(db_error)?;
+        let mut q = db.prepare("SELECT j.offer_id,j.at_ms,j.moment,j.trigger_source,j.line,
+            CASE WHEN j.status='offered' AND EXISTS(SELECT 1 FROM proactive_reminders r
+                WHERE r.state='cancelled' AND j.trigger_source='reminder:' || r.id) THEN 'declined' ELSE j.status END,
+            CASE WHEN j.status='offered' AND EXISTS(SELECT 1 FROM proactive_reminders r
+                WHERE r.state='cancelled' AND j.trigger_source='reminder:' || r.id) THEN 'reminder_cancelled' ELSE j.reason END
+            FROM proactive_journal j WHERE (?1 IS NULL OR j.local_date=?1) ORDER BY j.at_ms DESC, j.id DESC LIMIT ?2").map_err(db_error)?;
         let rows = q.query_map(params![local_date, limit as i64], |r| Ok(JournalLine { offer_id: r.get(0)?, at_ms: r.get(1)?,
             moment: r.get(2)?, trigger_source: r.get(3)?, line: r.get(4)?, status: r.get(5)?, reason: r.get(6)? })).map_err(db_error)?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)
@@ -295,6 +329,50 @@ mod tests {
                    ("pending",1,now+100+REMINDER_RETRY_MS));
         assert!(store.due_reminder(now+REMINDER_RETRY_MS).unwrap().is_none());
         assert_eq!(store.due_reminder(now+100+REMINDER_RETRY_MS).unwrap().unwrap().id,reminder.id);
+        drop(store);let _=std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stale_reminders_are_missed_but_an_active_playback_can_finish() {
+        let (store,dir)=store();
+        let now=now_ms();
+        let stale=store.add_reminder(&json!({"text":"过期提醒","due_at_ms":now})).unwrap();
+        let active=store.add_reminder(&json!({"text":"正在播放","due_at_ms":now})).unwrap();
+        for (id,reminder) in [(10,&stale),(11,&active)] {
+            store.journal_proactive(id,now,"2026-11-19","reminder",&format!("reminder:{}",reminder.id),
+                "提醒","bot1","offered",None).unwrap();
+        }
+        assert!(store.claim_reminder_offer(11,"bot1",&active.id,now+REMINDER_STALE_MS).unwrap());
+        assert!(store.due_reminder(now+REMINDER_STALE_MS+1).unwrap().is_none());
+        let reminders=store.reminders(10).unwrap();
+        assert_eq!(reminders.iter().find(|r|r.id==stale.id).unwrap().state,"missed");
+        assert_eq!(reminders.iter().find(|r|r.id==active.id).unwrap().state,"pending");
+        assert_eq!(store.proactive_journal(None,10).unwrap().iter().find(|j|j.offer_id==10).unwrap().status,"expired");
+        store.settle_reminder_offer(11,"bot1",&active.id,true,None,now+REMINDER_STALE_MS+2).unwrap();
+        assert_eq!(store.reminders(10).unwrap().iter().find(|r|r.id==active.id).unwrap().state,"spoken");
+        drop(store);let _=std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cancelling_a_reminder_closes_only_its_unplayed_offers() {
+        let (store,dir)=store();
+        let now=now_ms();
+        let cancelled=store.add_reminder(&json!({"text":"取消这条","due_at_ms":now})).unwrap();
+        let other=store.add_reminder(&json!({"text":"保留这条","due_at_ms":now})).unwrap();
+        for (id,reminder) in [(20,&cancelled),(21,&other)] {
+            store.journal_proactive(id,now,"2026-11-19","reminder",&format!("reminder:{}",reminder.id),
+                "提醒","bot1","offered",None).unwrap();
+        }
+        assert!(store.cancel_reminder(&cancelled.id).unwrap());
+        // A late device report cannot revive a cancelled offer or create a duplicate.
+        store.journal_proactive(20,now+1,"2026-11-19","reminder",&format!("reminder:{}",cancelled.id),
+            "提醒","bot1","shown",None).unwrap();
+        let journal=store.proactive_journal(None,10).unwrap();
+        assert_eq!(journal.len(),2);
+        let cancelled_offer=journal.iter().find(|j|j.offer_id==20).unwrap();
+        assert_eq!((cancelled_offer.status.as_str(),cancelled_offer.reason.as_deref()),("declined",Some("reminder_cancelled")));
+        assert_eq!(journal.iter().find(|j|j.offer_id==21).unwrap().status,"offered");
+        assert!(!store.claim_reminder_offer(20,"bot1",&cancelled.id,now).unwrap());
         drop(store);let _=std::fs::remove_dir_all(dir);
     }
 

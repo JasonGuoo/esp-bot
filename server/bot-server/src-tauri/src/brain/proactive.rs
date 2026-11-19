@@ -56,7 +56,9 @@ pub fn plan(settings: &ProactiveSettings, facts: &Facts, offer_id: u32) -> Optio
         trigger: format!("reminder:{}", reminder.id),
         line: format!("提醒一下：{}", reminder.text),
         ttl_ms: REMINDER_TTL_MS,
-        show_if_absent: true,
+        // The device may hold an offer while the owner cancels it on the Mac.
+        // Do not let that stale offer appear on screen after its TTL expires.
+        show_if_absent: false,
         reminder_id: Some(reminder.id.clone()),
         local_date: facts.local.format("%Y-%m-%d").to_string(),
     })
@@ -155,7 +157,7 @@ mod tests {
         let mut f=facts(15,0);
         f.due_reminder=Some(reminder());
         let offer=plan(&settings,&f,2).unwrap();
-        assert_eq!((offer.moment,offer.line.as_str(),offer.show_if_absent),("reminder","提醒一下：该喝水啦",true));
+        assert_eq!((offer.moment,offer.line.as_str(),offer.show_if_absent),("reminder","提醒一下：该喝水啦",false));
         assert_eq!(offer.ttl_ms,REMINDER_TTL_MS);
         assert!(admit(&settings,&f,&offer).is_ok());
         f.due_reminder=None;

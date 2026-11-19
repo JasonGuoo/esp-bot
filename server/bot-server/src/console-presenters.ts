@@ -40,6 +40,20 @@ const find = (root: HTMLElement, selector: string): HTMLElement => {
   return result;
 };
 
+/** A managed OpenCode key is not required for ordinary turns when the core can run. */
+export function needsModelSetup(value: unknown): boolean {
+  const status = object(value), harness = object(status.harness), core = object(status.brain_core);
+  if (harness.mode !== "managed") return false;
+  const harnessRoute = list(harness.routes).map(object).some((route) =>
+    route.enabled === true && (route.inherited_provider === true || !route.credential_env || route.credential_present === true));
+  if (harnessRoute) return false;
+  if (core.enabled !== true) return true;
+  const mode = text(core.mode);
+  const codexEnabled = ["dual", "codex", "codex-only"].includes(mode);
+  const httpEnabled = ["dual", "http", "http-only"].includes(mode) && list(core.routes).length > 0;
+  return !codexEnabled && !httpEnabled;
+}
+
 const TIMING_LABELS: Record<string, string> = {
   memory_register: "会话登记", asr: "语音识别", speaker_identification: "声纹匹配",
   memory_enqueue: "记忆排队", memory_context: "记忆检索", brain_core: "小呆大脑回复", harness: "OpenCode 回复",

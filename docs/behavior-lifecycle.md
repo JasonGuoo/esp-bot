@@ -12,7 +12,8 @@ follow-up window.
 Reminders respect the owner's spoken-output setting and volume, quiet hours, daily cap and device
 state. A due reminder does not require a visible person or a recently idle period. The device
 waits for a quiet room and no active session, and honours night policy and manual sleep.
-An undelivered offer can display its text after ten minutes and retry once.
+An undelivered offer can retry once; it is not displayed later from a stale device offer. A reminder more
+than three hours overdue is marked missed, unless its current playback claim is still active.
 The legacy settings and journal remain readable. The old morning, dated-event and missed-you
 planner is no longer used.
 

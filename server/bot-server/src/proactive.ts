@@ -63,7 +63,7 @@ export function mountProactive(panel: HTMLElement, request: Request, notice: (te
         } catch (error) { notice(error instanceof Error ? error.message : String(error), true); }
         void refresh();
       });
-      options.append(fields, save, el("p", "cc-caption", "设备两次提醒至少间隔 20 分钟；未播出的提醒会稍后重试一次。"));
+      options.append(fields, save, el("p", "cc-caption", "设备两次提醒至少间隔 20 分钟；未播出会稍后重试一次，超过 3 小时仍未送达则标记为未送达。"));
 
       const reminderBox = el("div", "cc-box");
       reminderBox.append(el("div", "cc-section-title", "已设置的提醒"));
