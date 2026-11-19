@@ -12,9 +12,10 @@ source baseline and executable SHA-256. Authenticated S31 audio status includes 
 ESP-IDF app-descriptor release and ELF SHA-256. The console displays the connected devices'
 reported values; missing values from older firmware are shown as unavailable.
 
-A wake phrase or deliberate touch starts interaction. The current server does not advertise
-`proactive.v1` or offer idle greetings. Current firmware does not request proactive offers and
-rejects them if an older server sends one. Existing reminder records remain in storage.
+A wake phrase or deliberate touch starts conversation. The server only proposes explicitly
+scheduled reminders through `proactive.v1`. Firmware checks the offer kind and the runtime
+accepts only reminders, including when paired with an older server. Reminders use the
+speaker-only lease and do not open capture or a follow-up.
 
 ## Live spoken turns on the paired Mac
 

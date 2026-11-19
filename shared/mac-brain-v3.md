@@ -597,9 +597,10 @@ cancel/close 会清空播放状态并返回确认；不能要求此路径一定�
 
 ### 8.1 Unprompted lines (`proactive.v1`, 2026-11-18)
 
-**Superseded on 2026-11-19:** the server does not advertise this capability or send offers, and
-new firmware rejects old proactive offers. An explicit wake or deliberate touch begins interaction.
-The following is retained as the earlier protocol record.
+**Updated on 2026-11-19:** `proactive.v1` is restricted to explicit, still-due reminders.
+The device checks `moment == "reminder"` and the runtime checks the reminder command kind.
+Morning greetings, dated-event comments and missed-you lines are not offered. An explicit wake or
+deliberate touch starts conversation; a reminder uses the speaker-only flow below.
 
 
 UX review §12.2. The Mac proposes, the device's `bot_runtime` decides the moment,
@@ -613,9 +614,9 @@ never sends any of these.
    20 s and may send one outstanding event
    `proactive.offer` `payload:{offer_id:u32≠0, text, ttl_ms≤1800000, show_if_absent, moment}`.
    The runtime stores it (a newer offer supersedes and reports the older one).
-3. When the device finds a moment (face seen ≥1.5 s, no nearby speech for 5 s,
-   no interaction for 60 s, ≥20 min since its last line, daytime and not dark,
-   settings closed, no session/playback, spoken answers on, not muted) it sends
+3. When the device finds a moment (no nearby speech for 5 s, ≥20 min since its
+   last line, no night policy or manual sleep, settings closed, no session/playback,
+   spoken answers on, not muted), without requiring a face or a wake, it sends
    `session.open` with `activation:"proactive"`, `offer_id` and the usual output
    options (spoken presentation is required), then `proactive.accept`
    `{offer_id, runtime}` instead of `audio.begin`.
@@ -633,8 +634,8 @@ never sends any of these.
    `{offer_id, status:"expired"|"shown"}` (`shown`: the device displayed the text
    because `show_if_absent` was set). Reminders are retried once 30 min later.
 
-Every offer and its outcome (`offered`, `started`, `declined`+reason, `expired`,
-`shown`, `lost`) is journalled with its trigger in the additive
+Every offer and its outcome (`offered`, `preparing`, `playing`, `spoken`, `declined`+reason,
+`expired`, `shown`, `lost`) is journalled with its trigger in the additive
 `proactive_journal` table and emitted to the console as `proactive.line`.
 
 ## 9. 常见协议错误

@@ -185,6 +185,31 @@ struct FirstSpeech {
     sound_recorded: bool,
 }
 
+struct PendingReminder {
+    brain: Arc<super::Brain>,
+    device_id: String,
+    offer: super::proactive::Offer,
+    token: RuntimeToken,
+    settled: bool,
+}
+
+impl PendingReminder {
+    fn settle(&mut self, spoken:bool, reason:Option<&str>) {
+        if self.settled { return; }
+        self.settled=true;
+        let Some(id)=self.offer.reminder_id.as_deref() else { return };
+        let result=self.brain.memory.settle_reminder_offer(self.offer.offer_id,&self.device_id,id,
+            spoken,reason,crate::time::now_ms() as i64);
+        if let Err(error)=result { eprintln!("reminder receipt failed: {error}"); return; }
+        self.brain.emit("proactive.line",None,json!({"offer_id":self.offer.offer_id,
+            "moment":"reminder","trigger":self.offer.trigger,"line":self.offer.line,
+            "status":if spoken {"spoken"} else {"lost"},"reason":reason}));
+    }
+}
+impl Drop for PendingReminder {
+    fn drop(&mut self) { self.settle(false,Some("interrupted")); }
+}
+
 struct Engagement {
     conversation_id:String,
     token:RuntimeToken,
@@ -193,6 +218,8 @@ struct Engagement {
     /// When the explicit wake opened the session; the device plays its own wake reply then.
     opened:Instant,
     output:Option<DeviceOutput>,
+    /// An unprompted line's offer id: a speaker-only session that never takes input.
+    proactive:Option<u32>,
 }
 
 /// A spoken acknowledgement is skipped this soon after the device's wake reply.
@@ -454,7 +481,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
     let _volume_peer=VolumePeer{brain:Arc::clone(&brain),device:device_id.clone(),connection:volume_connection.clone()};
     let mut cancellations=brain.cancellations();
     let mut progress=brain.progress();
-    send(&mut socket, Message::Text(json!({"v":3,"type":"welcome","device_id":device_id,"capabilities":["assistant.text","audio.pcm16","speaker.candidate","scene.cards",DISPLAY_REPLY_CAPABILITY,AUDIO_REPLY_CAPABILITY,"presentation.segments.v1","conversation.live.v1"],"sample_rate":16000,"max_audio_seconds":30,"requires_activation":true}).to_string())).await.map_err(|_|"ws_write_failed")?;
+    send(&mut socket, Message::Text(json!({"v":3,"type":"welcome","device_id":device_id,"capabilities":["assistant.text","audio.pcm16","speaker.candidate","scene.cards",DISPLAY_REPLY_CAPABILITY,AUDIO_REPLY_CAPABILITY,"presentation.segments.v1","conversation.live.v1","proactive.v1"],"sample_rate":16000,"max_audio_seconds":30,"requires_activation":true}).to_string())).await.map_err(|_|"ws_write_failed")?;
     let mut engagement:Option<Engagement>=None;
     let mut supplement:Option<(RuntimeToken,super::Supplement)>=None;
     let mut first_speech:Option<FirstSpeech>=None;
@@ -476,6 +503,12 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
     audio_clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut heartbeat=interval(Duration::from_secs(15)); heartbeat.tick().await;
     let mut closing_clock=interval(Duration::from_millis(500));
+    // Unprompted lines (§12.2): offered only to firmware that said proactive.ready,
+    // one outstanding offer at a time, and only while the device is idle.
+    let mut proactive_ready=false;
+    let mut offered:Option<(super::proactive::Offer,Instant)>=None;
+    let mut pending_reminder:Option<PendingReminder>=None;
+    let mut proactive_clock=interval(Duration::from_secs(20));
     let mut last_packet=Instant::now();
     loop {
         if let Some((capture,_))=audio.as_mut(){capture.start_candidate(&brain.models);}
@@ -491,6 +524,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                     let token=state.token;let activation=state.activation_id.clone();
                     if active.as_ref().is_some_and(|a|a.turn_id==state.turn_id) {active.take();}
                     brain.emit("device.presentation.failed",Some(&state.turn_id),json!({"code":error}));
+                    if pending_reminder.as_ref().is_some_and(|r|r.token==token) {pending_reminder=None;}
                     let _=brain.tasks.revoke_outputs(Some(&activation));delivery=None;playback=None;plain=None;display_result=None;
                     if send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.cancelled","runtime":token,"code":error}).to_string())).await.is_err(){break;}
                 }
@@ -640,6 +674,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                 if supplement.as_ref().is_some_and(|(_,s)|cancellation.matches_turn(&s.previous,conversation)) {
                     supplement=None;
                 }
+                if close_session || cancel_delivery { pending_reminder=None; }
                 if close_session {
                     context=None;first_speech=None;supplement=None;audio=None;plain=None;engagement=None;display_result=None;delivery=None;
                 }
@@ -651,7 +686,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                         "stream_id":clip.stream_id,"runtime":clip.token,"code":"playback_timeout"});
                     brain.emit("device.audio",Some(&clip.turn_id),json!({"device_id":device_id,
                         "status":"unconfirmed","code":"playback_timeout","runtime":clip.token}));
-                    playback=None;plain=None;
+                    pending_reminder=None;playback=None;plain=None;
                     if send(&mut socket,Message::Text(event.to_string())).await.is_err(){break;}
                     continue;
                 }
@@ -701,6 +736,21 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                     supplement=None;engagement=None;audio=None;plain=None;display_result=None;
                     brain.emit("device.session_closed",None,json!({"device_id":device_id,"reason":"goodbye"}));
                     if send(&mut socket, Message::Text(json!({"v":3,"type":"event","event":"session.expired","runtime":token,"code":"goodbye"}).to_string())).await.is_err(){break;}
+                }
+            },
+            _=proactive_clock.tick(), if proactive_ready && engagement.is_none() && active.is_none() && playback.is_none() && delivery.is_none()=>{
+                if offered.as_ref().is_some_and(|(offer,at)|at.elapsed()<Duration::from_millis(offer.ttl_ms as u64+30_000)) {continue;}
+                // The device never reported this one (e.g. it rebooted): close it in the journal.
+                if let Some((offer,_))=offered.take() {brain.proactive_journal(&device_id,&offer,"lost",None);}
+                match brain.proactive_next(&device_id) {
+                    Ok(Some(offer))=>{
+                        let event=json!({"v":3,"type":"event","event":"proactive.offer","payload":{"offer_id":offer.offer_id,
+                            "text":offer.line,"ttl_ms":offer.ttl_ms,"show_if_absent":offer.show_if_absent,"moment":offer.moment}});
+                        offered=Some((offer,Instant::now()));
+                        if send(&mut socket, Message::Text(event.to_string())).await.is_err(){break;}
+                    },
+                    Ok(None)=>{},
+                    Err(error)=>brain.emit("proactive.failed",None,json!({"device_id":device_id,"code":error})),
                 }
             },
             _=heartbeat.tick()=>{
@@ -938,14 +988,26 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     if changed {brain.emit("device.volume",None,json!({"device_id":device_id}));}
                                     Ok(result)
                                 },
-                                "proactive.ready"|"proactive.report"|"proactive.accept"=>
-                                    Err("explicit_activation_required".into()),
+                                "proactive.ready"=>{proactive_ready=true;Ok(json!({"accepted":true}))},
+                                "proactive.report"=>{
+                                    let id=frame.payload.get("offer_id").and_then(Value::as_u64);
+                                    let status=match frame.payload.get("status").and_then(Value::as_str) {Some("shown")=>"shown",Some("expired")=>"expired",_=>return Err("invalid_proactive_report".into())};
+                                    if let Some((offer,_))=offered.take_if(|(offer,_)|Some(offer.offer_id as u64)==id) {brain.proactive_journal(&device_id,&offer,status,None);}
+                                    Ok(json!({"recorded":true}))
+                                },
                                 "session.open"=>{
                                     if engagement.is_some() || active.is_some() || playback.is_some(){return Err("session_already_open".into());}
                                     let activation=frame.payload.get("activation").and_then(Value::as_str).unwrap_or("");
-                                    if activation!="touch" && !(activation=="wake_word" && frame.payload.get("keyword").and_then(Value::as_str)==Some("小呆小呆")){return Err("explicit_activation_required".into());}
+                                    // The device chose the moment for an outstanding offer: a speaker-only session.
+                                    let proactive=if activation=="proactive" {
+                                        let id=frame.payload.get("offer_id").and_then(Value::as_u64);
+                                        let (offer,_)=offered.as_ref().filter(|(offer,_)|Some(offer.offer_id as u64)==id).ok_or("proactive_offer_unknown")?;
+                                        Some(offer.offer_id)
+                                    } else {None};
+                                    if proactive.is_none() && activation!="touch" && !(activation=="wake_word" && frame.payload.get("keyword").and_then(Value::as_str)==Some("小呆小呆")){return Err("explicit_activation_required".into());}
                                     let token:RuntimeToken=parse_runtime(&frame.payload)?;
                                     let output=DeviceOutput::negotiate(&frame.payload)?;
+                                    if proactive.is_some() && !output.as_ref().is_some_and(|o|o.audio && o.presentation) {return Err("proactive_requires_spoken_presentation".into());}
                                     let conversation_id=format!("device-{}-{}",device_id,uuid::Uuid::new_v4().simple());
                                     let mut response=json!({"conversation_id":conversation_id,"runtime":token});
                                     if let Some(options)=&output {
@@ -967,7 +1029,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         }
                                     }
                                     context=None;first_speech=None;supplement=None;
-                                    engagement=Some(Engagement{conversation_id:conversation_id.clone(),token,last_turn:None,last_user:Instant::now(),opened:Instant::now(),output});
+                                    engagement=Some(Engagement{conversation_id:conversation_id.clone(),token,last_turn:None,last_user:Instant::now(),opened:Instant::now(),output,proactive});
                                     Ok(response)
                                 },
                                 "assistant.supplement"|"assistant.cancel"|"session.close"=>{
@@ -1000,6 +1062,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         send(&mut socket,Message::Text(cancelled_response(&turn))).await?;
                                     }
                                     if let Some(session)=&engagement{brain.tasks.revoke_outputs(Some(&session.conversation_id))?;}
+                                    pending_reminder=None;
                                     audio=None;playback=None;plain=None;display_result=None;delivery=None;
                                     context=None;first_speech=None;
                                     if frame.method=="session.close"{engagement=None;}
@@ -1014,8 +1077,48 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     capture.note_pause(frames);
                                     Ok(json!({"accepted":true}))
                                 },
+                                "proactive.accept"=>{
+                                    let session=engagement.as_ref().ok_or("explicit_session_required")?;
+                                    if active.is_some() || playback.is_some() || delivery.is_some(){return Err("session_busy".into());}
+                                    let token=parse_runtime(&frame.payload)?;session.check_token(token)?;
+                                    let id=frame.payload.get("offer_id").and_then(Value::as_u64);
+                                    if session.proactive.map(u64::from)!=id {return Err("proactive_offer_unknown".into());}
+                                    let (offer,offered_at)=offered.take_if(|(offer,_)|Some(offer.offer_id as u64)==id).ok_or("proactive_offer_unknown")?;
+                                    if offered_at.elapsed()>Duration::from_millis(offer.ttl_ms as u64) {
+                                        brain.proactive_journal(&device_id,&offer,"expired",Some("offer_expired"));
+                                        return Err("proactive_offer_expired".into());
+                                    }
+                                    // Final Mac-side guardrails at the moment the device chose.
+                                    if let Err(reason)=brain.proactive_admit(&offer) {
+                                        brain.proactive_journal(&device_id,&offer,"declined",Some(&reason));
+                                        return Err(format!("proactive_declined:{reason}"));
+                                    }
+                                    let reminder_id=offer.reminder_id.as_deref().ok_or("reminder_required")?;
+                                    if !brain.memory.claim_reminder_offer(offer.offer_id,&device_id,reminder_id,crate::time::now_ms() as i64)? {
+                                        brain.proactive_journal(&device_id,&offer,"declined",Some("reminder_in_progress"));
+                                        return Err("reminder_in_progress".into());
+                                    }
+                                    let reminder=PendingReminder{brain:Arc::clone(&brain),device_id:device_id.clone(),
+                                        offer:offer.clone(),token,settled:false};
+                                    let turn_id=format!("{}-{}",session.conversation_id,token.turn_id);
+                                    let conversation=session.conversation_id.clone();
+                                    let (plan,prepared)=match segments::prepare_proactive(&brain,&turn_id,&offer.line,&offer.local_date).await {
+                                        Ok(prepared)=>prepared,
+                                        Err(error)=>return Err(error),
+                                    };
+                                    // The reminder may have been cancelled or quiet hours may have started
+                                    // while TTS was running.
+                                    brain.proactive_admit(&offer)?;
+                                    let mut next=segments::Delivery::new(&brain,&device_id,&conversation,token,turn_id,plan,prepared,vec![],true,1)?;
+                                    next.request_id=frame.id.clone();delivery=Some(next);
+                                    pending_reminder=Some(reminder);
+                                    let response=json!({"v":3,"type":"response","id":frame.id,"ok":true,"runtime":token,"payload":{"presentation_pending":true}});
+                                    send(&mut socket,Message::Text(response.to_string())).await?;
+                                    pending=true;Ok(json!({}))
+                                },
                                 "audio.begin"=>{
                                     let session=engagement.as_mut().ok_or("explicit_session_required")?;
+                                    if session.proactive.is_some(){return Err("proactive_session_is_speaker_only".into());}
                                     if active.is_some() || audio.is_some() || playback.is_some() || delivery.is_some(){return Err("session_busy".into());}
                                     let token=parse_runtime(&frame.payload)?;session.check_token(token)?;
                                     if frame.payload.get("format").and_then(Value::as_str)!=Some("pcm_s16le") || frame.payload.get("sample_rate").and_then(Value::as_u64)!=Some(16000) || frame.payload.get("channels").and_then(Value::as_u64)!=Some(1){return Err("audio_format_unsupported".into());}
@@ -1122,6 +1225,15 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         state.record_hardware(&brain,match status{"started"=>"audio_started","finished"=>"audio_completed","failed"=>"failed",_=>"cancelled"},
                                             json!({"stream_id":stream,"frames":frames,"bytes":bytes,"code":code,"device_monotonic_ms":frame.payload["device_monotonic_ms"],"sample_position":frame.payload["sample_position"]}))?;
                                     }
+                                    if status=="started" {
+                                        if let Some(reminder)=pending_reminder.as_ref().filter(|r|r.token==token) {
+                                            brain.proactive_journal(&device_id,&reminder.offer,"playing",None);
+                                        }
+                                    } else if pending_reminder.as_ref().is_some_and(|r|r.token==token) {
+                                        if let Some(mut reminder)=pending_reminder.take() {
+                                            reminder.settle(status=="finished",code);
+                                        }
+                                    }
                                     if status!="started" {
                                         playback_receipt=Some(PlaybackReceipt{token,stream_id:stream,status:status.to_owned()});
                                         playback=None;if delivery.is_none(){plain=None;}
@@ -1136,6 +1248,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         Err(error) if matches!(error.as_str(),"presentation_segment_failed"|"presentation_lease_revoked")=>{
                                             let token=state.token;let activation=state.activation_id.clone();
                                             if active.as_ref().is_some_and(|a|a.turn_id==state.turn_id) {active.take();}
+                                            if pending_reminder.as_ref().is_some_and(|r|r.token==token) {pending_reminder=None;}
                                             let _=brain.tasks.revoke_outputs(Some(&activation));delivery=None;playback=None;plain=None;display_result=None;
                                             send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.cancelled","runtime":token,"code":error}).to_string())).await?;
                                             return Err(error);
@@ -1175,6 +1288,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                 },
                                 "assistant.text"|"audio.commit"=>{
                                     let session=engagement.as_mut().ok_or("explicit_session_required")?;
+                                    if session.proactive.is_some(){return Err("proactive_session_is_speaker_only".into());}
                                     if active.is_some() || playback.is_some() || delivery.is_some(){return Err("session_busy".into());}
                                     let token=parse_runtime(&frame.payload)?;session.check_token(token)?;
                                     display_result=None;
@@ -1338,7 +1452,7 @@ mod tests {
     #[test]
     fn runtime_leases_advance_without_reopening_the_conversation() {
         let first = RuntimeToken { epoch: 7, session_id: 12, turn_id: 1, focus_generation: 0 };
-        let mut session = Engagement { conversation_id: "device-test".into(), token: first, opened: Instant::now(),
+        let mut session = Engagement { conversation_id: "device-test".into(), token: first, opened: Instant::now(), proactive: None,
             last_turn: None, last_user: Instant::now(), output: None };
         assert!(session.check_token(first).is_ok());
         session.last_turn = Some(1);
@@ -1359,7 +1473,7 @@ mod tests {
     #[test]
     fn silent_output_is_explicit_and_caption_respects_utf8_boundary() {
         let token = RuntimeToken { epoch: 7, session_id: 12, turn_id: 1, focus_generation: 0 };
-        let mut session = Engagement { conversation_id: "device-test".into(), token, opened: Instant::now(),
+        let mut session = Engagement { conversation_id: "device-test".into(), token, opened: Instant::now(), proactive: None,
             last_turn: None, last_user: Instant::now(), output: None };
         assert_eq!(device_turn_input(&session,"old".into(),Some("hello".into()),None).speak,Some(true));
         session.output=DeviceOutput::negotiate(&json!({"output":{"version":1,"audio":true,"cards":["text"]}})).unwrap();
@@ -1541,24 +1655,48 @@ mod tests {
             assert_eq!(reply["ok"],error.is_none(),"{reply}");
             assert_eq!(reply["error"]["code"].as_str(),error);
         }
-        // A previously paired device cannot trigger unsolicited speech even if it
-        // still has proactive settings or speaks the older protocol.
-        assert!(!welcome["capabilities"].as_array().unwrap().iter().any(|v|v=="proactive.v1"));
+        // Unprompted lines (§12.2) as a fake device: offered only after proactive.ready,
+        // the session is speaker-only, and the Mac re-checks its guardrails on accept.
+        assert!(welcome["capabilities"].as_array().unwrap().iter().any(|v|v=="proactive.v1"));
         socket.send(Message::Text(json!({"v":3,"type":"request","id":"close2","method":"session.close","payload":{}}).to_string())).await.unwrap();
         let _closed:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
-        brain.memory.set_proactive_settings(&json!({"enabled":true})).unwrap();
-        let token=json!({"epoch":9,"session_id":13,"turn_id":1,"focus_generation":0});
-        for (id,method,payload) in [
-            ("ready","proactive.ready",json!({"version":1})),
-            ("open","session.open",json!({"activation":"proactive","offer_id":1,"runtime":token})),
-            ("accept","proactive.accept",json!({"offer_id":1,"runtime":token})),
+        let zone:chrono_tz::Tz=brain.memory.household_settings().unwrap()["timezone"].as_str().unwrap().parse().unwrap();
+        let local=chrono::DateTime::from_timestamp_millis(crate::time::now_ms() as i64).unwrap().with_timezone(&zone);
+        let quiet=|hours:i64|(local+chrono::Duration::hours(hours)).format("%H:%M").to_string();
+        brain.memory.set_proactive_settings(&json!({"enabled":true,"quiet_start":quiet(2),"quiet_end":quiet(3)})).unwrap();
+        brain.memory.add_reminder(&json!({"text":"该喝水啦","due_at_ms":crate::time::now_ms() as i64})).unwrap();
+        socket.send(Message::Text(json!({"v":3,"type":"request","id":"ready1","method":"proactive.ready","payload":{"version":1}}).to_string())).await.unwrap();
+        let mut offer=Value::Null;
+        for _ in 0..2 {
+            let message:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+            if message["event"]=="proactive.offer" {offer=message["payload"].clone();} else {assert_eq!((&message["id"],&message["ok"]),(&json!("ready1"),&json!(true)));}
+        }
+        assert_eq!((offer["text"].as_str(),offer["show_if_absent"].as_bool(),offer["moment"].as_str()),(Some("提醒一下：该喝水啦"),Some(true),Some("reminder")));
+        let offer_id=offer["offer_id"].as_u64().unwrap();
+        let proactive_token=json!({"epoch":9,"session_id":13,"turn_id":1,"focus_generation":0});
+        let output=json!({"version":1,"audio":true,"cards":["text","image"],"presentation":{"version":1,"frame_ack":true},"live_turns":true});
+        for (id,method,payload,error) in [
+            ("p-open-bad","session.open",json!({"activation":"proactive","offer_id":offer_id+1,"runtime":proactive_token,"output":output}),Some("proactive_offer_unknown")),
+            ("p-open-silent","session.open",json!({"activation":"proactive","offer_id":offer_id,"runtime":proactive_token,
+                "output":{"version":1,"audio":false,"cards":["text"],"presentation":{"version":1,"frame_ack":true}}}),Some("proactive_requires_spoken_presentation")),
+            ("p-open","session.open",json!({"activation":"proactive","offer_id":offer_id,"runtime":proactive_token,"output":output}),None),
+            ("p-listen","audio.begin",json!({"stream_id":125,"format":"pcm_s16le","sample_rate":16000,"channels":1,"runtime":proactive_token}),Some("proactive_session_is_speaker_only")),
+            ("p-text","assistant.text",json!({"text":"你好","runtime":proactive_token}),Some("proactive_session_is_speaker_only")),
         ] {
             socket.send(Message::Text(json!({"v":3,"type":"request","id":id,"method":method,"payload":payload}).to_string())).await.unwrap();
             let reply:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
-            assert_eq!(reply["id"],id);
-            assert_eq!(reply["error"]["code"],"explicit_activation_required");
+            assert_eq!((&reply["id"],&reply["ok"]),(&json!(id),&json!(error.is_none())),"{reply}");
+            assert_eq!(reply["error"]["code"].as_str(),error);
         }
-        assert!(tokio::time::timeout(Duration::from_millis(150),socket.next()).await.is_err());
+        // The owner switched it off in the meantime: the device's moment is refused and journalled.
+        brain.memory.set_proactive_settings(&json!({"enabled":false})).unwrap();
+        for (id,error) in [("p-accept","proactive_declined"),("p-accept-again","proactive_offer_unknown")] {
+            socket.send(Message::Text(json!({"v":3,"type":"request","id":id,"method":"proactive.accept","payload":{"offer_id":offer_id,"runtime":proactive_token}}).to_string())).await.unwrap();
+            let reply:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!((&reply["id"],&reply["ok"],reply["error"]["code"].as_str()),(&json!(id),&json!(false),Some(error)),"{reply}");
+        }
+        let journal=brain.memory.proactive_journal(None,10).unwrap();
+        assert_eq!((journal[0].status.as_str(),journal[0].reason.as_deref(),journal[0].moment.as_str()),("declined",Some("disabled"),"reminder"));
         socket.close(None).await.unwrap();brain.stop().await.unwrap();
         assert!(TcpStream::connect(&address).await.is_err());drop(brain);
     }

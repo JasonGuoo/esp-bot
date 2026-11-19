@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS proactive_settings (
     settings_json TEXT NOT NULL,
     updated_at_ms INTEGER NOT NULL
 );
--- Guardian-set reminders; spoken if someone is there, else shown and retried once.
+-- Explicitly scheduled reminders; undelivered offers can be shown and retried once.
 CREATE TABLE IF NOT EXISTS proactive_reminders (
     id TEXT PRIMARY KEY,
     profile_id TEXT REFERENCES profiles(id) ON DELETE CASCADE,

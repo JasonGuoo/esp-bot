@@ -2,14 +2,19 @@
 
 **2026-11-15 real-room check: NOT PASSED.** After the user announced lights-off, the 21:18–21:28 observation still reported IDLE and non-black frames. Valid camera luma was 38–107 (median 78), above the provisional entry threshold. The 22:30 scheduled transition was outside this observation. See [the measured result and serial-reset limitation](night-light-check-2026-11-15.md); source policy and simulated tests are not real-room acceptance.
 
-**Owner clarification, 2026-11-19:** Active companionship takes place after a complete
-wake phrase or deliberate touch. Idle face presence, nearby speech and time of day do not start a
-spoken greeting. The Mac no longer offers unprompted lines and the firmware rejects older
-`proactive.offer` commands. Previously saved reminders and journals remain available, but automatic
-idle playback is disabled. The user can continue a woken conversation with questions, stories,
-expressions and follow-ups.
+**Owner clarification, 2026-11-19:** Active companionship takes place after the complete wake
+phrase or deliberate touch. Idle face presence, nearby speech and time of day do not start a
+greeting. A reminder explicitly scheduled by a family member may speak when due. The Mac only
+offers a still-due reminder, and the firmware accepts only the reminder kind, including when paired
+with an older server. Reminder playback uses a speaker-only lease and does not start capture or a
+follow-up window.
 
-The 2026-11-18 unprompted-greeting design in the historical UX review is superseded by this rule.
+Reminders respect the owner's spoken-output setting and volume, quiet hours, daily cap and device
+state. A due reminder does not require a visible person or a recently idle period. The device
+waits for a quiet room and no active session, and honours night policy and manual sleep.
+An undelivered offer can display its text after ten minutes and retry once.
+The legacy settings and journal remain readable. The old morning, dated-event and missed-you
+planner is no longer used.
 
 **Updated user direction, 2026-11-08:** lively when it is light, occasionally drowsy and then awake again; rest at night or after the room stays dark. It never starts a conversation merely because a face, gaze, sound or brighter room is detected. Full **小呆小呆** and deliberate touch/manual input remain the interaction triggers.
 

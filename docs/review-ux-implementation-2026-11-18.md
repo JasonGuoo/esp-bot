@@ -1,8 +1,8 @@
 # UX plan implementation summary, 2026-11-18
 
-**2026-11-19 clarification:** the unprompted-greeting feature in phase 5 was subsequently
-disabled by owner direction. This document records the 2026-11-18 snapshot. Current behavior is
-described in [the behavior lifecycle](behavior-lifecycle.md).
+**2026-11-19 clarification:** automatic greetings in phase 5 were removed by owner direction.
+Only explicitly scheduled reminders can use its speaker-only delivery path. This document records
+the 2026-11-18 snapshot. Current behavior is described in [the behavior lifecycle](behavior-lifecycle.md).
 
 
 This summarises how [the merged UX review](review-ux-2026-11-18.md) was implemented. All work is

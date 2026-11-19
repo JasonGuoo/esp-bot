@@ -704,7 +704,7 @@ static void text_message(const char *data,size_t n) {
             s.live_available=array_has_string(cJSON_GetObjectItemCaseSensitive(root,"capabilities"),"conversation.live.v1");
             s.live_session=false;
             s.presentation_supported=array_has_string(cJSON_GetObjectItemCaseSensitive(root,"capabilities"),"presentation.segments.v1");
-            s.proactive_supported=false; /* Wake or touch is required for interaction. */
+            s.proactive_supported=array_has_string(cJSON_GetObjectItemCaseSensitive(root,"capabilities"),"proactive.v1");
             s.proactive_ready_sent=false;
             s.phase=READY; portEXIT_CRITICAL(&s_lock);
             link_event(true); ESP_LOGI(TAG,"Authenticated Mac gateway connected");
@@ -977,12 +977,14 @@ static void text_message(const char *data,size_t n) {
             cJSON *p=cJSON_GetObjectItemCaseSensitive(root,"payload");
             cJSON *text=cJSON_GetObjectItemCaseSensitive(p,"text");
             cJSON *show=cJSON_GetObjectItemCaseSensitive(p,"show_if_absent");
+            cJSON *moment=cJSON_GetObjectItemCaseSensitive(p,"moment");
             uint32_t offer=0,ttl=0;
             portENTER_CRITICAL(&s_lock); bool trusted=s.authenticated; portEXIT_CRITICAL(&s_lock);
-            if (trusted && json_uint(cJSON_GetObjectItemCaseSensitive(p,"offer_id"),UINT32_MAX,&offer) && offer &&
+            if (trusted && cJSON_IsString(moment) && !strcmp(moment->valuestring,"reminder") &&
+                json_uint(cJSON_GetObjectItemCaseSensitive(p,"offer_id"),UINT32_MAX,&offer) && offer &&
                 json_uint(cJSON_GetObjectItemCaseSensitive(p,"ttl_ms"),1800000,&ttl) && ttl &&
                 cJSON_IsString(text) && *text->valuestring && strlen(text->valuestring)<=BOT_CAPTION_MAX_BYTES) {
-                bot_command_t c={.kind=BOT_COMMAND_PROACTIVE_OFFER,.request_id=offer,.ttl_ms=ttl,
+                bot_command_t c={.kind=BOT_COMMAND_PROACTIVE_OFFER,.proactive_kind=BOT_PROACTIVE_REMINDER,.request_id=offer,.ttl_ms=ttl,
                     .received_ms=(uint32_t)(esp_timer_get_time()/1000),.presentation_sequence=cJSON_IsTrue(show)?1U:0U};
                 memcpy(c.data.caption,text->valuestring,strlen(text->valuestring)+1);
                 if (bot_bus_submit_command(s_bus,&c,0)!=ESP_OK) ESP_LOGW(TAG,"Proactive offer dropped: queue full");

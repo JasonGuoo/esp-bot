@@ -121,13 +121,14 @@
 
 - Read [docs/architecture.md](docs/architecture.md) FIRST. It is the overall authority; see [docs/module-contracts.md](docs/module-contracts.md) for data ownership/events and [docs/implementation-roadmap.md](docs/implementation-roadmap.md) for actual progress versus unimplemented design. Do not treat older Python Brain descriptions as the selected new architecture.
 - Name: **小呆**. The ONLY production wake phrase is **小呆小呆**, interpreted as a **single complete four-syllable keyword**; one standalone **小呆** is NOT a wake. The dedicated WakeNet acoustic model is NOT yet provisioned; the current default uses official MultiNet7 with the complete four-syllable command. Name configuration alone cannot make a recognizer work. See [docs/wake-word.md](docs/wake-word.md).
-- **2026-11-19 owner clarification:** 小呆主动活跃是在明确唤醒或有意触摸后的对话中。
-  空闲时不要自行问候或发起播报。完整唤醒词仍是“小呆小呆”。
-  已存的提醒与历史记录保留；当前不在空闲时自动播报。
+- **2026-11-19 owner clarification:** 小呆主动活跃是在完整唤醒或有意触摸后的对话中。
+  早安、想你、纪念日等问候不会由人脸、时间或其他被动事件触发。家人明确设置的定时提醒
+  可以到点主动播报，仍需遵守安静时段、设备状态、音量和每日上限。提醒不打开录音或追问。
 - **Passive companion by default:** only explicit wake or intentional user touch/manual action
-  initiates conversation. Face presence, gaze, speech energy, other conversation and acoustic
-  DOA are not wake events. Idle → bored → drowsy → sleeping; night dark keeps local keyword
-  recognition running while camera and screen are inactive. See [docs/behavior-lifecycle.md](docs/behavior-lifecycle.md).
+  initiates conversation. An explicit scheduled reminder can speak without starting listening.
+  Face presence, gaze, speech energy, other conversation and acoustic DOA are not wake events.
+  Idle → bored → drowsy → sleeping; night dark keeps local keyword recognition running while camera
+  and screen are inactive. See [docs/behavior-lifecycle.md](docs/behavior-lifecycle.md).
 - **Currently installed V1 hardware:** fixed, non-actuated camera/head that may be moved by hand; **no installed IMU, servo or joint feedback**. **Revised physical target** is an enclosed speaker-equipped two-axis moving head using off-the-shelf parts; do not fabricate capability before real installation. Visual follow means rendered eyes update from CURRENT camera-relative human eye position if a visible target remains in frame. Software cannot turn camera to reacquire an off-screen person. The rendered eyes should not auto-recenter while the head has not physically aligned. Future motors/IMU are optional adapters. See [docs/eye-contact.md](docs/eye-contact.md), [docs/hardware-power.md](docs/hardware-power.md).
 - **One authority for each decision:** bot_runtime owns local behavior/lifecycle and command arbitration; bot_bus transports events/commands/snapshots but makes no decisions; attention_manager owns the single official human focus; vision_attention owns multi-person perception, eye landmarks and human look-at-Bot evidence; attention owns eye/head spatial planning; face renders; head_motion owns physical actuator safety when present. No server/LLM per-frame motor or pupil instructions.
 - **Audio single owner:** microphone capture is shared by local keyword recognizer and optional DOA, never independently opened twice; unrecognized pre-wake audio is neither persisted nor uploaded. Rust/Tauri bot-server composes the Mac Brain. Device media requires an explicitly activated session through the authenticated v3 client. The LAN v1 link is for diagnostics.

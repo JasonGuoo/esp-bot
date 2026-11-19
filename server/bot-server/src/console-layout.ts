@@ -7,7 +7,7 @@ export const CONSOLE_PANELS = [
   { id: "tasks", label: "任务与作品", hub: "tasks", group: "陪伴", description: "后台任务和做好的作品。", hint: "资料整理、图片与媒体准备、打印都有独立进度，也能看到设备上真实呈现的回执。" },
   { id: "family", label: "家庭成员", hub: "family", group: "家人", description: "家人的名字、年龄段和识别样本。", hint: "年龄段由家长填写，不会自动推断。成员用于标注共同对话；个人私密范围只在明确选择时开启。" },
   { id: "voices", label: "谁在说话", hub: "family", group: "家人", description: "给听到的声音标上名字。", hint: "试听相似的声音片段，确认是谁之后再标注。" },
-  { id: "proactive", label: "提醒记录", hub: "family", group: "家人", description: "查看已保存的提醒和以前的播报。", hint: "小呆在唤醒或触摸后开始互动；已保存提醒暂不自动播放。" },
+  { id: "proactive", label: "定时提醒", hub: "family", group: "家人", description: "设置家人需要的定时提醒。", hint: "只播报你设置的提醒。普通问候发生在唤醒或触摸后的对话中。" },
   { id: "memory", label: "补充记忆", hub: "family", group: "家人", description: "手动添加或修改记忆。", hint: "后台自动整理的内容可能有误，可以随时修改或删除。家庭对话的记忆和来源在“家庭时间线”查看。" },
   { id: "models", label: "模型与密钥", hub: "manage", group: "管理", description: "模型顺序、服务端点与 API Key。", hint: "密钥只在本次运行的会话里使用。" },
   { id: "local", label: "本地能力", hub: "manage", group: "管理", description: "这台 Mac 的语音、视觉与身份模型。", hint: "检查本机模型是否就绪、是否已加载。" },

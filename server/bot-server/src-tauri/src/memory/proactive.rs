@@ -9,9 +9,8 @@ use uuid::Uuid;
 use super::Store;
 use super::store::{clean_text, db_error, now_ms, profile_exists, validate_id};
 
-/// Owner settings. The global switch defaults OFF: the owner decision approves
-/// the engine but, unlike §12.1, states no default, so nothing speaks unprompted
-/// until a guardian turns 主动打招呼 on. Moment toggles default on beneath it.
+/// Owner reminder settings. Legacy moment fields remain readable for existing databases;
+/// the planner only offers reminders explicitly created by a family member.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProactiveSettings {
@@ -31,7 +30,7 @@ pub struct ProactiveSettings {
 
 impl Default for ProactiveSettings {
     fn default() -> Self {
-        Self { enabled: false, morning_hello: true, dated_events: true, reminders: true, missed_you: true,
+        Self { enabled: true, morning_hello: false, dated_events: false, reminders: true, missed_you: false,
             answer_directly: false, quiet_start: "21:30".into(), quiet_end: "07:30".into(),
             gap_minutes: 180, daily_cap: 5 }
     }
@@ -83,8 +82,14 @@ impl Store {
         let db = self.connection()?;
         let raw: Option<String> = db.query_row("SELECT settings_json FROM proactive_settings WHERE singleton=1", [], |r| r.get(0))
             .optional().map_err(db_error)?;
-        // An unreadable row falls back to the safe defaults (global switch off).
-        Ok(raw.and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default())
+        // Missing settings use the owner's default reminder policy. A damaged
+        // saved row must not silently turn a previously disabled switch on.
+        Ok(match raw {
+            None => ProactiveSettings::default(),
+            Some(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| ProactiveSettings {
+                enabled: false, ..ProactiveSettings::default()
+            }),
+        })
     }
 
     /// Merge a partial update over the current settings and validate it.
@@ -162,6 +167,47 @@ impl Store {
         Ok(())
     }
 
+    /// Reserve a due reminder once across concurrent device connections. A stale
+    /// reservation expires after three minutes if a previous App process died.
+    pub fn claim_reminder_offer(&self, offer_id:u32, device_id:&str, reminder_id:&str, at_ms:i64) -> Result<bool,String> {
+        validate_id(reminder_id)?;
+        let db=self.connection()?;
+        let trigger=format!("reminder:{reminder_id}");
+        let changed=db.execute("UPDATE proactive_journal SET status='preparing',at_ms=?1
+            WHERE offer_id=?2 AND device_id=?3 AND trigger_source=?4 AND status='offered'
+              AND NOT EXISTS(SELECT 1 FROM proactive_journal j WHERE j.trigger_source=?4
+                  AND j.status IN ('preparing','playing') AND j.at_ms>?5)
+              AND EXISTS(SELECT 1 FROM proactive_reminders r WHERE r.id=?6 AND r.state='pending'
+                  AND r.next_at_ms<=?1 AND r.due_at_ms>=?7)",
+            params![at_ms,offer_id,device_id,trigger,at_ms-180_000,reminder_id,at_ms-REMINDER_STALE_MS])
+            .map_err(db_error)?;
+        Ok(changed==1)
+    }
+
+    /// Record the hardware outcome and advance the reminder in one transaction.
+    pub fn settle_reminder_offer(&self, offer_id:u32, device_id:&str, reminder_id:&str,
+                                 spoken:bool, reason:Option<&str>, at_ms:i64) -> Result<(),String> {
+        validate_id(reminder_id)?;
+        let mut db=self.connection()?;
+        let tx=db.transaction().map_err(db_error)?;
+        let status=if spoken {"spoken"} else {"lost"};
+        let trigger=format!("reminder:{reminder_id}");
+        let changed=tx.execute("UPDATE proactive_journal SET status=?1,reason=?2
+            WHERE offer_id=?3 AND device_id=?4 AND trigger_source=?5 AND status IN ('preparing','playing')",
+            params![status,reason,offer_id,device_id,trigger]).map_err(db_error)?;
+        if changed==1 {
+            if spoken {
+                tx.execute("UPDATE proactive_reminders SET state='spoken',attempts=attempts+1
+                    WHERE id=?1 AND state='pending'",[reminder_id]).map_err(db_error)?;
+            } else {
+                tx.execute("UPDATE proactive_reminders SET attempts=attempts+1,
+                    state=CASE WHEN attempts+1>=?2 THEN 'missed' ELSE 'pending' END,next_at_ms=?3
+                    WHERE id=?1 AND state='pending'",params![reminder_id,REMINDER_MAX_ATTEMPTS,at_ms+REMINDER_RETRY_MS]).map_err(db_error)?;
+            }
+        }
+        tx.commit().map_err(db_error)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn journal_proactive(&self, offer_id: u32, at_ms: i64, local_date: &str, moment: &str, trigger: &str, line: &str,
                              device_id: &str, status: &str, reason: Option<&str>) -> Result<(), String> {
@@ -215,13 +261,51 @@ mod tests {
     }
 
     #[test]
-    fn settings_default_off_merge_partially_and_reject_bad_values() {
+    fn concurrent_reminder_claims_and_real_receipts_are_idempotent() {
+        let (store,dir)=store();
+        let now=now_ms();
+        let reminder=store.add_reminder(&json!({"text":"测试提醒","due_at_ms":now})).unwrap();
+        let trigger=format!("reminder:{}",reminder.id);
+        for (offer,device) in [(1,"bot1"),(2,"bot2")] {
+            store.journal_proactive(offer,now,"2026-11-19","reminder",&trigger,"提醒一下：测试提醒",device,"offered",None).unwrap();
+        }
+        assert!(store.claim_reminder_offer(1,"bot1",&reminder.id,now).unwrap());
+        assert!(!store.claim_reminder_offer(2,"bot2",&reminder.id,now).unwrap());
+        assert_eq!(store.reminders(10).unwrap()[0].state,"pending");
+        store.settle_reminder_offer(1,"bot1",&reminder.id,true,None,now+100).unwrap();
+        store.settle_reminder_offer(1,"bot1",&reminder.id,true,None,now+101).unwrap();
+        let saved=store.reminders(10).unwrap().remove(0);
+        assert_eq!((saved.state.as_str(),saved.attempts),("spoken",1));
+        assert!(!store.claim_reminder_offer(2,"bot2",&reminder.id,now+200).unwrap());
+        drop(store);let _=std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn interrupted_reminder_remains_pending_until_its_retry() {
+        let (store,dir)=store();
+        let now=now_ms();
+        let reminder=store.add_reminder(&json!({"text":"测试重试","due_at_ms":now})).unwrap();
+        let trigger=format!("reminder:{}",reminder.id);
+        store.journal_proactive(3,now,"2026-11-19","reminder",&trigger,"提醒一下：测试重试","bot1","offered",None).unwrap();
+        assert!(store.claim_reminder_offer(3,"bot1",&reminder.id,now).unwrap());
+        store.settle_reminder_offer(3,"bot1",&reminder.id,false,Some("interrupted"),now+100).unwrap();
+        store.settle_reminder_offer(3,"bot1",&reminder.id,false,Some("interrupted"),now+101).unwrap();
+        let saved=store.reminders(10).unwrap().remove(0);
+        assert_eq!((saved.state.as_str(),saved.attempts,saved.next_at_ms),
+                   ("pending",1,now+100+REMINDER_RETRY_MS));
+        assert!(store.due_reminder(now+REMINDER_RETRY_MS).unwrap().is_none());
+        assert_eq!(store.due_reminder(now+100+REMINDER_RETRY_MS).unwrap().unwrap().id,reminder.id);
+        drop(store);let _=std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn reminder_settings_merge_partially_and_reject_bad_values() {
         let (store, dir) = store();
         let defaults = store.proactive_settings().unwrap();
-        assert!(!defaults.enabled && defaults.morning_hello && defaults.reminders && !defaults.answer_directly);
+        assert!(defaults.enabled && !defaults.morning_hello && defaults.reminders && !defaults.answer_directly);
         assert_eq!((defaults.quiet_start.as_str(), defaults.quiet_end.as_str(), defaults.gap_minutes, defaults.daily_cap), ("21:30", "07:30", 180, 5));
         let on = store.set_proactive_settings(&json!({"enabled": true, "missed_you": false})).unwrap();
-        assert!(on.enabled && !on.missed_you && on.morning_hello);
+        assert!(on.enabled && !on.missed_you && !on.morning_hello);
         assert_eq!(store.proactive_settings().unwrap(), on);
         for bad in [json!({"answer_directly": true}), json!({"quiet_start": "25:00"}), json!({"gap_minutes": 5}),
                     json!({"daily_cap": 0}), json!({"surprise": 1}), json!({"quiet_start": "07:30"})] {

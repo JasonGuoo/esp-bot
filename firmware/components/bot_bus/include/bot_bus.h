@@ -121,7 +121,7 @@ typedef enum {
     BOT_COMMAND_REPLY_PRESENT, /* retain text while real hardware audio is still pending */
     BOT_COMMAND_PRESENTATION_SEGMENT, /* visual text; no completion or capture authority */
     BOT_COMMAND_PRESENTATION_DONE, /* local receipt collector: every final output completed */
-    /* Mac-proposed unprompted line (UX review §12.2). request_id is the offer id,
+    /* Mac-proposed scheduled reminder. request_id is the offer id,
      * ttl_ms its lifetime, presentation_sequence bit0 = show on screen if nobody
      * comes, caption the text. Only a proposal: the runtime picks the moment,
      * speaks without any microphone lease, or drops it. */
@@ -135,6 +135,11 @@ typedef enum {
     BOT_WAIT_APPROVAL, BOT_WAIT_IMAGE, BOT_WAIT_SPEECH, BOT_WAIT_ANSWER
 } bot_wait_stage_t;
 
+typedef enum {
+    BOT_PROACTIVE_NONE = 0,
+    BOT_PROACTIVE_REMINDER,
+} bot_proactive_kind_t;
+
 typedef struct {
     uint32_t request_id;
     bot_wait_stage_t wait_stage;
@@ -143,6 +148,7 @@ typedef struct {
     uint32_t received_ms;        /* stamped by local ingress, never remote uptime */
     uint32_t ttl_ms;             /* bounded by runtime; zero uses runtime default */
     uint32_t presentation_sequence;
+    bot_proactive_kind_t proactive_kind; /* explicit user-set reminder only */
     union {
         char expression[BOT_EXPRESSION_MAX_BYTES + 1];
         char caption[BOT_CAPTION_MAX_BYTES + 1];

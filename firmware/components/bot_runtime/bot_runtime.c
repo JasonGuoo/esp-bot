@@ -1250,14 +1250,38 @@ static void proactive_report(bot_runtime_t *runtime, uint32_t id, uint8_t status
     runtime->state.proactive_report_seq++;
 }
 
+/* Keep a proposal only; the moment is decided in proactive_step. Settings,
+ * night or an active conversation delay it rather than reject it. */
+static bot_command_result_t accept_proactive_offer(bot_runtime_t *runtime, const bot_command_t *command,
+                                                  uint32_t now_ms)
+{
+    if (runtime->state.critical_fault) return BOT_COMMAND_REJECTED_FAULT;
+    if (!secure_link(runtime)) return BOT_COMMAND_REJECTED_UNTRUSTED;
+    if (command->proactive_kind != BOT_PROACTIVE_REMINDER) return BOT_COMMAND_REJECTED_INVALID;
+    if (!command->request_id || !command->ttl_ms || command->ttl_ms > 1800000U ||
+        command->request_id == runtime->state.proactive_offer_id ||
+        !command->data.caption[0] || !valid_text(command->data.caption, sizeof(command->data.caption)))
+        return BOT_COMMAND_REJECTED_INVALID;
+    if (!within_age(now_ms, command->received_ms, runtime->config.command_max_age_ms))
+        return BOT_COMMAND_REJECTED_EXPIRED;
+    if (runtime->proactive_pending && runtime->proactive_id != command->request_id)
+        proactive_report(runtime, runtime->proactive_id, 1); /* superseded, never spoken */
+    runtime->proactive_pending = true;
+    runtime->proactive_id = command->request_id;
+    runtime->proactive_received_ms = command->received_ms;
+    runtime->proactive_ttl_ms = command->ttl_ms;
+    runtime->proactive_show_if_absent = command->presentation_sequence & 1U;
+    memcpy(runtime->proactive_text, command->data.caption, sizeof(runtime->proactive_text));
+    return BOT_COMMAND_ACCEPTED;
+}
+
 static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_command_t *command,
                                            uint32_t now_ms)
 {
     bot_runtime_snapshot_t *state = &runtime->state;
     if (command->kind < BOT_COMMAND_SET_EXPRESSION || command->kind > BOT_COMMAND_PROACTIVE_OFFER)
         return BOT_COMMAND_REJECTED_INVALID;
-    /* Unsolicited offers cannot start a session, including with an older Mac. */
-    if (command->kind == BOT_COMMAND_PROACTIVE_OFFER) return BOT_COMMAND_REJECTED_PASSIVE;
+    if (command->kind == BOT_COMMAND_PROACTIVE_OFFER) return accept_proactive_offer(runtime, command, now_ms);
     if (state->critical_fault) return BOT_COMMAND_REJECTED_FAULT;
     if (state->settings_open) return BOT_COMMAND_REJECTED_SETTINGS;
     if (!secure_link(runtime)) return BOT_COMMAND_REJECTED_UNTRUSTED;
@@ -1506,17 +1530,14 @@ static bool proactive_moment(const bot_runtime_t *runtime, uint32_t now_ms)
     const bot_runtime_snapshot_t *state = &runtime->state;
     return !is_active(runtime) && !runtime->revoking && !state->settings_open && !state->critical_fault &&
         !runtime->manual_sleep &&
-        (state->behavior == BOT_BEHAVIOR_IDLE || state->behavior == BOT_BEHAVIOR_BORED) &&
-        !(state->clock_valid && state->night_policy) && !state->ambient_dark &&
+        (state->behavior == BOT_BEHAVIOR_IDLE || state->behavior == BOT_BEHAVIOR_BORED ||
+         state->behavior == BOT_BEHAVIOR_DROWSY || state->behavior == BOT_BEHAVIOR_SLEEPING) &&
+        !(state->clock_valid && state->night_policy) &&
         secure_link(runtime) && state->audio_available &&
         state->voice_settings.spoken_answers && !state->voice_settings.muted &&
         state->voice_settings.volume_percent &&
         !state->local_response_active && !state->sound_preview_active && !state->playback_id &&
-        state->person_visible &&
-        within_age(now_ms, runtime->person_since_ms, INT32_MAX) &&
-        (uint32_t)(now_ms - runtime->person_since_ms) >= runtime->config.proactive_presence_ms &&
         !(runtime->has_speech && within_age(now_ms, runtime->last_speech_ms, runtime->config.proactive_speech_quiet_ms)) &&
-        !within_age(now_ms, state->last_interaction_ms, runtime->config.proactive_idle_ms) &&
         !(runtime->has_proactive && within_age(now_ms, runtime->last_proactive_ms, runtime->config.proactive_min_gap_ms));
 }
 
@@ -1551,8 +1572,7 @@ static void proactive_step(bot_runtime_t *runtime, uint32_t now_ms)
         return;
     }
     runtime->proactive_pending = false;
-    /* A reminder nobody was there to hear stays on screen for a while; it is
-     * never spoken late into an empty room or at night. */
+    /* An undelivered reminder can remain on screen for a while. */
     const bool show = runtime->proactive_show_if_absent && !is_active(runtime) &&
         !state->settings_open && !state->critical_fault &&
         state->behavior != BOT_BEHAVIOR_NIGHT_DARK && state->behavior != BOT_BEHAVIOR_SLEEPING;
