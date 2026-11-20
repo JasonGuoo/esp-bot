@@ -225,6 +225,11 @@ struct Engagement {
 /// A spoken acknowledgement is skipped this soon after the device's wake reply.
 const ACK_AFTER_WAKE: Duration = Duration::from_secs(5);
 
+fn slow_ack_eligible(live_voice_commit: bool, since_open: Duration, since_ack: Option<Duration>) -> bool {
+    live_voice_commit && since_open >= ACK_AFTER_WAKE
+        && since_ack.is_none_or(|elapsed| elapsed >= Duration::from_secs(20))
+}
+
 #[derive(Clone, Debug)]
 struct DeviceOutput { images:bool, audio:bool, presentation:bool, live:bool }
 
@@ -1322,9 +1327,8 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     context=session.output.as_ref().filter(|o|o.live).map(|_|super::LiveTurnContext::default());
                                     let shared_context=context.clone();
                                     // No spoken ack right after the device's own wake reply said the same thing.
-                                    let acknowledge=live_output.is_some() && frame.method=="audio.commit" &&
-                                        session.opened.elapsed()>=ACK_AFTER_WAKE &&
-                                        last_ack.is_none_or(|when|when.elapsed()>=Duration::from_secs(20));
+                                    let acknowledge = slow_ack_eligible(live_output.is_some() && frame.method == "audio.commit",
+                                        session.opened.elapsed(), last_ack.map(|when| when.elapsed()));
                                     let task=tokio::spawn(async move {
                                         let started = Instant::now();
                                         let result = turn_brain.turn_with(input, false, super::DeviceWork { output:live_output, candidate, supplement, acknowledge, context:shared_context, spoken_device:audio_requested && compact }).await;
@@ -1406,6 +1410,18 @@ async fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_ack_respects_wake_and_recent_speech() {
+        let wake = Duration::from_secs(5);
+        let cooldown = Duration::from_secs(20);
+        let tick = Duration::from_millis(1);
+        assert!(!slow_ack_eligible(true, wake - tick, None));
+        assert!(slow_ack_eligible(true, wake, None));
+        assert!(!slow_ack_eligible(true, wake, Some(cooldown - tick)));
+        assert!(slow_ack_eligible(true, wake, Some(cooldown)));
+        assert!(!slow_ack_eligible(false, wake, None));
+    }
 
     #[test]
     fn only_transcripts_and_frozen_answers_carry_preview_text() {

@@ -2,16 +2,32 @@
 //! continuation offer (review §7.2 and §7.4). Notes are context for the model only.
 use std::time::Instant;
 
-const CLOSING: [&str; 14] = ["拜拜", "再见", "不聊了", "我走了", "下次再聊", "回头聊", "先这样", "就这样吧",
-    "好了谢谢", "好的谢谢", "谢谢小呆", "没事了", "晚安", "睡觉了"];
+const CLOSING: &[&str] = &["拜拜", "再见", "明天见", "下次见", "不聊了", "我走了", "我先走了", "我要走了",
+    "下次再聊", "回头聊", "先这样", "就这样吧", "好了谢谢", "好的谢谢", "谢谢小呆",
+    "没事了", "晚安", "睡觉了", "我睡觉了", "我去睡觉了", "我要睡觉了", "我先睡了"];
+const SIGNOFF_EXTRAS: &[&str] = &["小呆", "谢谢你", "谢谢", "好啦", "好吧", "好的", "好了", "好",
+    "我们", "咱们", "我", "今天", "那", "就", "先", "嗯", "啦", "了", "吧", "啊", "哦", "呀", "喽"];
 
 /// "拜拜", "好了谢谢", "不聊了": a short goodbye, not a question that mentions one.
 pub fn closing(transcript: &str) -> bool {
     let text: String = transcript.chars().filter(|c| !c.is_whitespace() && !"，。！？,.!?～~".contains(*c)).collect();
-    if text.chars().count() > 12 || transcript.contains('？') || transcript.contains('?') || transcript.contains("什么") || transcript.contains("怎么") {
+    if text.chars().count() > 12 || transcript.contains(['？', '?']) {
         return false;
     }
-    CLOSING.iter().any(|p| text.contains(p))
+    // Closing ends a live session. Every word must belong to the sign-off.
+    let mut remaining = text.as_str();
+    let mut goodbye = false;
+    while !remaining.is_empty() {
+        if let Some(rest) = CLOSING.iter().find_map(|&part| remaining.strip_prefix(part)) {
+            goodbye = true;
+            remaining = rest;
+        } else if let Some(rest) = SIGNOFF_EXTRAS.iter().find_map(|&part| remaining.strip_prefix(part)) {
+            remaining = rest;
+        } else {
+            return false;
+        }
+    }
+    goodbye
 }
 
 /// A request for a story (the reply then ends with an offer to go on).
@@ -65,6 +81,33 @@ mod tests {
         }
         for text in ["拜拜用英语怎么说？", "讲一个小兔子说再见的故事吧，要长一点的", "晚安是什么意思", "我们再聊聊恐龙", "谢谢你帮我查天气，明天会下雨吗"] {
             assert!(!closing(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn mentioning_goodnight_keeps_the_conversation_open() {
+        for text in ["讲个晚安故事", "小兔说晚安", "先别说再见", "谢谢小呆，继续讲", "晚安用英语怎么说"] {
+            assert!(!closing(text), "{text}");
+        }
+        assert!(note("讲个晚安故事").unwrap().contains("下一段"));
+        for text in ["那我先走了，小呆拜拜", "那我们今天先这样吧", "我不聊了", "小呆，晚安啦", "晚安，拜拜", "谢谢小呆"] {
+            assert!(closing(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn short_utterances_agree_with_the_conversation_close_twin() {
+        // One real input for each semantic class, including ASR with and without punctuation.
+        let parts = ["", "晚安", "小呆", "故事", "？"];
+        for first in parts {
+            for second in parts {
+                for third in parts {
+                    let words = [first, second, third];
+                    let goodbye_only = words.contains(&"晚安") && !words.contains(&"故事") && !words.contains(&"？");
+                    let said = words.concat();
+                    assert_eq!(closing(&said), goodbye_only, "{said}");
+                }
+            }
         }
     }
 

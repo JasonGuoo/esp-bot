@@ -3,6 +3,11 @@
 set -eu
 firmware_dir=$(cd "$(dirname "$0")/../../.." && pwd)
 components="$firmware_dir/components"
+case "${1:-runtime}" in
+    runtime) test_source=test_runtime_near_face.c ;;
+    reminders) test_source=test_proactive.c ;;
+    *) echo 'Expected runtime or reminders' >&2; exit 2 ;;
+esac
 idf="$firmware_dir/.toolchains/esp-idf/components"
 config="$firmware_dir/build/config"
 if [ ! -f "$config/sdkconfig.h" ]; then
@@ -41,8 +46,8 @@ done
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Library/Developer/CommandLineTools}"
 xcrun clang -isysroot "$(xcrun --sdk macosx --show-sdk-path)" -std=gnu11 -g -O1 \
     -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer "$@" \
-    "$components/bot_runtime/tests/test_runtime_near_face.c" "$components/bot_runtime/bot_runtime.c" \
+    "$components/bot_runtime/tests/$test_source" "$components/bot_runtime/bot_runtime.c" \
     "$components/attention_manager/attention_manager.c" "$components/bot_voice/bot_voice.c" \
     "$components/bot_responses/bot_responses.c" "$scratch/replies.S" -o "$scratch/runtime"
 "$scratch/runtime"
-echo 'bot_runtime host tests passed (ASan and UBSan).'
+echo "$test_source passed (ASan and UBSan)."

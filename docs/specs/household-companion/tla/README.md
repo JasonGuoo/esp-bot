@@ -2,6 +2,8 @@
 
 [TurnPlayback.tla](TurnPlayback.tla) 描述一次已获授权的回答如何经过屏幕、扬声器和最终呈现回执，进入下一次可追问状态。改变分段、取消或回执语义时，可以在 Mac 上重跑模型和对应的 C、Rust 测试。
 
+模型现统一维护在 [formal/tla/protocol/TurnPlayback](../../../../formal/tla/protocol/TurnPlayback)。旧文件链接和原检查命令继续可用。其他对话场景、责任域与新增模型的约定在[项目孪生索引](../../../../formal/tla/README.md)。
+
 ## 模型范围
 
 - 每轮有一到两段，每段可仅显示，也可显示后播报。设备收齐本段所需的实际回执，Mac 才能推进下一段。模型把末段标记和实时内容的最终封口合并为一次完成通知。

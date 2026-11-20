@@ -1,0 +1,3 @@
+server_tests live_speech_freezes_only_an_ordered_independent_prefix \
+    fake_device_hears_a_six_sentence_story_with_dialogue_without_gaps \
+    a_busy_speaker_lane_leaves_foreground_asr_available slow_ack_respects_wake_and_recent_speech

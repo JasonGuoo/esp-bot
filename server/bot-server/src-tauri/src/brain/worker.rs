@@ -269,6 +269,19 @@ async fn kill_process(child: &mut Child) {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_busy_speaker_lane_leaves_foreground_asr_available() {
+        let worker = ModelWorker::new(ModelWorkerConfig::default(), std::env::temp_dir());
+        let _identity = worker.lane("speaker_embed").lock().await;
+        assert!(worker.lane("diarize").try_lock().is_err());
+        // The foreground request reaches worker configuration while identity is still locked.
+        let asr = timeout(Duration::from_secs(1), worker.call("transcribe", json!({}))).await
+            .expect("foreground ASR waited on identity");
+        assert!(asr.unwrap_err().starts_with("local_worker_not_configured"));
+        let _foreground = worker.lane("transcribe").lock().await;
+        assert_eq!(worker.transcribe_if_idle(String::new()).await.unwrap_err(), "local_worker_lane_busy");
+    }
+
     #[test]
     fn kokoro_is_used_only_when_installed_and_the_first_sentence_has_its_own_lane() {
         let root=std::env::temp_dir().join(format!("xiaodai-kokoro-{}",uuid::Uuid::new_v4()));

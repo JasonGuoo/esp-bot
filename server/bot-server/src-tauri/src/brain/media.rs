@@ -119,6 +119,23 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn a_pause_before_the_last_frame_keeps_the_full_resumed_utterance() {
+        let worker = super::super::ModelWorker::new(Default::default(), std::env::temp_dir());
+        let mut capture = AudioInput::new(7);
+        capture.push(&output_frame(7, 0, &[1; 960])).unwrap();
+        capture.note_pause(2);
+        capture.start_candidate(&worker);
+        assert!(capture.candidate.is_none());
+        capture.push(&output_frame(7, 1, &[2; 960])).unwrap();
+        capture.start_candidate(&worker);
+        assert!(capture.candidate.is_some());
+        capture.push(&output_frame(7, 2, &[3; 960])).unwrap();
+        assert!(capture.candidate.is_none());
+        let complete = decode_output(&capture.wav_base64().unwrap()).unwrap();
+        assert_eq!(complete, [[1; 960], [2; 960], [3; 960]].concat());
+    }
+
+    #[tokio::test]
     async fn resumed_pcm_retires_the_exact_pause_candidate() {
         let mut capture=AudioInput::new(7);
         capture.note_pause(2); // control and PCM may arrive on different sockets

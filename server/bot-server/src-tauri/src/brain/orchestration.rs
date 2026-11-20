@@ -182,12 +182,8 @@ impl Brain {
             Some(c) if self.tasks.source_current(&c.source)? => Some(c),
             _ => None,
         };
-        let supplement_note=work.supplement.as_ref().map(|supplement| {
-            let previous=recent.as_array().and_then(|rows|rows.iter().find(|r|r["turn_id"]==supplement.previous));
-            let user=live_previous.as_ref().map(|c|c.question.as_str()).or_else(||previous.and_then(|v|v["user"].as_str())).unwrap_or("").chars().take(350).collect::<String>();
-            let spoken=live_previous.as_ref().map(|c|c.delivered.as_str()).or_else(||previous.and_then(|v|v["assistant_delivered"].as_str())).unwrap_or("").chars().take(650).collect::<String>();
-            format!("用户在补充上一个问题。上次的问题和已有完整播放回执的句子如下，按本次补充接着回答，未确认播出的其余文字不能视为对方已听过。参考资料：{}",json!({"上次问题":user,"已播整句":spoken}))
-        });
+        let supplement_note = work.supplement.as_ref().map(|supplement|
+            supplement_context(&supplement.previous, live_previous.as_ref(), &recent));
         let flow_note=flow::note(&transcript);
         let closing=flow::closing(&transcript);
         let mut source_refs=self.memory.household_day_source_refs(&journal.daily_conversation_id,input.profile_id.as_deref())?;
@@ -543,9 +539,44 @@ fn source_dependencies(value:&Value)->Vec<String>{
     let mut result=Vec::new();visit(value,&mut result,0);result
 }
 
+fn supplement_context(previous_id: &str, live: Option<&SpokenTurn>, recent: &Value) -> String {
+    let previous = recent.as_array().and_then(|rows| rows.iter().find(|row| row["turn_id"] == previous_id));
+    let question = live.map(|turn| turn.question.as_str())
+        .or_else(|| previous.and_then(|row| row["user"].as_str())).unwrap_or("");
+    let heard = live.map(|turn| turn.delivered.as_str())
+        .or_else(|| previous.and_then(|row| row["assistant_delivered"].as_str())).unwrap_or("");
+    let context = json!({"上次问题": question.chars().take(350).collect::<String>(),
+        "已播整句": heard.chars().take(650).collect::<String>()});
+    format!("用户在补充上一个问题。上次的问题和已有完整播放回执的句子如下，按本次补充接着回答，未确认播出的其余文字不能视为对方已听过。参考资料：{context}")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::explicit_print_request;
+    use super::{explicit_print_request, supplement_context, SpokenTurn};
+    use serde_json::json;
+
+    #[test]
+    fn supplement_uses_the_previous_question_and_only_receipted_words() {
+        let question = "讲一个小兔和月亮的故事。";
+        let heard = "小兔爬上山坡。";
+        let unplayed = "小兔给月亮送了月饼。";
+        let recent = json!([
+            {"turn_id":"earlier", "user":"明天天气如何？", "assistant_delivered":"明天有雨。"},
+            {"turn_id":"story", "user":question, "assistant_generated":format!("{heard}{unplayed}"),
+                "assistant_delivered":heard}
+        ]);
+        // After “把小兔换成小狗”, a fresh live snapshot can have zero completed sentences.
+        let live = SpokenTurn { question: question.into(), ..Default::default() };
+        let before_audio = supplement_context("story", Some(&live), &recent);
+        assert!(before_audio.contains(question));
+        assert!(!before_audio.contains(heard));
+        let live = SpokenTurn { delivered: heard.into(), ..live };
+        for note in [supplement_context("story", Some(&live), &recent), supplement_context("story", None, &recent)] {
+            assert!(note.contains(question) && note.contains(heard));
+            assert!(!note.contains(unplayed) && !note.contains("明天有雨"));
+        }
+        assert!(!supplement_context("unknown", None, &recent).contains(question));
+    }
 
     #[test]
     fn a_printable_artifact_or_negated_quote_does_not_authorize_printing() {

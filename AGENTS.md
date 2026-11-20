@@ -1,5 +1,11 @@
 # esp-bot development instructions
 
+## 小呆的 TLA+ 孪生与对话验收
+
+- 每次修改或新增功能，都要评估会影响哪个用户场景、由哪一端决定，以及相关 TLA+ 孪生是否需要更新。各平台新增核心行为，或改变状态迁移、跨端协议、并发任务、取消、队列容量与等待策略时，在同一变更中编写或更新模型、TLC 配置和对应的实现回归。既有核心路径缺模型，就在改动该路径时补齐。行为保持一致时，复跑相关检查并在交付中写明依据。纯文案或资源修改列出影响判断即可。
+- 对话优先从人会遇到的情形出发。覆盖说到一半停顿又继续、慢回答的短回应、声纹迟到、补一句或重新说、停止、播完再追问、明确道别。写清用户已经听到了什么、新话应承接哪一轮，以及什么时候小呆应当安静。遇到反例，保留触发它的话或事件顺序作为实现回归。
+- 目录统一为 `formal/tla/<责任域>/<模型名>/`。固件归 `firmware`，Mac App、服务和模型工作进程归 `macos`，两端共同遵守的时序归 `protocol`。在配置好的 Mac 上运行 `./tools/check-tla-twins.sh`，也可指定受影响的模型。分别记录模型结果、实际代码运行、板上声学及真人体验的证据。目录、场景与本机命令见 [TLA+ 孪生索引](formal/tla/README.md)。
+
 ## Current Mac and device behavior — 2026-11-18
 
 - Managed model keys come only from the current App session or its launch environment. Do not read, migrate, overwrite, or remove legacy provider Keychain items. This does not change device pairing or signing.
@@ -104,7 +110,6 @@
 - Prioritize delivering modular, reviewable source code and clear integration contracts. If a real device, toolchain or practical test environment is unavailable, **write the code without attempting or requiring tests**.
 - State the verification status precisely in the handoff: distinguish written code from builds, device runs, and camera/motor calibration actually performed. Never call an untested implementation "verified".
 - Do not add testing infrastructure or workflow changes solely for reassurance. Existing local/manual test examples may remain for optional future use; do not execute or enforce them without a concrete reason or explicit request.
-- Changes to segmented playback, Stop/supplement, output leases, receipt handling or follow-up authorization have a [local playback protocol check](docs/specs/household-companion/tla/README.md). Run `./tools/check-turn-playback.sh` on a configured Mac when changing these behaviors. When the protocol changes, update the TLA+ model and the affected C or Rust regression in the same change. When a counterexample exposes an implementation bug, keep its event order as a regression case alongside the fix.
 - Preserve separation between `vision_attention` (all face tracks and eye estimates), `attention` (selected target + head/eye motion planning), `face` (LVGL expression rendering), and server modules.
 - Hardware target: **ESP32-S31-Korvo-1 V1.1 / ESP32-S31**, not ESP32-S3.
 
