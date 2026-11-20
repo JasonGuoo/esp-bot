@@ -44,6 +44,10 @@ when its purpose is `final`: the local presentation receipt collector must first
 finish all required outputs. Only `BOT_COMMAND_PRESENTATION_DONE` then arms the
 next capture token. Legacy single replies retain their previous behavior.
 
+The [November 20 local protocol check](../docs/specs/household-companion/tla/README.md)
+exercises completion ordering, interruption and delayed receipts in TLC and
+replays selected orders against the actual C runtime and Rust gateway on Mac.
+
 An interruption retires the output lease, stops the current hardware stream,
 and begins a new capture token with RX/AFE fences. It does not grant authority
 to cancel a persistent Mac printing or background task; the server owns those

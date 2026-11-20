@@ -304,6 +304,58 @@ pub(super) async fn prepare_progress(brain:Arc<Brain>,task:crate::brain::tasks::
 mod tests {
     use super::*;
 
+    #[test]
+    fn late_or_duplicate_receipts_cannot_advance_the_live_segment() {
+        use crate::brain::presentation::{PlanContext, PresentationPlanner};
+
+        let dir = std::env::temp_dir().join(format!("xiaodai-receipts-{}", uuid::Uuid::new_v4()));
+        let brain = Brain::new(dir.clone(), None, Arc::new(|_| {})).unwrap();
+        let scene = scene_for("第一句。", "thinking");
+        let context = PlanContext {
+            household_id: "house".into(), daily_conversation_id: "day".into(),
+            conversation_turn_id: "turn".into(), task_id: None,
+        };
+        let content = json!({"presentation":{"segments":[{"speech":"第一句。"},{"speech":"第二句。"}]}});
+        let plan = PresentationPlanner::default().freeze(context, &scene, Some(&content), false).unwrap();
+        let start = |token| Delivery::new(&brain, "device", "activation", token, "turn".into(),
+            plan.clone(), restore(&brain, &plan).unwrap(), vec![], false, 1).unwrap();
+        let receipt = |delivery: &mut Delivery| {
+            let (message, _, _) = delivery.next(&brain).unwrap().unwrap();
+            let mut report = message["payload"].clone();
+            report["runtime"] = message["runtime"].clone();
+            report["status"] = json!("completed");
+            report
+        };
+
+        let token = RuntimeToken { epoch: 7, session_id: 1, turn_id: 1, focus_generation: 0 };
+        let mut retired = start(token);
+        let late = receipt(&mut retired);
+        brain.tasks.revoke_outputs(Some("activation")).unwrap();
+        assert_eq!(retired.report(&brain, &late).unwrap_err(), "presentation_lease_revoked");
+
+        // Replay the same plan. Plan, segment, index and sequence coincide on
+        // the first segment; the runtime token and output lease must each match.
+        let mut live = start(RuntimeToken { epoch: 8, turn_id: 2, ..token });
+        let first = receipt(&mut live);
+        for key in ["runtime", "output_lease_id"] {
+            let mut stale = first.clone();
+            stale[key] = late[key].clone();
+            assert_eq!(live.report(&brain, &stale).unwrap_err(), "presentation_receipt_stale");
+            assert!(live.next(&brain).unwrap().is_none());
+        }
+        assert!(!live.report(&brain, &first).unwrap());
+        let last = receipt(&mut live);
+        assert_eq!(last["seq"], 2);
+        for _ in 0..2 {
+            assert_eq!(live.report(&brain, &first).unwrap_err(), "presentation_receipt_stale");
+            assert!(live.next(&brain).unwrap().is_none());
+        }
+        assert!(live.report(&brain, &last).unwrap());
+        assert_eq!(live.report(&brain, &last).unwrap_err(), "presentation_receipt_stale");
+        drop(brain);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn a_failed_turn_becomes_one_spoken_in_character_segment() {
         use base64::{Engine, engine::general_purpose::STANDARD};

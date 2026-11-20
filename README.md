@@ -183,6 +183,8 @@ Read [face design](docs/face-design.md), [appearance pack contract](shared/appea
 
 ## Delivery and validation policy
 
+For changes to playback, interruption or follow-up, run `./tools/check-turn-playback.sh` on the development Mac. The TLA+ model, firmware host tests and Mac gateway tests run without a connected board. [Scope and local setup](docs/specs/household-companion/tla/README.md)
+
 This project intentionally has **no CI workflows**. See [AGENTS.md](AGENTS.md). If suitable equipment or a practical runtime is unavailable, development proceeds by delivering modular source code and documenting what has **not** been built, run or validated on real hardware. Existing optional local test code does not constitute device verification.
 
 ## References

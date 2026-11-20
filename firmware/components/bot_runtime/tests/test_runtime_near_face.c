@@ -84,6 +84,13 @@ static void post_event(bot_bus_t *bus, bot_runtime_t *runtime, bot_event_t event
     bot_runtime_step(runtime, event.observed_ms);
 }
 
+static void post_command(bot_bus_t *bus, bot_runtime_t *runtime, bot_command_t command)
+{
+    bus->command = command;
+    bus->has_command = true;
+    bot_runtime_step(runtime, command.received_ms);
+}
+
 static void test_processing_requires_server_ack(bool failed_followup)
 {
     bot_runtime_config_t config = bot_runtime_default_config();
@@ -896,6 +903,112 @@ static void test_managed_playback_does_not_arm_followup(bool completion_arrives_
     bot_runtime_destroy(runtime);
 }
 
+static void start_narrated_answer(bot_bus_t *bus, bot_runtime_t *runtime,
+                                  bot_session_token_t token, uint32_t now)
+{
+    bot_runtime_snapshot_t state;
+    post_event(bus, runtime, (bot_event_t){.kind=BOT_EVENT_UTTERANCE_STARTED,
+        .source=BOT_SOURCE_AUDIO, .token=token, .observed_ms=now});
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.audio_uplink_permitted);
+    post_event(bus, runtime, (bot_event_t){.kind=BOT_EVENT_UTTERANCE_ENDED,
+        .source=BOT_SOURCE_AUDIO, .token=token, .observed_ms=now+1});
+    post_event(bus, runtime, (bot_event_t){.kind=BOT_EVENT_TURN_SUBMITTED,
+        .source=BOT_SOURCE_LINK, .token=token, .observed_ms=now+2});
+    post_command(bus, runtime, (bot_command_t){.kind=BOT_COMMAND_PRESENTATION_SEGMENT,
+        .token=token, .received_ms=now+3, .presentation_sequence=1, .data.caption="回答"});
+    post_event(bus, runtime, (bot_event_t){.kind=BOT_EVENT_PLAYBACK_STARTED,
+        .source=BOT_SOURCE_AUDIO, .token=token, .observed_ms=now+4,
+        .data.playback={.id=1, .purpose=BOT_PLAYBACK_FINAL, .presentation_managed=true}});
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.playback_id == 1 && state.reading_sequence == 1 &&
+           state.conversation == BOT_CONVERSATION_SPEAKING && !state.audio_uplink_permitted);
+}
+
+static void test_retired_presentation_receipts(bool stop, bool end_arrives_first)
+{
+    bot_bus_t bus = {0};
+    bot_runtime_t *runtime = NULL;
+    bot_runtime_snapshot_t state;
+    bot_runtime_config_t config = bot_runtime_default_config();
+    config.allow_audio_uplink = true;
+    config.wake_debounce_ms = 50;
+    assert(bot_runtime_create(&bus, &config, NULL, NULL, 1000, &runtime) == ESP_OK);
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_AUDIO_HEALTH, .source=BOT_SOURCE_AUDIO,
+        .observed_ms=1010, .data.health={.available=true}});
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_LINK_STATE, .source=BOT_SOURCE_LINK,
+        .observed_ms=1020, .data.link={.connected=true, .authenticated=true, .encrypted=true}});
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE, .source=BOT_SOURCE_LOCAL_UI,
+        .observed_ms=1030, .data.touch={.intentional=true}});
+    bot_runtime_get_snapshot(runtime, &state);
+    const bot_session_token_t old = state.token;
+    start_narrated_answer(&bus, runtime, old, 1040);
+    const bot_command_t old_end = {.kind=BOT_COMMAND_PRESENTATION_DONE, .token=old, .received_ms=1050};
+    const bot_event_t old_audio = {.kind=BOT_EVENT_PLAYBACK_DONE, .source=BOT_SOURCE_AUDIO,
+        .token=old, .observed_ms=1050,
+        .data.playback={.id=1, .purpose=BOT_PLAYBACK_FINAL, .presentation_managed=true}};
+    if (end_arrives_first) post_command(&bus, runtime, old_end);
+    if (stop) {
+        /* The physical stop latch takes priority over both queued terminals. */
+        bus.signals = (bot_bus_signals_t){.local_stop=true, .observed_ms=1060};
+        bus.event = old_audio;
+        bus.command = old_end;
+        bus.has_event = bus.has_command = true;
+        bot_runtime_step(runtime, 1060);
+        bot_runtime_get_snapshot(runtime, &state);
+        assert(!state.token.session_id && !state.playback_id && !state.followup_armed &&
+               !state.audio_session_requested && !state.audio_uplink_permitted);
+        post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE, .source=BOT_SOURCE_LOCAL_UI,
+            .observed_ms=1150, .data.touch={.intentional=true}});
+    } else {
+        post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE, .source=BOT_SOURCE_LOCAL_UI,
+            .token=old, .observed_ms=1060, .data.touch={.intentional=true, .supplement=true}});
+    }
+    bot_runtime_get_snapshot(runtime, &state);
+    const bot_session_token_t next = state.token;
+    assert(next.session_id && next.epoch != old.epoch && state.supplement_turn == !stop);
+    bus.event = old_audio;
+    bus.event.kind = BOT_EVENT_PLAYBACK_STARTED;
+    bus.has_event = true;
+    bot_runtime_step(runtime, 1155);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.playback_id && state.conversation == BOT_CONVERSATION_LISTENING);
+    start_narrated_answer(&bus, runtime, next, 1160);
+    post_command(&bus, runtime, (bot_command_t){.kind=BOT_COMMAND_PRESENTATION_SEGMENT,
+        .token=old, .received_ms=1168, .presentation_sequence=1, .data.caption="迟到的旧回答"});
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(strcmp(state.reading_text, "回答") == 0);
+
+    /* Reuse playback id 1. Only the token distinguishes the old audio DONE.
+     * Keep original observation times, still well inside both freshness limits. */
+    bot_command_t end = {.kind=BOT_COMMAND_PRESENTATION_DONE, .token=next, .received_ms=1170};
+    if (end_arrives_first) post_command(&bus, runtime, end);
+    for (unsigned copy = 0; copy < 2; copy++) {
+        bus.event = old_audio;
+        bus.command = old_end;
+        bus.has_event = bus.has_command = true;
+        bot_runtime_step(runtime, 1180 + copy);
+        bot_runtime_get_snapshot(runtime, &state);
+        assert(state.token.epoch == next.epoch && state.playback_id == 1 &&
+               state.conversation == BOT_CONVERSATION_SPEAKING &&
+               !state.followup_armed && !state.audio_uplink_permitted);
+    }
+    bot_event_t done = old_audio;
+    done.token = next;
+    done.observed_ms = 1190;
+    post_event(&bus, runtime, done);
+    if (!end_arrives_first) {
+        bot_runtime_get_snapshot(runtime, &state);
+        assert(state.token.epoch == next.epoch && !state.followup_armed);
+        end.received_ms = 1200;
+        post_command(&bus, runtime, end);
+    }
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.followup_armed && state.token.turn_id == next.turn_id + 1 &&
+           state.conversation == BOT_CONVERSATION_WAITING && !state.audio_uplink_permitted);
+    bot_runtime_destroy(runtime);
+}
+
 static void test_segment_emotion_is_honoured_while_speaking(void)
 {
     bot_bus_t bus={0};bot_runtime_t *runtime=NULL;bot_runtime_snapshot_t state;
@@ -1155,6 +1268,10 @@ int main(void)
     test_settings_close_commits_last_edit();
     test_managed_playback_does_not_arm_followup(false);
     test_managed_playback_does_not_arm_followup(true);
+    test_retired_presentation_receipts(false, false);
+    test_retired_presentation_receipts(false, true);
+    test_retired_presentation_receipts(true, false);
+    test_retired_presentation_receipts(true, true);
     test_segment_emotion_is_honoured_while_speaking();
     test_processing_requires_server_ack(false);
     test_processing_requires_server_ack(true);
