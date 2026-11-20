@@ -41,6 +41,10 @@ typedef enum { DOWN, WELCOME, READY, OPENING, OPEN, BEGINNING, PLAIN_CONNECTING,
 typedef struct {
     phase_t phase;
     bool authenticated, active, utterance, audio_allowed, pcm_permitted, silent_supported;
+    /* VAD is only a veto on sealing; runtime still grants every PCM lease. */
+    bool capture_vad_active;
+    uint32_t capture_revision, pcm_callbacks;
+    int64_t capture_end_us;
     bool audio_supported, spoken_answers, session_spoken, followup_armed;
     bool live_available, live_session, supplement_turn;
     bool presentation_supported, presentation_valid, segment_active, segment_final;
@@ -222,8 +226,8 @@ static void capture_event(bot_session_token_t token, bool ready) {
         .data.capture={.ready=ready}};
     (void)bot_bus_post(s_bus,&event,0);
 }
-static void fail_session_token(const char *reason, const bot_session_token_t *expected,
-                                bot_session_end_code_t code) {
+static void fail_session_token_notice(const char *reason, const bot_session_token_t *expected,
+                                     bot_session_end_code_t code, bool input_retry_exhausted) {
     portENTER_CRITICAL(&s_lock);
     if (expected && !same(*expected,s.desired)) {portEXIT_CRITICAL(&s_lock);return;}
     s.audio_allowed = false;
@@ -242,11 +246,15 @@ static void fail_session_token(const char *reason, const bot_session_token_t *ex
     if (active && s_bus) {
         const bot_event_t event = {.kind = BOT_EVENT_SESSION_END, .source = BOT_SOURCE_SYSTEM,
             .observed_ms = (uint32_t)(esp_timer_get_time()/1000), .token = token,
-            .data.session_end = {.code=code}};
+            .data.session_end = {.code=code,.input_retry_exhausted=input_retry_exhausted}};
         /* Token matching in runtime makes a concurrent new wake immune to this
          * old failure. A critical enqueue failure still latches the bus fault. */
         (void)bot_bus_post(s_bus, &event, 0);
     }
+}
+static void fail_session_token(const char *reason, const bot_session_token_t *expected,
+                               bot_session_end_code_t code) {
+    fail_session_token_notice(reason,expected,code,false);
 }
 static void fail_session(const char *reason) { fail_session_token(reason,NULL,BOT_SESSION_END_NONE); }
 static void fail_operation(bot_session_token_t token,const char *reason) { fail_session_token(reason,&token,BOT_SESSION_END_NONE); }
@@ -318,6 +326,9 @@ bool brain_secure_live_turns(void) {
 void brain_secure_update(const bot_runtime_snapshot_t *state) {
     if (!state) return;
     portENTER_CRITICAL(&s_lock);
+    if (!same(s.desired,state->token)) {
+        s.capture_vad_active=false;s.capture_end_us=0;++s.capture_revision;
+    } else if (s.utterance!=state->utterance_active) ++s.capture_revision;
     /* A speaker-only unprompted line keeps the session open for output; it
      * never grants pcm_permitted, which still follows audio_uplink_permitted. */
     s.active=state->audio_session_requested || state->proactive_active; s.utterance=state->utterance_active;
@@ -359,9 +370,12 @@ bool brain_secure_uplink(const bot_session_token_t *token) {
 void brain_secure_pcm(const bot_audio_pcm_t *frame) {
     if (!frame || !s_pcm || frame->sample_rate!=16000) return;
     bot_session_token_t token={frame->token.epoch,frame->token.session_id,frame->token.turn_id,frame->token.focus_generation};
-    if (!brain_secure_uplink(&token)) return;
     portENTER_CRITICAL(&s_lock);
-    bool permitted=s.pcm_permitted && same(token,s.desired);
+    bool permitted=s.authenticated && s.active && s.audio_allowed && s.pcm_permitted &&
+        s.phase==CAPTURING && same(token,s.desired) && same(token,s.remote);
+    /* Reserve before touching the queue so commit cannot observe an empty
+     * queue between permission check and enqueue. No RTOS call under s_lock. */
+    if (permitted) {++s.pcm_callbacks;++s.capture_revision;}
     portEXIT_CRITICAL(&s_lock);
     if (!permitted) return;
     for (size_t at=0; at<frame->sample_count;) {
@@ -372,18 +386,33 @@ void brain_secure_pcm(const bot_audio_pcm_t *frame) {
             portENTER_CRITICAL(&s_lock);
             if (same(token,s.desired)) {s_overflow_token=token;atomic_store(&s_overflow,true);}
             portEXIT_CRITICAL(&s_lock);
-            return;
+            break;
         }
         at+=n;
     }
+    portENTER_CRITICAL(&s_lock);--s.pcm_callbacks;++s.capture_revision;portEXIT_CRITICAL(&s_lock);
 }
 
 void brain_secure_audio_event(const bot_audio_event_t *event) {
-    if (!event || !s_playback_events || event->playback_source!=BOT_AUDIO_PLAYBACK_SESSION ||
-        (event->kind!=BOT_AUDIO_EVENT_PLAYBACK_STARTED && event->kind!=BOT_AUDIO_EVENT_PLAYBACK_DONE &&
-         event->kind!=BOT_AUDIO_EVENT_PLAYBACK_CANCELLED && event->kind!=BOT_AUDIO_EVENT_PLAYBACK_FAILED)) return;
+    if (!event) return;
     const bot_session_token_t token={event->token.epoch,event->token.session_id,
         event->token.turn_id,event->token.focus_generation};
+    if (event->kind==BOT_AUDIO_EVENT_VAD_STARTED || event->kind==BOT_AUDIO_EVENT_VAD_ENDED) {
+        /* Observe resumed speech before its queued runtime event is consumed.
+         * This cannot grant capture or uplink; it only defers audio.commit. */
+        portENTER_CRITICAL(&s_lock);
+        if (s.authenticated && s.active && s.phase==CAPTURING &&
+            same(token,s.desired) && same(token,s.remote)) {
+            s.capture_vad_active=event->kind==BOT_AUDIO_EVENT_VAD_STARTED;
+            if (!s.capture_vad_active) s.capture_end_us=event->observed_us;
+            ++s.capture_revision;
+        }
+        portEXIT_CRITICAL(&s_lock);
+        return;
+    }
+    if (!s_playback_events || event->playback_source!=BOT_AUDIO_PLAYBACK_SESSION ||
+        (event->kind!=BOT_AUDIO_EVENT_PLAYBACK_STARTED && event->kind!=BOT_AUDIO_EVENT_PLAYBACK_DONE &&
+         event->kind!=BOT_AUDIO_EVENT_PLAYBACK_CANCELLED && event->kind!=BOT_AUDIO_EVENT_PLAYBACK_FAILED)) return;
     portENTER_CRITICAL(&s_lock);
     bool current=event->playback_id && same(token,s.playback_token) &&
         (event->playback_id==s.playback_id || (!s.playback_id && s.phase==PLAYBACK_PENDING));
@@ -1002,7 +1031,9 @@ static void text_message(const char *data,size_t n) {
                 else if (cJSON_IsString(code) && !strcmp(code->valuestring,"parent_stop")) why=BOT_SESSION_END_PARENT_STOP;
                 else if (cJSON_IsString(code) && (!strcmp(code->valuestring,"memory_changed") ||
                          !strcmp(code->valuestring,"identity_revoked"))) why=BOT_SESSION_END_MEMORY_CHANGED;
-                fail_session_token("Server cancelled or expired the session",&token,why);
+                const bool exhausted=why==BOT_SESSION_END_EXPIRED && cJSON_IsString(code) &&
+                    !strcmp(code->valuestring,"asr_retry_exhausted");
+                fail_session_token_notice("Server cancelled or expired the session",&token,why,exhausted);
             }
         }
     } else if (!strcmp(kind,"error")) {
@@ -1808,6 +1839,7 @@ static void secure_task(void *unused) {
         } else if (state.phase==CAPTURING) {
             if (state.utterance) {heard=true;ending=false;if (!started_us) started_us=esp_timer_get_time();}
             else if (heard && !ending) {ending=true;ending_us=esp_timer_get_time();}
+            if (ending && state.capture_end_us>ending_us) ending_us=state.capture_end_us;
             pcm_frame_t packet;
             if (xQueueReceive(s_pcm,&packet,pdMS_TO_TICKS(20))==pdTRUE) {
                 portENTER_CRITICAL(&s_lock); bool allowed=s.authenticated&&s.active&&s.audio_allowed&&s.pcm_permitted&&s.phase==CAPTURING&&same(packet.token,s.desired)&&same(packet.token,s.remote);uint32_t seq=s.sequence,stream=s.stream;portEXIT_CRITICAL(&s_lock);
@@ -1837,8 +1869,13 @@ static void secure_task(void *unused) {
                 portENTER_CRITICAL(&s_lock);frames=s.sequence;portEXIT_CRITICAL(&s_lock);
                 snprintf(msg,sizeof(msg),"{\"v\":3,\"type\":\"request\",\"id\":\"%s\",\"method\":\"audio.commit\",\"payload\":{\"stream_id\":%lu,\"frames\":%lu,\"runtime\":%s,\"device_monotonic_ms\":%llu,\"vad_end_ms\":%llu}}",id,(unsigned long)state.stream,(unsigned long)frames,runtime,(unsigned long long)(esp_timer_get_time()/1000),(unsigned long long)(ending_us/1000));
                 portENTER_CRITICAL(&s_lock);
+                /* Re-check after queue/network waits. Both ends of a PCM
+                 * callback change the revision, so a previously empty queue
+                 * cannot be sealed while a producer is about to fill it. */
                 bool current=s.authenticated && s.active && s.phase==CAPTURING &&
-                    same(s.desired,state.remote) && same(s.remote,state.remote);
+                    same(s.desired,state.remote) && same(s.remote,state.remote) &&
+                    !s.utterance && !s.capture_vad_active && !s.pcm_callbacks &&
+                    s.capture_revision==state.capture_revision;
                 if (current) {
                     s.audio_allowed=false;s.progress_seq=0;s.commit_started_us=esp_timer_get_time();
                     snprintf(s.commit_id,sizeof(s.commit_id),"%s",id);s.phase=COMMITTED;

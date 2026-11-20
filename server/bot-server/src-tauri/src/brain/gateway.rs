@@ -76,18 +76,33 @@ impl TurnTask {
 }
 impl Drop for TurnTask { fn drop(&mut self) { self.0.abort(); } }
 
-struct OnlinePeer { id:String, devices:Arc<StdMutex<BTreeMap<String, usize>>> }
+struct OnlinePeer { id:String, devices:Arc<StdMutex<BTreeMap<String, usize>>>, brain:Arc<Brain> }
 impl OnlinePeer {
-    fn new(id:String, devices:Arc<StdMutex<BTreeMap<String, usize>>>) -> Self {
+    fn new(id:String, devices:Arc<StdMutex<BTreeMap<String, usize>>>, brain:Arc<Brain>) -> Self {
         if let Ok(mut entries)=devices.lock() { *entries.entry(id.clone()).or_default()+=1; }
-        Self {id,devices}
+        Self {id,devices,brain}
     }
 }
 impl Drop for OnlinePeer {
     fn drop(&mut self) {
-        if let Ok(mut entries)=self.devices.lock() {
-            if let Some(count)=entries.get_mut(&self.id) { *count-=1; if *count==0 {entries.remove(&self.id);} }
-        }
+        let state=json!({"device_id":self.id,"phase":"disconnected","cancellable":false});
+        let cleared=if let Ok(mut entries)=self.devices.lock() {
+            if let Some(count)=entries.get_mut(&self.id) {
+                *count-=1;
+                if *count==0 {
+                    entries.remove(&self.id);
+                    // Serialize cache cleanup with a replacement peer's
+                    // registration. It may publish activity as soon as new()
+                    // releases this same membership lock.
+                    if let Ok(mut states)=self.brain.device_states.lock() {
+                        states.insert(self.id.clone(),state.clone());true
+                    }else{false}
+                }else{false}
+            }else{false}
+        }else{false};
+        // Covers errors and task cancellation too. No external sink is called
+        // while either lock is held; status remains the authoritative snapshot.
+        if cleared {self.brain.emit("device.activity",None,state);}
     }
 }
 
@@ -218,6 +233,8 @@ struct Engagement {
     /// When the explicit wake opened the session; the device plays its own wake reply then.
     opened:Instant,
     output:Option<DeviceOutput>,
+    /// One spoken retry is enough; repeated noise must not keep the mic open.
+    input_failures:u8,
     /// An unprompted line's offer id: a speaker-only session that never takes input.
     proactive:Option<u32>,
 }
@@ -310,6 +327,11 @@ fn device_scene(output: &TurnOutput) -> Value {
 }
 
 impl Engagement {
+    fn failed_input_exhausted(&mut self,error:&str)->bool {
+        self.input_failures=if empty_input_error(error){self.input_failures.saturating_add(1)}else{0};
+        self.input_failures>=2
+    }
+
     fn check_token(&self, token:RuntimeToken) -> Result<(),String> {
         // The device advances epoch when it starts a new turn, while retaining
         // the session ID.  Reject rollback, but do not treat the new lease as a
@@ -476,7 +498,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
     let mut revoked=brain.credentials.subscribe();
     // Close the gap between callback authentication and subscribing to rotation.
     if !brain.credentials.authenticate(&device_id,&credential){return Err("device_credential_revoked".into());}
-    let _online_peer=OnlinePeer::new(device_id.clone(),online);
+    let _online_peer=OnlinePeer::new(device_id.clone(),online,Arc::clone(&brain));
     let volume_connection=uuid::Uuid::new_v4().simple().to_string();
     let _volume_peer=VolumePeer{brain:Arc::clone(&brain),device:device_id.clone(),connection:volume_connection.clone()};
     let mut cancellations=brain.cancellations();
@@ -804,6 +826,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                     let turn = active.take().expect("matching active turn");
                     match completed.result {
                         Ok(mut output)=>{
+                            if let Some(session)=engagement.as_mut(){session.input_failures=0;}
                             if engagement.as_ref().and_then(|e|e.output.as_ref()).is_some_and(|o|o.presentation) {
                                 let activation=engagement.as_ref().ok_or("explicit_session_required")?.conversation_id.clone();
                                 brain.emit("device.turn.completed",Some(&completed.turn_id),json!({"device_id":device_id,"transcript":output.transcript,
@@ -907,6 +930,21 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                             }
                         },
                         Err(error)=>{
+                            if engagement.as_mut().is_some_and(|session|session.failed_input_exhausted(&error)) {
+                                brain.emit("device.turn.failed",Some(&completed.turn_id),json!({"device_id":device_id,
+                                    "code":error.split(':').next().unwrap_or("turn_failed"),"spoken":false,"retry_exhausted":true}));
+                                if let Some(session)=&engagement {
+                                    brain.tasks.revoke_outputs(Some(&session.conversation_id))?;
+                                    brain.closing.clear(&session.conversation_id);
+                                }
+                                // A final session event retires the pending commit on the device.
+                                // A normal error response would arm yet another automatic follow-up.
+                                send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.expired",
+                                    "runtime":completed.token,"code":"asr_retry_exhausted"}).to_string())).await?;
+                                pending_reminder=None;delivery=None;playback=None;plain=None;display_result=None;
+                                context=None;first_speech=None;supplement=None;audio=None;engagement=None;
+                                continue;
+                            }
                             // Nothing of the answer was said yet: say an in-character line instead
                             // of a silent technical caption. The code stays in the journal.
                             let presentation=engagement.as_ref().and_then(|e|e.output.as_ref()).is_some_and(|o|o.presentation);
@@ -920,7 +958,11 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.cancelled",
                                         "runtime":completed.token,"code":"live_answer_interrupted"}).to_string())).await?;
                                 }
-                                delivery=None;playback=None;plain=None;display_result=None;
+                                delivery=None;playback=None;display_result=None;
+                                // The ACK's actual receipt has already drained its segment. A
+                                // replacement failure line uses the same negotiated PCM socket;
+                                // dropping it here would send unnegotiated WSS binary audio.
+                                if spoken.is_none(){plain=None;}
                             }
                             brain.emit("device.turn.failed",Some(&completed.turn_id),json!({"device_id":device_id,
                                 "code":error.split(':').next().unwrap_or("turn_failed"),"spoken":spoken.is_some()}));
@@ -1012,24 +1054,16 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     let mut response=json!({"conversation_id":conversation_id,"runtime":token});
                                     if let Some(options)=&output {
                                         response["output"]=options.confirmed();
-                                        if options.audio && options.live && !brain.acks.missing().is_empty() {
-                                            // Pre-synthesise the acknowledgement pool once per App run, one line
-                                            // at a time and only while no turn is using the voice.
-                                            let brain=Arc::clone(&brain);
-                                            tokio::spawn(async move {
-                                                for (index,text) in brain.acks.missing().into_iter().enumerate() {
-                                                    for _ in 0..240 { if !brain.foreground_busy() {break;} tokio::time::sleep(Duration::from_millis(500)).await; }
-                                                    let lane=if index==0 {"tts_first"} else {"tts"};
-                                                    match brain.models.call(lane,json!({"text":text,"voice":brain.models.voice()})).await {
-                                                        Ok(audio)=>brain.acks.insert(text,audio),
-                                                        Err(_)=>break,
-                                                    }
-                                                }
-                                            });
+                                        if options.audio && options.live {
+                                            // Publish the opening activation before spawning idle work;
+                                            // capture starts before Brain.active contains a turn.
+                                            brain.device_activity(&device_id,json!({"phase":"idle","conversation_id":conversation_id,
+                                                "turn_id":null,"cancellable":false,"runtime":token}));
+                                            brain.warm_acknowledgements().await;
                                         }
                                     }
                                     context=None;first_speech=None;supplement=None;
-                                    engagement=Some(Engagement{conversation_id:conversation_id.clone(),token,last_turn:None,last_user:Instant::now(),opened:Instant::now(),output,proactive});
+                                    engagement=Some(Engagement{conversation_id:conversation_id.clone(),token,last_turn:None,last_user:Instant::now(),opened:Instant::now(),output,input_failures:0,proactive});
                                     Ok(response)
                                 },
                                 "assistant.supplement"|"assistant.cancel"|"session.close"=>{
@@ -1293,6 +1327,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     let token=parse_runtime(&frame.payload)?;session.check_token(token)?;
                                     display_result=None;
                                     let mut candidate=None;
+                                    let mut input_error=None;
                                     let (text,wav)=if frame.method=="assistant.text"{
                                         if audio.is_some(){return Err("audio_capture_in_progress".into());}
                                         (Some(frame.payload.get("text").and_then(Value::as_str).ok_or("text_required")?.to_owned()),None)
@@ -1306,7 +1341,14 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         }
                                         let (mut capture,_)=audio.take().ok_or("audio_session_required")?;
                                         candidate=capture.candidate.take();
-                                        (None,Some(capture.wav_base64()?))
+                                        // A validated but too-short recording is an input
+                                        // failure, not a protocol failure. Route it through
+                                        // the same bounded retry/expiration as worker ASR.
+                                        let wav=match capture.wav_base64() {
+                                            Ok(wav)=>Some(wav),
+                                            Err(error)=>{input_error=Some(error);None},
+                                        };
+                                        (None,wav)
                                     };
                                     session.token=token;session.last_turn=Some(token.turn_id);session.last_user=Instant::now();
                                     let id=format!("{}-{}",session.conversation_id,token.turn_id);
@@ -1327,7 +1369,10 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         last_ack.is_none_or(|when|when.elapsed()>=Duration::from_secs(20));
                                     let task=tokio::spawn(async move {
                                         let started = Instant::now();
-                                        let result = turn_brain.turn_with(input, false, super::DeviceWork { output:live_output, candidate, supplement, acknowledge, context:shared_context, spoken_device:audio_requested && compact }).await;
+                                        let result = match input_error {
+                                            Some(error)=>Err(error),
+                                            None=>turn_brain.turn_with(input, false, super::DeviceWork { output:live_output, candidate, supplement, acknowledge, context:shared_context, spoken_device:audio_requested && compact }).await,
+                                        };
                                         let _ = tx.send(TurnUpdate::Completed(Box::new(Completed {
                                             id: request_id, turn_id: completion_id, token, compact, audio_requested,
                                             processing_time: started.elapsed(), result,
@@ -1359,7 +1404,6 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
     }
     if let Some(turn)=active.take(){turn.task.abort();}
     if let Some(session)=&engagement{let _=brain.tasks.revoke_outputs(Some(&session.conversation_id));}
-    brain.device_activity(&device_id,json!({"phase":"disconnected","cancellable":false}));
     let _=send(&mut socket, Message::Close(None)).await;
     Ok(())
 }
@@ -1381,12 +1425,12 @@ async fn finish_plain_input(transport:&mut plain_audio::PlainAudio,capture:&mut 
 
 fn parse_runtime(payload:&Value)->Result<RuntimeToken,String>{serde_json::from_value(payload.get("runtime").cloned().ok_or("runtime_token_required")?).map_err(|_|"runtime_token_invalid".into())}
 fn stream_id(payload:&Value)->Result<u32,String>{payload.get("stream_id").and_then(Value::as_u64).and_then(|v|u32::try_from(v).ok()).filter(|v|*v>0).ok_or("stream_id_invalid".into())}
+fn empty_input_error(error:&str)->bool {
+    matches!(error.split(':').next().unwrap_or("").trim(),"asr_no_speech"|"no_speech"|"audio_too_quiet"|"audio_too_short")
+}
 fn response_error(id: &str, error: &str) -> String {
     let reason = error.split(':').next().unwrap_or("request_failed");
-    let code = match reason {
-        "no_speech" | "audio_too_quiet" => "asr_no_speech",
-        other => other,
-    };
+    let code = if empty_input_error(error){"asr_no_speech"}else{reason};
     json!({"v":3,"type":"response","id":id,"ok":false,
         "error":{"code":code,"message":error.chars().take(500).collect::<String>()}}).to_string()
 }
@@ -1406,6 +1450,24 @@ async fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn last_peer_drop_clears_activity_on_every_exit() {
+        let dir=std::env::temp_dir().join(format!("xiaodai-peer-drop-{}",uuid::Uuid::new_v4()));
+        let brain=Brain::new(dir.clone(),None,Arc::new(|_|{})).unwrap();
+        let online=Arc::new(StdMutex::new(BTreeMap::new()));
+        let first=OnlinePeer::new("test-device".into(),Arc::clone(&online),Arc::clone(&brain));
+        let second=OnlinePeer::new("test-device".into(),Arc::clone(&online),Arc::clone(&brain));
+        brain.device_activity("test-device",json!({"phase":"listening","conversation_id":"active"}));
+        drop(first);
+        assert_eq!(brain.device_states.lock().unwrap()["test-device"]["conversation_id"],"active");
+        drop(second);
+        assert!(online.lock().unwrap().is_empty());
+        assert_eq!(brain.device_states.lock().unwrap()["test-device"]["phase"],"disconnected");
+        assert!(!super::super::acks::device_session_active(&brain.device_states.lock().unwrap()["test-device"]));
+        drop(brain);
+        let _=std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn only_transcripts_and_frozen_answers_carry_preview_text() {
@@ -1439,7 +1501,7 @@ mod tests {
 
     #[test]
     fn empty_or_quiet_recordings_use_the_device_retry_prompt() {
-        for reason in ["no_speech: empty transcription", "audio_too_quiet: low energy", "asr_no_speech"] {
+        for reason in ["no_speech: empty transcription", "audio_too_quiet: low energy", "audio_too_short: short recording", "asr_no_speech"] {
             let response: Value = serde_json::from_str(&response_error("r1", reason)).unwrap();
             assert_eq!(response["id"], "r1");
             assert_eq!(response["error"]["code"], "asr_no_speech");
@@ -1450,10 +1512,22 @@ mod tests {
     }
 
     #[test]
+    fn consecutive_empty_input_ends_after_one_retry_but_other_failures_reset_it() {
+        let token=RuntimeToken{epoch:7,session_id:12,turn_id:1,focus_generation:0};
+        let mut session=Engagement{conversation_id:"device-test".into(),token,opened:Instant::now(),
+            proactive:None,last_turn:None,last_user:Instant::now(),output:None,input_failures:0};
+        assert!(!session.failed_input_exhausted("no_speech: empty transcription"));
+        assert!(session.failed_input_exhausted("audio_too_quiet: low energy"));
+        assert!(!session.failed_input_exhausted("all_routes_unavailable"));
+        assert!(!session.failed_input_exhausted("asr_no_speech"));
+        assert!(session.failed_input_exhausted("audio_too_short: short recording"));
+    }
+
+    #[test]
     fn runtime_leases_advance_without_reopening_the_conversation() {
         let first = RuntimeToken { epoch: 7, session_id: 12, turn_id: 1, focus_generation: 0 };
         let mut session = Engagement { conversation_id: "device-test".into(), token: first, opened: Instant::now(), proactive: None,
-            last_turn: None, last_user: Instant::now(), output: None };
+            last_turn: None, last_user: Instant::now(), output: None, input_failures:0 };
         assert!(session.check_token(first).is_ok());
         session.last_turn = Some(1);
         assert!(session.check_token(first).is_err());
@@ -1474,7 +1548,7 @@ mod tests {
     fn silent_output_is_explicit_and_caption_respects_utf8_boundary() {
         let token = RuntimeToken { epoch: 7, session_id: 12, turn_id: 1, focus_generation: 0 };
         let mut session = Engagement { conversation_id: "device-test".into(), token, opened: Instant::now(), proactive: None,
-            last_turn: None, last_user: Instant::now(), output: None };
+            last_turn: None, last_user: Instant::now(), output: None, input_failures:0 };
         assert_eq!(device_turn_input(&session,"old".into(),Some("hello".into()),None).speak,Some(true));
         session.output=DeviceOutput::negotiate(&json!({"output":{"version":1,"audio":true,"cards":["text"]}})).unwrap();
         assert_eq!(device_turn_input(&session,"spoken".into(),Some("hello".into()),None).speak,Some(true));

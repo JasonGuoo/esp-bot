@@ -20,6 +20,8 @@ struct bot_runtime {
     bool has_acoustic_wake, has_link_state;
     bool revoking, identity_exhausted, waiting_for_approval, manual_sleep;
     bool reply_presented, remote_audio_done, presentation_done_pending;
+    bool reply_failed;
+    uint8_t failed_reply_count;
     bool overflow_fault, recovery_requested;
     bot_passive_cycle_t passive_cycle;
     bot_idle_expression_t idle_expression;
@@ -256,6 +258,8 @@ static void end_session(bot_runtime_t *runtime, uint32_t now_ms, session_end_rea
     runtime->reply_presented = false;
     runtime->remote_audio_done = false;
     runtime->presentation_done_pending = false;
+    runtime->reply_failed = false;
+    runtime->failed_reply_count = 0;
     advance_epoch(runtime);
     runtime->state.token.session_id = 0;
     runtime->state.token.turn_id = 0;
@@ -290,6 +294,8 @@ static bool begin_turn_with_intent(bot_runtime_t *runtime, uint32_t now_ms, bool
     runtime->reply_presented = false;
     runtime->remote_audio_done = false;
     runtime->presentation_done_pending = false;
+    runtime->reply_failed = false;
+    runtime->failed_reply_count = 0;
     if (runtime->state.token.turn_id == UINT32_MAX || !advance_epoch(runtime)) {
         runtime->identity_exhausted = true;
         end_session(runtime, now_ms, SESSION_FAULT);
@@ -350,6 +356,7 @@ static bool arm_followup(bot_runtime_t *runtime, uint32_t now_ms)
     runtime->response_playback_done = false;
     runtime->reply_presented = runtime->remote_audio_done = false;
     runtime->presentation_done_pending = false;
+    runtime->reply_failed = false;
     runtime->state.wait_stage = BOT_WAIT_NONE;
     runtime->waiting_for_approval = false;
     runtime->state.caption[0] = '\0';
@@ -370,6 +377,8 @@ static bool begin_session(bot_runtime_t *runtime, uint32_t now_ms)
     runtime->reply_presented = false;
     runtime->remote_audio_done = false;
     runtime->presentation_done_pending = false;
+    runtime->reply_failed = false;
+    runtime->failed_reply_count = 0;
     if (runtime->next_session_id == UINT32_MAX || !advance_epoch(runtime)) {
         runtime->identity_exhausted = true;
         end_session(runtime, now_ms, SESSION_FAULT);
@@ -1187,7 +1196,12 @@ static void handle_event(bot_runtime_t *runtime, const bot_event_t *event, uint3
         case BOT_SESSION_END_PARENT_STOP: strcpy(state->caption, "Mac 已停止本次互动"); break;
         case BOT_SESSION_END_MEMORY_CHANGED: strcpy(state->caption, "记忆已更新，请再问一次"); break;
         case BOT_SESSION_END_SERVICE_STOPPED: strcpy(state->caption, "Mac 服务已停止"); break;
-        case BOT_SESSION_END_EXPIRED: break; /* a goodbye or quiet expiry ends warmly, without a notice */
+        case BOT_SESSION_END_EXPIRED:
+            /* A bounded empty-input retry stops listening without another
+             * spoken prompt that could trigger the same room noise again. */
+            if (event->data.session_end.input_retry_exhausted)
+                strcpy(state->caption, "我先安静一会儿，需要时再叫我吧。");
+            break; /* a goodbye or ordinary quiet expiry stays silent */
         default: break;
         }
         break;
@@ -1317,6 +1331,7 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
             return BOT_COMMAND_REJECTED_INVALID;
         memset(state->caption, 0, sizeof(state->caption));
         memcpy(state->caption, command->data.caption, strlen(command->data.caption));
+        if (command->kind == BOT_COMMAND_FAILURE_CAPTION) runtime->reply_failed = true;
         if (command->kind == BOT_COMMAND_FAILURE_CAPTION && state->reading_token.session_id &&
             !token_matches(runtime, &state->reading_token, false))
             memcpy(state->reading_notice, state->caption, sizeof(state->reading_notice));
@@ -1363,6 +1378,8 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
     case BOT_COMMAND_PRESENTATION_DONE:
         if (state->utterance_active || state->followup_armed)
             return BOT_COMMAND_REJECTED_INVALID;
+        runtime->reply_failed = false;
+        runtime->failed_reply_count = 0;
         /* The transport and runtime consume separate queues. Its genuine
          * final receipt can arrive while our hardware DONE is still queued.
          * Retain that intent instead of losing it or opening capture early. */
@@ -1386,6 +1403,16 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
             state->reading_sequence = 0;
             state->reading_notice[0] = '\0';
             state->image_notice[0] = '\0';
+            runtime->reply_failed = false;
+            runtime->failed_reply_count = 0;
+        } else if (runtime->reply_failed && runtime->failed_reply_count) {
+            /* One automatic retry is enough when there was no usable answer.
+             * A second failure must not leave a noise-driven capture loop. */
+            memcpy(state->reading_notice, state->caption, sizeof(state->reading_notice));
+            end_session(runtime, now_ms, SESSION_INACTIVE);
+            if (!state->reading_token.session_id)
+                memcpy(state->caption, state->reading_notice, sizeof(state->caption));
+            break;
         } else if (state->reading_token.session_id &&
                    !token_matches(runtime, &state->reading_token, false)) {
             /* A failed follow-up while reading must not rearm the microphone
@@ -1404,7 +1431,14 @@ static bot_command_result_t handle_command(bot_runtime_t *runtime, const bot_com
         }
         /* Audio completion is a local event. This receipt closes a text-only
          * reply; a remote server cannot declare hardware playback completed. */
-        arm_followup(runtime, now_ms);
+        if (runtime->reply_failed) {
+            /* Both commands can be drained in one step. Keep the failure text
+             * visible after arm_followup clears the old turn's caption. */
+            memcpy(state->reading_notice, state->caption, sizeof(state->reading_notice));
+            runtime->failed_reply_count = 1;
+            if (arm_followup(runtime, now_ms))
+                memcpy(state->caption, state->reading_notice, sizeof(state->caption));
+        } else arm_followup(runtime, now_ms);
         break;
     case BOT_COMMAND_PROGRESS:
         if (state->utterance_active || state->conversation != BOT_CONVERSATION_THINKING)

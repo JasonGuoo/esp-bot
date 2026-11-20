@@ -187,6 +187,62 @@ static void test_processing_requires_server_ack(bool failed_followup)
     bot_runtime_destroy(runtime);
 }
 
+static void test_failed_first_turn_has_visible_bounded_retry(void)
+{
+    bot_runtime_config_t config = bot_runtime_default_config();
+    config.allow_audio_uplink = true;
+    bot_bus_t bus = {0};
+    bot_runtime_t *runtime = NULL;
+    bot_runtime_snapshot_t state;
+    assert(bot_runtime_create(&bus, &config, NULL, NULL, 1000, &runtime) == ESP_OK);
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_AUDIO_HEALTH,
+        .source=BOT_SOURCE_AUDIO,.observed_ms=1010,.data.health={.available=true}});
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_LINK_STATE,
+        .source=BOT_SOURCE_LINK,.observed_ms=1020,
+        .data.link={.connected=true,.authenticated=true,.encrypted=true}});
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,
+        .source=BOT_SOURCE_LOCAL_UI,.observed_ms=1030,.data.touch={.intentional=true}});
+    for (unsigned attempt=0;attempt<2;attempt++) {
+        bot_runtime_get_snapshot(runtime, &state);
+        const bot_session_token_t token=state.token;
+        const uint32_t now=1100+attempt*200;
+        post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_UTTERANCE_STARTED,
+            .source=BOT_SOURCE_AUDIO,.observed_ms=now,.token=token});
+        post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_UTTERANCE_ENDED,
+            .source=BOT_SOURCE_AUDIO,.observed_ms=now+10,.token=token});
+        bus.command=(bot_command_t){.kind=BOT_COMMAND_FAILURE_CAPTION,.token=token,
+            .received_ms=now+20,.data.caption="我没听清，再说一遍好吗？"};
+        bus.has_command=true;bot_runtime_step(runtime,now+20);
+        bus.command=(bot_command_t){.kind=BOT_COMMAND_REPLY_DONE,.token=token,.received_ms=now+30};
+        bus.has_command=true;bot_runtime_step(runtime,now+30);
+        bot_runtime_get_snapshot(runtime, &state);
+        assert(strcmp(state.caption,"我没听清，再说一遍好吗？")==0);
+        assert(!state.reading_token.session_id && !state.audio_uplink_permitted);
+        if (!attempt) assert(state.followup_armed && state.audio_session_requested);
+        else assert(!state.followup_armed && !state.audio_session_requested && !state.token.session_id);
+    }
+    /* An intentional new wake owns a fresh retry budget. */
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_TOUCH_WAKE,
+        .source=BOT_SOURCE_LOCAL_UI,.observed_ms=3000,.data.touch={.intentional=true}});
+    bot_runtime_get_snapshot(runtime, &state);
+    const bot_session_token_t token=state.token;
+    bus.command=(bot_command_t){.kind=BOT_COMMAND_FAILURE_CAPTION,.token=token,
+        .received_ms=3010,.data.caption="再说一遍好吗？"};
+    bus.has_command=true;bot_runtime_step(runtime,3010);
+    bus.command=(bot_command_t){.kind=BOT_COMMAND_REPLY_DONE,.token=token,.received_ms=3020};
+    bus.has_command=true;bot_runtime_step(runtime,3020);
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(state.followup_armed && state.audio_session_requested);
+    /* The server's independent empty-ASR budget also closes this exact token. */
+    post_event(&bus, runtime, (bot_event_t){.kind=BOT_EVENT_SESSION_END,
+        .source=BOT_SOURCE_SYSTEM,.observed_ms=3030,.token=state.token,
+        .data.session_end={.code=BOT_SESSION_END_EXPIRED,.input_retry_exhausted=true}});
+    bot_runtime_get_snapshot(runtime, &state);
+    assert(!state.token.session_id && !state.audio_session_requested && !state.followup_armed);
+    assert(strcmp(state.caption,"我先安静一会儿，需要时再叫我吧。")==0);
+    bot_runtime_destroy(runtime);
+}
+
 static void test_passive_sound_reactions(void)
 {
     bot_bus_t bus = {0};
@@ -1158,6 +1214,7 @@ int main(void)
     test_segment_emotion_is_honoured_while_speaking();
     test_processing_requires_server_ack(false);
     test_processing_requires_server_ack(true);
+    test_failed_first_turn_has_visible_bounded_retry();
     test_passive_sound_reactions();
     test_visible_person_reaction_does_not_start_a_session();
     test_conversation_expression_takes_priority_over_near_face();

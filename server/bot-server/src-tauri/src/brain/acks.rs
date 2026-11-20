@@ -1,8 +1,10 @@
 //! A varied acknowledgement pool, pre-synthesised in the reply voice and chosen
 //! by context, never repeating within the last few turns (review §4.2).
 
-use std::{collections::{HashMap, VecDeque}, sync::Mutex};
+use std::{collections::{HashMap, VecDeque}, sync::{Arc, Mutex, Weak, atomic::Ordering}, time::Duration};
 use serde_json::Value;
+use tokio::sync::watch;
+use super::Brain;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind { Thinking, Question, Story, Evening }
@@ -52,9 +54,77 @@ impl Acks {
     }
 }
 
+/// An open activation also covers capture, playback and the follow-up window.
+/// `foreground_busy` alone only sees admitted ASR/inference turns.
+pub(super) fn device_session_active(state:&Value)->bool {
+    state.get("conversation_id").and_then(Value::as_str).is_some()
+}
+
+impl Brain {
+    /// One cache job per Brain, owned by service.stop and never by a peer.
+    pub(super) async fn warm_acknowledgements(self:&Arc<Self>) {
+        let mut job=self.ack_warmup.lock().await;
+        if job.as_ref().is_some_and(|task|!task.is_finished()) || self.acks.missing().is_empty() {return;}
+        let foreground=self.foreground_generation.subscribe();
+        let generation=self.models.generation();
+        if !self.accepting.load(Ordering::Acquire) {return;}
+        *job=Some(tokio::spawn(warm_pool(Arc::downgrade(self),foreground,generation)));
+    }
+
+    fn ack_warmup_busy(&self)->bool {
+        self.foreground_busy() || self.device_states.lock()
+            .map(|states|states.values().any(device_session_active)).unwrap_or(true)
+    }
+}
+
+async fn warm_pool(brain:Weak<Brain>,mut foreground:watch::Receiver<u64>,worker_generation:u64) {
+    loop {
+        // Waiting has no deadline that could force cache work into a live turn.
+        // Keep no strong Brain reference while idle, and resume after it clears.
+        tokio::select! {
+            biased;
+            changed=foreground.changed()=>if changed.is_err(){return;},
+            _=tokio::time::sleep(Duration::from_millis(500))=>{},
+        }
+        let Some(brain)=brain.upgrade() else{return;};
+        if !brain.accepting.load(Ordering::Acquire) || brain.models.generation()!=worker_generation {return;}
+        let generation=*foreground.borrow_and_update();
+        if brain.ack_warmup_busy() {continue;}
+        let Some(text)=brain.acks.missing().into_iter().next() else{return;};
+        let result=tokio::select! {
+            biased;
+            changed=foreground.changed()=>{
+                if changed.is_err(){return;}
+                // Dropping this exchange stops only its own child process.
+                None
+            },
+            result=brain.models.tts_if_idle(text,worker_generation)=>Some(result),
+        };
+        match result {
+            None=>continue,
+            Some(Ok(audio))=>{
+                if !brain.accepting.load(Ordering::Acquire) || brain.models.generation()!=worker_generation {return;}
+                if *foreground.borrow()!=generation || brain.ack_warmup_busy() {continue;}
+                brain.acks.insert(text,audio);
+            },
+            Some(Err(code)) if code=="local_worker_lane_busy"=>continue,
+            Some(Err(_))=>return,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_open_device_activation_is_busy_even_between_turns() {
+        assert!(device_session_active(&serde_json::json!({"phase":"idle","conversation_id":"device-a"})));
+        assert!(device_session_active(&serde_json::json!({"phase":"listening","conversation_id":"device-a"})));
+        assert!(device_session_active(&serde_json::json!({"phase":"speaking","conversation_id":"device-a"})));
+        assert!(!device_session_active(&serde_json::json!({"phase":"idle","conversation_id":null})));
+        assert!(!device_session_active(&serde_json::json!({"phase":"disconnected"})));
+    }
 
     #[test]
     fn acks_vary_by_context_and_never_repeat_back_to_back() {
