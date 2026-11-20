@@ -449,7 +449,7 @@ impl<'a> LiveSpeech<'a> {
         let mut segments=self.spoken.clone();
         segments.push((apology.to_owned(),"shy"));
         let text=segments.iter().map(|s|s.0.as_str()).collect::<String>();
-        let structured=json!({"speech":text,"expression":segments[0].1,"cards":[],"outcome":"answered","effect":"none",
+        let structured=json!({"speech":text,"expression":segments[0].1,"cards":[],"outcome":"partial","effect":"none",
             "presentation":{"segments":segments.iter().map(|(s,e)|json!({"speech":s,"expression":e,"visual":{"kind":"none"},"visual_required":false})).collect::<Vec<_>>()}});
         let summary=json!({"engine":PROVIDER_ID,"outcome":"partial","reason":reason,"sentences":self.sent});
         let reply=HarnessReply{text,provider_id:PROVIDER_ID.into(),model_id:String::new(),session_id:String::new(),
@@ -622,13 +622,17 @@ impl Brain {
             self.fast.record(json!({"engine":PROVIDER_ID,"outcome":"escalated","reason":"core_requested"}));
             return live.escalate("core_requested",turn_id,&audio);
         }
-        let mut summary = summary(&timings, "answered");
+        let (segments,limited) = bounded_tagged_segments(&sentences, &expressions, &text,
+            self.config.presentation.max_segments, self.config.presentation.max_segment_chars, live.sent);
+        let text=if limited {segments.iter().map(|s|s.0.as_str()).collect::<String>()} else {text};
+        let outcome=if limited {"partial"} else {"answered"};
+        let mut summary = summary(&timings, outcome);
         summary["sentences"] = json!(sentences.len());
         summary["tts_prefetched"] = json!(audio.len());
+        if limited {summary["reason"]=json!("presentation_limit");}
         self.fast.record(summary.clone());
-        let segments = tagged_segments(&sentences, &expressions, &text, self.config.presentation.max_segments, self.config.presentation.max_segment_chars);
         let expression = segments.first().map(|s| s.1).unwrap_or_else(|| super::emotion::from_keywords(&text));
-        let structured = json!({"speech":text,"expression":expression,"cards":[],"outcome":"answered","effect":"none",
+        let structured = json!({"speech":text,"expression":expression,"cards":[],"outcome":outcome,"effect":"none",
             "presentation":{"segments":segments.iter().map(|(s,e)| json!({"speech":s,"expression":e,"visual":{"kind":"none"},"visual_required":false})).collect::<Vec<_>>()}});
         let reply = HarnessReply { text, provider_id: PROVIDER_ID.into(), model_id: timings.route.clone().unwrap_or_default(),
             session_id: core.codex().thread_id().filter(|_| timings.engine.as_deref() == Some("codex")).unwrap_or_default(),
@@ -646,6 +650,17 @@ pub fn segment_sentences(sentences: &[String], full: &str, max_segments: usize, 
 /// As [`segment_sentences`], carrying each sentence's expression; a merged segment
 /// keeps the expression of the sentence it starts with.
 pub(super) fn tagged_segments(sentences: &[String], expressions: &[&'static str], full: &str, max_segments: usize, max_chars: usize) -> Vec<(String, &'static str)> {
+    bounded_tagged_segments(sentences,expressions,full,max_segments,max_chars,0).0
+}
+
+const SEGMENT_LIMIT_NOTICE: &str = "这段还没讲完，你可以让我分段接着讲。";
+
+/// Preserve the already-published live prefix verbatim. Only unsent adjacent
+/// pieces with the same expression can be combined to recover free capacity.
+/// If the bounded plan still cannot contain the answer, end one contiguous
+/// prefix with an explicit continuation notice and report `partial`.
+fn bounded_tagged_segments(sentences: &[String], expressions: &[&'static str], full: &str, max_segments: usize, max_chars: usize,
+                          published:usize) -> (Vec<(String, &'static str)>,bool) {
     let mut parts: Vec<(String, &'static str)> = sentences.iter().enumerate()
         .map(|(i, s)| (s.trim().to_owned(), expressions.get(i).copied().unwrap_or_else(|| super::emotion::from_keywords(s))))
         .filter(|(s, _)| !s.is_empty()).collect();
@@ -655,16 +670,26 @@ pub(super) fn tagged_segments(sentences: &[String], expressions: &[&'static str]
     let mut out: Vec<(String, &'static str)> = Vec::new();
     for (part, expression) in parts {
         for piece in super::presentation::split_speech(&part, max_chars) {
-            if out.len() >= max_segments.max(1) {
-                let last = &mut out.last_mut().expect("non-empty").0;
-                if last.chars().count() + piece.chars().count() <= max_chars { last.push_str(&piece); continue; }
-                // Over both limits: stop rather than exceed the frozen plan bounds.
-                break;
-            }
             out.push((piece, expression));
         }
     }
-    out
+    let capacity=max_segments.max(1);
+    // LiveSpeech::ready reserves at least one unsent segment for finalisation.
+    let fixed=published.min(capacity.saturating_sub(1));
+    while out.len()>capacity {
+        let pair=(fixed..out.len().saturating_sub(1)).rev().find(|&i|out[i].1==out[i+1].1
+            && out[i].0.chars().count()+out[i+1].0.chars().count()<=max_chars);
+        let Some(i)=pair else {break};
+        let next=out.remove(i+1);out[i].0.push_str(&next.0);
+    }
+    let limited=out.len()>capacity;
+    if limited {
+        out.truncate(capacity);
+        let last=out.last_mut().expect("positive presentation capacity");
+        if last.0.chars().count()+SEGMENT_LIMIT_NOTICE.chars().count()<=max_chars {last.0.push_str(SEGMENT_LIMIT_NOTICE);}
+        else {last.0=SEGMENT_LIMIT_NOTICE.into();last.1="curious";}
+    }
+    (out,limited)
 }
 
 #[cfg(test)]
@@ -796,6 +821,7 @@ mod tests {
         let audio=HashMap::from([("小猫找到了帽子。".to_string(),wav.clone())]);
         let Ok(FastResult::Reply(partial))=speech.escalate("core_timeout","example",&audio) else {panic!("graceful partial reply")};
         let segments=partial.reply.structured.as_ref().unwrap()["presentation"]["segments"].as_array().unwrap().clone();
+        assert_eq!(partial.reply.structured.as_ref().unwrap()["outcome"],"partial","a truncated reply is not a completed answer");
         assert_eq!(segments.len(),4);
         assert_eq!(segments[0]["speech"],"小猫找到了帽子。");
         assert_eq!(segments[0]["expression"],"excited");
@@ -872,5 +898,28 @@ mod tests {
         assert_eq!(tagged, vec![("你好！".to_string(), "excited"), ("我是小呆。".to_string(), "shy")]);
         let untagged = tagged_segments(&["哈哈，好好笑。".to_string()], &[], "", 16, 200);
         assert_eq!(untagged[0].1, "laughing", "keyword fallback");
+    }
+
+    #[test]
+    fn unsent_segments_pack_without_changing_the_live_prefix() {
+        let sentences=vec!["已播的第一句。".into(),"后面的第二句。".into(),"后面的第三句。".into(),"最后一句。".into()];
+        let (parts,limited)=bounded_tagged_segments(&sentences,&["gentle","happy","happy","happy"],"",3,40,1);
+        assert!(!limited);
+        assert_eq!(parts[0],(sentences[0].clone(),"gentle"));
+        assert_eq!(parts.iter().map(|s|s.0.as_str()).collect::<String>(),sentences.concat());
+        assert!(parts.len()<=3 && parts.iter().all(|s|s.0.chars().count()<=40));
+    }
+
+    #[test]
+    fn over_capacity_reply_keeps_a_contiguous_prefix_and_discloses_the_tail() {
+        let sentences=vec!["已经播过。".into(),format!("{}。","中".repeat(39)),format!("{}。","后".repeat(39)),"不能跳过中间直接播这句。".into()];
+        let (parts,limited)=bounded_tagged_segments(&sentences,&["happy";4],"",2,40,1);
+        assert!(limited);
+        assert_eq!(parts[0].0,sentences[0]);
+        assert_eq!(parts[1].0,SEGMENT_LIMIT_NOTICE);
+        assert!(parts.iter().all(|s|s.0.chars().count()<=40));
+        let different=vec!["第二句。".into(),"第三句。".into(),"第四句。".into()];
+        let (_,limited)=bounded_tagged_segments(&different,&["sad","happy","curious"],"",2,40,0);
+        assert!(limited,"different frozen expressions are not silently merged");
     }
 }

@@ -126,6 +126,29 @@ async fn first_route_wins_when_fast_and_second_never_starts() {
 }
 
 #[tokio::test]
+async fn truncated_http_answers_are_not_reported_complete() {
+    for reason in [None, Some("length"), Some("content_filter"), Some("aborted"), Some("insufficient_system_resource")] {
+        let mut chunks = vec![content("已说完的第一句。后面还没")];
+        if let Some(reason) = reason {
+            chunks.push(format!("data: {}\n\n", serde_json::json!({"choices":[{"delta":{},"finish_reason":reason}]})));
+            chunks.push("data: [DONE]\n\n".into());
+        }
+        let (a, _) = spawn_mock(Mock { status:200, delay_ms:0, chunks, chunk_delay_ms:0 }).await;
+        let evs = collect(&core(vec![route("a", &a)], 1000), "hi").await;
+        assert!(matches!(evs.last(), Some(Event::Error { .. })), "{reason:?}: {evs:?}");
+        assert!(!evs.iter().any(|e| matches!(e, Event::Done { .. })), "{reason:?}");
+    }
+}
+
+#[tokio::test]
+async fn natural_finish_keeps_a_last_delta_even_without_a_done_marker() {
+    let chunks = vec![content("你好！"), format!("data: {}\n\n", serde_json::json!({"choices":[{"delta":{"content":"完整结尾。"},"finish_reason":"stop"}]}))];
+    let (a, _) = spawn_mock(Mock { status:200, delay_ms:0, chunks, chunk_delay_ms:0 }).await;
+    let evs = collect(&core(vec![route("a", &a)], 1000), "hi").await;
+    assert!(matches!(evs.last(), Some(Event::Done { text, .. }) if text == "你好！完整结尾。"), "{evs:?}");
+}
+
+#[tokio::test]
 async fn fails_over_to_second_route_when_first_is_slow() {
     let (a, sa) = spawn_mock(Mock { delay_ms: 3000, ..fast(&["慢。"]) }).await;
     let (b, _) = spawn_mock(fast(&["快。"])).await;

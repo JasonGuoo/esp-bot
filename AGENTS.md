@@ -1,5 +1,11 @@
 # esp-bot development instructions
 
+## Voice interaction review — 2026-11-20
+
+- Read the [latest voice interaction review](docs/review-voice-interaction-2026-11-20.md) before changing capture sealing, core stream completion, live ACK transport or retry behavior. It records fixes against `4ae184b`, targeted host runtime checks, and the remaining Mac/S31 acceptance matrix. Do not treat the previous day's hardware runs as validation of these new changes.
+- Preserve token-bound capture sealing, immutable delivered speech, explicit partial outcomes, one automatic empty-input retry, and a single cancellable idle-only ACK warmup. A warmup must not occupy the first-sentence TTS lane or resume after service Stop.
+- Passive wake is still continuous MultiNet7 with the complete phrase; dedicated WakeNet and reliable acoustic barge-in remain unvalidated. Preserve owner volume and the default half-duplex path; do not claim that source review or a threshold adjustment establishes wake accuracy.
+
 ## Current Mac and device behavior — 2026-11-18
 
 - Managed model keys come only from the current App session or its launch environment. Do not read, migrate, overwrite, or remove legacy provider Keychain items. This does not change device pairing or signing.

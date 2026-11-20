@@ -114,6 +114,11 @@ async fn run(
             Chunk::Reasoning(n) => {
                 let _ = tx.send((idx, AttemptMsg::Reasoning(n)));
             }
+            Chunk::Finished { reason, content } => {
+                if reason != "stop" { return Some(Err(format!("provider: incomplete response ({})", truncate(&reason, 80)))); }
+                if let Some(s) = content { let _ = tx.send((idx, AttemptMsg::Token(s))); }
+                return Some(Ok(()));
+            }
             Chunk::Done => return Some(Ok(())),
             Chunk::Error(m) => return Some(Err(format!("provider: {m}"))),
             Chunk::Ignore => {}
@@ -133,5 +138,7 @@ async fn run(
             return r;
         }
     }
-    Ok(())
+    // A clean TCP EOF can still cut off an SSE answer. Require a semantic
+    // finish (`stop`) or the provider's explicit [DONE] marker.
+    Err("stream ended without completion".into())
 }

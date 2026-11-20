@@ -148,27 +148,50 @@ async fn fake_server(io: tokio::io::DuplexStream, opts: FakeOpts, log: Arc<FakeL
                         log2.order.lock().unwrap().push(format!("completed:{turn}:{status}"));
                         let mut r = running.lock().unwrap();
                         if r.get(&tid) == Some(&turn) { r.remove(&tid); }
-                        note("turn/completed", json!({ "turn": { "id": turn, "status": status, "items": [] } }))
+                        // The actual app-server terminal uses nested turn.id,
+                        // not the top-level turnId carried by item events.
+                        let mut event = note("turn/completed", json!({ "turn": { "id": turn, "status": status, "items": [] } }));
+                        event["params"].as_object_mut().unwrap().remove("turnId");
+                        event
                     };
                     out.send(note("turn/started", json!({}))).ok();
                     out.send(note("item/started", json!({ "item": { "type": "userMessage", "id": "u0" } }))).ok();
                     let luna = log2.luna.load(Ordering::SeqCst);
                     let text = match luna { 1 => "fail".to_string(), 2 => "slow".to_string(), _ => text };
                     match text.as_str() {
-                        "steerable" => {
+                        "steerable" | "steerable-final-only" => {
+                            let mut old_text = String::new();
                             for i in 0..300 {
                                 if ints.lock().unwrap().contains(&turn) { out.send(done("interrupted")).ok(); return; }
                                 let s = steers.lock().unwrap().get(&turn).cloned().unwrap_or_default();
                                 if !s.is_empty() {
                                     // The pre-steer answer runs on briefly, then the steer is consumed.
                                     out.send(delta("旧尾巴。")).ok();
+                                    old_text.push_str("旧尾巴。");
                                     tokio::time::sleep(Duration::from_millis(10)).await;
                                     out.send(note("item/started", json!({ "item": { "type": "userMessage", "id": "u1" } }))).ok();
-                                    out.send(delta(&format!("收到：{}。", s.join("+")))).ok();
+                                    let old_final = note("item/completed", json!({ "item": { "type": "agentMessage", "id": "m1", "text": old_text } }));
+                                    out.send(old_final.clone()).ok();
+                                    if text == "steerable-final-only" {
+                                        out.send(note("item/started", json!({ "item": { "type": "agentMessage", "id": "m2", "text": "" } }))).ok();
+                                        out.send(note("item/completed", json!({ "item": { "type": "agentMessage", "id": "m2", "text": format!("收到：{}。", s.join("+")) } }))).ok();
+                                    } else {
+                                        // A continuing item can expose only its new prefix as
+                                        // deltas; completed must recover only the new tail.
+                                        let next = format!("收到：{}", s.join("+"));
+                                        out.send(delta(&next)).ok();
+                                        out.send(old_final).ok(); // repeated old snapshot cannot fail the new owner
+                                        let final_text = format!("{old_text}{next}。");
+                                        let final_item = note("item/completed", json!({ "item": { "type": "agentMessage", "id": "m1", "text": final_text } }));
+                                        out.send(final_item.clone()).ok();
+                                        out.send(final_item).ok();
+                                    }
                                     out.send(done("completed")).ok();
                                     return;
                                 }
-                                out.send(delta(&format!("旧答案第{i}句。"))).ok();
+                                let next = format!("旧答案第{i}句。");
+                                old_text.push_str(&next);
+                                out.send(delta(&next)).ok();
                                 tokio::time::sleep(Duration::from_millis(20)).await;
                             }
                             out.send(done("completed")).ok();
@@ -184,6 +207,19 @@ async fn fake_server(io: tokio::io::DuplexStream, opts: FakeOpts, log: Arc<FakeL
                                 tokio::time::sleep(Duration::from_millis(20)).await;
                                 out.send(delta(d)).ok();
                             }
+                            out.send(done("completed")).ok();
+                        }
+                        "final-only" | "missing-tail" => {
+                            out.send(note("item/started", json!({"item":{"type":"agentMessage","id":"m1","text":""}}))).ok();
+                            if text == "missing-tail" { out.send(delta("你好！")).ok(); }
+                            let final_item = note("item/completed", json!({"item":{"type":"agentMessage","id":"m1","text":"你好！完整的结尾。"}}));
+                            out.send(final_item.clone()).ok();
+                            out.send(final_item).ok(); // repeated snapshot must not duplicate speech
+                            out.send(done("completed")).ok();
+                        }
+                        "stale-terminal" => {
+                            out.send(json!({"method":"turn/completed","params":{"threadId":tid,"turn":{"id":"older-turn","status":"completed","items":[]}}})).ok();
+                            out.send(delta("这是新问题的完整回答。")).ok();
                             out.send(done("completed")).ok();
                         }
                         "approval" => {
@@ -363,6 +399,26 @@ async fn codex_streams_sentences_on_the_warm_thread() {
     assert_eq!(last["sandboxPolicy"]["writableRoots"][0], ROOT);
     assert_eq!(last["sandboxPolicy"]["networkAccess"], true);
     assert_eq!(log.methods.lock().unwrap().iter().filter(|m| *m == "thread/start").count(), 1);
+}
+
+#[tokio::test]
+async fn completed_agent_item_recovers_only_the_missing_text() {
+    let (c, _) = core(EngineMode::CodexOnly, OK, None, 1000);
+    c.warmup_codex().await;
+    for request in ["final-only", "missing-tail"] {
+        let evs = collect(&c, request).await;
+        let Some(Event::Done { text, .. }) = evs.last() else { panic!("{evs:?}") };
+        assert_eq!(text, "你好！完整的结尾。", "{request}");
+        assert_eq!(sentences(&evs), vec!["你好！", "完整的结尾。"]);
+    }
+}
+
+#[tokio::test]
+async fn old_nested_turn_completion_cannot_finish_the_current_question() {
+    let (c, _) = core(EngineMode::CodexOnly, OK, None, 1000);
+    c.warmup_codex().await;
+    let evs = collect(&c, "stale-terminal").await;
+    assert!(matches!(evs.last(), Some(Event::Done { text, .. }) if text == "这是新问题的完整回答。"), "{evs:?}");
 }
 
 #[tokio::test]
@@ -591,7 +647,7 @@ async fn followup_steers_the_running_turn_and_takes_over_its_output() {
     let Event::Cancelled { timings, .. } = finish(&mut t1).await else { panic!("t1 should end Cancelled") };
     assert!(timings.superseded);
     let Event::Done { text, timings } = finish(&mut t2).await else { panic!("t2 should finish") };
-    assert_eq!(text, "收到：改成讲狗。", "only the post-steer answer is spoken (no stale tail)");
+    assert_eq!(text, "收到：改成讲狗。", "recover the same item's new final tail without replaying an old snapshot");
     assert_eq!(timings.engine.as_deref(), Some("codex"));
     let sp = log.steer_params.lock().unwrap().clone();
     assert_eq!(sp.len(), 1);
@@ -604,6 +660,20 @@ async fn followup_steers_the_running_turn_and_takes_over_its_output() {
     assert_eq!(turn_ids.len(), 2, "prime + one user turn; the follow-up started no new turn");
     let s = c.codex().last_steer().expect("steer stats");
     assert!(s.ok && s.ack_ms < 500.0 && s.first_token_ms.is_some(), "{s:?}");
+}
+
+#[tokio::test]
+async fn steered_final_only_item_does_not_replay_the_previous_item() {
+    let (c, log) = core(EngineMode::CodexOnly, OK, None, 1000);
+    c.warmup_codex().await;
+    let mut previous = c.respond("steerable-final-only", CancellationToken::new());
+    until_sentence(&mut previous).await;
+    let mut next = c.respond("讲狗", CancellationToken::new());
+    assert!(matches!(finish(&mut previous).await, Event::Cancelled { .. }));
+    let Event::Done { text, .. } = finish(&mut next).await else { panic!("steered final-only answer should finish") };
+    assert_eq!(text, "收到：讲狗。");
+    assert_eq!(count(&log, "turn/steer"), 1);
+    assert_eq!(count(&log, "turn/interrupt"), 0);
 }
 
 #[tokio::test]

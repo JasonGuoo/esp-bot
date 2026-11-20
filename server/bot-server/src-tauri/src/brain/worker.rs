@@ -156,6 +156,11 @@ impl ModelWorker {
         self.exchange("transcribe",json!({"wav_base64":wav,"language":"zh"}),self.generation(),true).await
     }
 
+    /// Cache preparation never queues behind speech or uses its priority lane.
+    pub(super) async fn tts_if_idle(&self, text:&str, generation:u64) -> Result<Value,String> {
+        self.exchange("tts",json!({"text":text,"voice":self.voice()}),generation,true).await
+    }
+
     async fn exchange(&self, op:&str, payload:Value, generation:u64, speculative:bool) -> Result<Value,String> {
         let mut cancelled = self.cancel.subscribe();
         if *cancelled.borrow() != generation { return Err("cancelled".into()); }
@@ -268,6 +273,16 @@ async fn kill_process(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn background_tts_yields_an_occupied_lane_without_queueing() {
+        let worker=ModelWorker::new(ModelWorkerConfig::default(),PathBuf::new());
+        let _speech=worker.lane("tts").lock().await;
+        // The occupied lane makes this entirely model/process free.
+        let result=timeout(Duration::from_millis(50),worker.tts_if_idle("cached acknowledgement",worker.generation()))
+            .await.expect("background synthesis must not queue behind foreground speech");
+        assert_eq!(result.unwrap_err(),"local_worker_lane_busy");
+    }
 
     #[test]
     fn kokoro_is_used_only_when_installed_and_the_first_sentence_has_its_own_lane() {

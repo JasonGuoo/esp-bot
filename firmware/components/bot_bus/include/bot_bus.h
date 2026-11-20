@@ -100,7 +100,7 @@ typedef struct {
         struct { bot_wake_status_t status; } wake_status;
         struct { bool clock_valid; bool night; uint8_t local_hour; } night;
         struct { uint32_t code; } fault;
-        struct { bot_session_end_code_t code; } session_end;
+        struct { bot_session_end_code_t code; bool input_retry_exhausted; } session_end;
         struct { bool direction_valid, loud, speech; float azimuth_deg, quality; } sound;
         bot_voice_settings_t voice_settings;
         struct { bool ready; } capture;

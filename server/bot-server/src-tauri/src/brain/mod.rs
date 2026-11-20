@@ -185,6 +185,7 @@ pub struct Brain {
     device_volumes: device_volume::DeviceVolumes,
     progress_audio: Mutex<HashMap<String,Value>>,
     acks: acks::Acks,
+    ack_warmup: Mutex<Option<tokio::task::JoinHandle<()>>>,
     naming: StdMutex<HashMap<String,memory_text::Named>>,
     pub(crate) closing: flow::Closing,
     failure_audio: Mutex<HashMap<String,Value>>,
@@ -233,7 +234,7 @@ impl Brain {
         let tasks = tasks::TaskService::open(runtime_dir.join("tasks"), config.tasks.clone(), Arc::clone(&sink))?;
         let graphiti=Arc::new(memory::graphiti::GraphitiClient::new(&config.memory.graphiti,graphiti_script));
         let brain = Arc::new(Self { models: ModelWorker::new(config.models.clone(), config_dir.clone()), config, config_dir,
-            harness, fast, memory, credentials, sink, turn_gate:AsyncRwLock::new(()), active:StdMutex::new(HashMap::new()), identity_jobs:StdMutex::new(HashMap::new()), tasks, device_states:StdMutex::new(HashMap::new()), device_volumes:Default::default(), progress_audio:Mutex::new(HashMap::new()), acks:Default::default(), naming:StdMutex::new(HashMap::new()), closing:Default::default(), failure_audio:Mutex::new(HashMap::new()), latency:Default::default(), graphiti, accepting:AtomicBool::new(false),
+            harness, fast, memory, credentials, sink, turn_gate:AsyncRwLock::new(()), active:StdMutex::new(HashMap::new()), identity_jobs:StdMutex::new(HashMap::new()), tasks, device_states:StdMutex::new(HashMap::new()), device_volumes:Default::default(), progress_audio:Mutex::new(HashMap::new()), acks:Default::default(), ack_warmup:Mutex::new(None), naming:StdMutex::new(HashMap::new()), closing:Default::default(), failure_audio:Mutex::new(HashMap::new()), latency:Default::default(), graphiti, accepting:AtomicBool::new(false),
             cancellation_events, progress_events, foreground_generation, background:Mutex::new(None), memory_script, gateway:Mutex::new(None) });
         brain.install_task_handlers()?;
         Ok(brain)
@@ -274,6 +275,8 @@ impl Brain {
 
     pub async fn stop(&self) -> Result<(), String> {
         self.accepting.store(false,Ordering::Release);
+        let warmup={self.ack_warmup.lock().await.take()};
+        if let Some(task)=warmup {task.abort();let _=task.await;}
         if let Some(task)=self.background.lock().await.take() {task.abort();}
         let cancellation = self.cancel(None).await;
         let _turn = self.turn_gate.write().await;
@@ -306,9 +309,16 @@ impl Brain {
 
     pub(crate) fn device_activity(&self, device_id:&str, mut state:Value) {
         state["device_id"]=json!(device_id);
+        let mut opened=false;
         let changed=if let Ok(mut states)=self.device_states.lock(){
-            if states.get(device_id)==Some(&state){false}else{states.insert(device_id.into(),state.clone());true}
+            if states.get(device_id)==Some(&state){false}else{
+                opened=acks::device_session_active(&state)
+                    && !states.get(device_id).is_some_and(acks::device_session_active);
+                states.insert(device_id.into(),state.clone());true}
         }else{false};
+        // Capture and playback belong to the activation too, before/after a
+        // Brain turn exists. Publish membership before preempting idle work.
+        if opened {self.foreground_generation.send_modify(|value|*value=value.wrapping_add(1));}
         if changed{self.emit("device.activity",state["turn_id"].as_str(),state.clone());}
     }
 
@@ -373,7 +383,6 @@ impl Brain {
         if input.wav_base64.as_ref().is_some_and(|v|v.len() > 1_300_000) { return Err("audio_input_limit_30_seconds".into()); }
         let _gate = self.turn_gate.read().await;
         if !self.accepting.load(Ordering::Acquire) { return Err("brain_stopping".into()); }
-        self.foreground_generation.send_modify(|value|*value=value.wrapping_add(1));
         let (cancelled, mut cancellation) = watch::channel(false);
         {
             let mut active=self.active.lock().map_err(|_|"brain_state_poisoned")?;
@@ -382,6 +391,7 @@ impl Brain {
             if active.values().any(|a|a.conversation_id==input.conversation_id) {return Err("activation_busy".into());}
             active.insert(input.turn_id.clone(),ActiveTurn {id:input.turn_id.clone(),conversation_id:input.conversation_id.clone(),cancelled});
         }
+        self.foreground_generation.send_modify(|value|*value=value.wrapping_add(1));
         let mut lease = TurnLease {brain:self,id:input.turn_id.clone(),completed:false};
         let started = Instant::now();
         self.emit("turn.started", Some(&input.turn_id), json!({"input":if input.text.is_some(){"text"}else{"audio"}}));

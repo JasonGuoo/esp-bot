@@ -490,6 +490,8 @@ struct Active {
     steer_sent_at: Arc<Mutex<Option<Instant>>>,
     /// The turn completed while a steer was still pending (its text was never answered).
     steer_unanswered: Arc<AtomicBool>,
+    /// Reject handover after a terminal while cleanup still owns the subscription.
+    finishing: Arc<AtomicBool>,
     done: CancellationToken,
 }
 
@@ -505,6 +507,7 @@ impl Active {
             steer_pending: Default::default(),
             steer_sent_at: Default::default(),
             steer_unanswered: Default::default(),
+            finishing: Default::default(),
             done: CancellationToken::new(),
         }
     }
@@ -519,7 +522,8 @@ impl Active {
 
     /// Still producing output for somebody (not finished, not being interrupted).
     fn live(&self) -> bool {
-        !self.done.is_cancelled() && !self.interrupt.is_cancelled() && !self.effective_cancel().is_cancelled()
+        !self.finishing.load(Ordering::SeqCst) && !self.done.is_cancelled()
+            && !self.interrupt.is_cancelled() && !self.effective_cancel().is_cancelled()
     }
 }
 
@@ -1130,19 +1134,23 @@ impl CodexEngine {
         let ack_ms = ms_since(t);
         let mut stats = SteerStats { turn_id: turn_id.to_owned(), ack_ms, ..Default::default() };
         let ok = match r {
-            Ok(_) if !a.done.is_cancelled() && !a.interrupt.is_cancelled() => {
-                *a.steer_sent_at.lock().unwrap() = Some(t);
-                a.steer_pending.store(true, Ordering::SeqCst);
-                let old = std::mem::replace(&mut *a.sink.lock().unwrap(), Sink { idx, tx: tx.clone(), cancel: cancel.clone() });
-                *a.claim.lock().unwrap() = None;
-                a.changed.notify_one();
-                old.send(AttemptMsg::Superseded);
-                stats.ok = true;
-                true
-            }
             Ok(_) => {
-                stats.error = Some("turn finished before the steer was applied".into());
-                false
+                // Publishing and handover share this lock: a pending check
+                // made before taking it could send an old tail to the new sink.
+                let mut sink = a.sink.lock().unwrap();
+                if a.finishing.load(Ordering::SeqCst) || a.done.is_cancelled() || a.interrupt.is_cancelled() {
+                    stats.error = Some("turn finished before the steer was applied".into());
+                    false
+                } else {
+                    *a.steer_sent_at.lock().unwrap() = Some(t);
+                    a.steer_pending.store(true, Ordering::SeqCst);
+                    let old = std::mem::replace(&mut *sink, Sink { idx, tx: tx.clone(), cancel: cancel.clone() });
+                    *a.claim.lock().unwrap() = None;
+                    a.changed.notify_one();
+                    old.send(AttemptMsg::Superseded);
+                    stats.ok = true;
+                    true
+                }
             }
             Err(e) => {
                 stats.error = Some(e);
@@ -1281,6 +1289,12 @@ async fn run_turn(
     let mut last_error: Option<String> = None;
     let mut stats = InterruptStats { turn_id: turn_id.clone(), ..Default::default() };
     let mut pending: std::collections::VecDeque<Value> = buffered.into();
+    // item/completed carries the authoritative accumulated agent text. Keep
+    // observed deltas per item so a final-only reply or missing final delta is
+    // recoverable without speaking an already streamed prefix twice. None
+    // retires a pre-steer item; a subsequent visible delta may reopen it at
+    // its observed byte offset, so only a proven continuous suffix is spoken.
+    let mut agent_text: HashMap<String, (String, Option<usize>)> = HashMap::new();
 
     let send_interrupt = |conn: &Arc<RpcConn>| {
         let c = conn.clone();
@@ -1303,15 +1317,19 @@ async fn run_turn(
                 n = rx.recv() => match n {
                     Some(n) => Some(n),
                     None => {
-                        if cancelled_at.is_none() { act.sink.lock().unwrap().send(AttemptMsg::Failed("codex app-server exited mid-turn".into())); }
+                        let sink = act.sink.lock().unwrap();
+                        if cancelled_at.is_none() { sink.send(AttemptMsg::Failed("codex app-server exited mid-turn".into())); }
+                        act.finishing.store(true, Ordering::SeqCst);
                         break;
                     }
                 },
                 _ = &mut deadline => {
+                    let sink = act.sink.lock().unwrap();
                     if cancelled_at.is_none() {
                         send_interrupt(&conn);
-                        act.sink.lock().unwrap().send(AttemptMsg::Failed(format!("codex turn timed out after {} ms", timeout.as_millis())));
+                        sink.send(AttemptMsg::Failed(format!("codex turn timed out after {} ms", timeout.as_millis())));
                     }
+                    act.finishing.store(true, Ordering::SeqCst);
                     break;
                 }
             }
@@ -1331,21 +1349,41 @@ async fn run_turn(
             deadline.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(10));
             continue;
         };
-        if let Some(t) = v["params"]["turnId"].as_str() {
-            if t != turn_id {
-                continue;
-            }
+        let method = v["method"].as_str().unwrap_or("");
+        // turn/completed uses params.turn.id, unlike item notifications. A
+        // late terminal from an interrupted turn on this thread must not end
+        // the next question (nor a terminal with no identifiable turn).
+        let notification_turn = v["params"]["turnId"].as_str().or_else(|| v["params"]["turn"]["id"].as_str());
+        if notification_turn.is_some_and(|t| t != turn_id)
+            || (method == "turn/completed" && v["params"]["turn"]["id"].as_str() != Some(turn_id.as_str())) {
+            continue;
         }
-        let live = cancelled_at.is_none() && !act.effective_cancel().is_cancelled();
-        match v["method"].as_str().unwrap_or("") {
+        // Do not call effective_cancel while holding sink (it also takes that
+        // lock). State advancement and publication must use the same owner.
+        let sink = act.sink.lock().unwrap();
+        let live = cancelled_at.is_none() && !act.interrupt.is_cancelled() && !sink.cancel.is_cancelled();
+        match method {
             "item/started" => {
                 if v["params"]["item"]["type"] == "userMessage" && act.steer_pending.load(Ordering::SeqCst) {
                     // The steer input is now part of the turn; what follows answers it.
+                    for (_, recover) in agent_text.values_mut() { *recover = None; }
                     act.steer_pending.store(false, Ordering::SeqCst);
+                }
+                if v["params"]["item"]["type"] == "agentMessage" {
+                    if let Some(id) = v["params"]["item"]["id"].as_str() {
+                        agent_text.entry(id.to_owned()).or_insert_with(|| (String::new(),
+                            (live && !act.steer_pending.load(Ordering::SeqCst)).then_some(0)));
+                    }
                 }
             }
             "item/agentMessage/delta" => {
-                if live && !act.steer_pending.load(Ordering::SeqCst) {
+                let visible = live && !act.steer_pending.load(Ordering::SeqCst);
+                if let (Some(id), Some(d)) = (v["params"]["itemId"].as_str(), v["params"]["delta"].as_str()) {
+                    let (seen, recover) = agent_text.entry(id.to_owned()).or_insert_with(|| (String::new(), None));
+                    if visible && !d.is_empty() && recover.is_none() { *recover = Some(seen.len()); }
+                    seen.push_str(d);
+                }
+                if visible {
                     if let Some(d) = v["params"]["delta"].as_str() {
                         if let Some(i) = &inner {
                             if let Some(t0) = *act.steer_sent_at.lock().unwrap() {
@@ -1355,14 +1393,44 @@ async fn run_turn(
                                 }
                             }
                         }
-                        act.sink.lock().unwrap().send(AttemptMsg::Token(d.to_owned()));
+                        sink.send(AttemptMsg::Token(d.to_owned()));
+                    }
+                }
+            }
+            "item/completed" => {
+                let item = &v["params"]["item"];
+                if item["type"] == "agentMessage" {
+                    if let (Some(id), Some(text)) = (item["id"].as_str(), item["text"].as_str()) {
+                        let visible = live && !act.steer_pending.load(Ordering::SeqCst);
+                        let (seen, recover) = agent_text.entry(id.to_owned()).or_insert_with(|| (String::new(), visible.then_some(0)));
+                        if !visible { *recover = None; }
+                        let Some(offset) = *recover else {
+                            // Remember an old authoritative snapshot only as
+                            // context; never replay it after ownership changed.
+                            if text.starts_with(seen.as_str()) { *seen = text.to_owned(); }
+                            continue;
+                        };
+                        if let Some(tail) = text.strip_prefix(seen.as_str()) {
+                            if !tail.is_empty() { sink.send(AttemptMsg::Token(tail.to_owned())); }
+                            *seen = text.to_owned();
+                        } else if offset > 0 && seen[..offset].starts_with(text) {
+                            // A repeated pre-steer snapshot may arrive after
+                            // the first new delta of this same accumulated item.
+                            continue;
+                        } else {
+                            // Already spoken text cannot be revised in place.
+                            sink.send(AttemptMsg::Failed("codex completed text disagrees with streamed text".into()));
+                            act.finishing.store(true, Ordering::SeqCst);
+                            send_interrupt(&conn);
+                            break;
+                        }
                     }
                 }
             }
             "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
-                if live {
+                if live && !act.steer_pending.load(Ordering::SeqCst) {
                     let n = v["params"]["delta"].as_str().map(|s| s.chars().count()).unwrap_or(0);
-                    act.sink.lock().unwrap().send(AttemptMsg::Reasoning(n));
+                    sink.send(AttemptMsg::Reasoning(n));
                 }
             }
             "error" => {
@@ -1371,6 +1439,9 @@ async fn run_turn(
                 }
             }
             "turn/completed" => {
+                // A steer cannot claim the sink between this terminal and
+                // cleanup. done must remain after unsubscribe, otherwise the
+                // next turn may subscribe before this one removes its route.
                 let turn = &v["params"]["turn"];
                 let status = turn["status"].as_str().unwrap_or("?").to_owned();
                 if let Some(c) = cancelled_at {
@@ -1379,7 +1450,6 @@ async fn run_turn(
                     if let Some(s) = &inner { *s.interrupt.lock().unwrap() = Some(stats.clone()); }
                     // Whoever owns the output now did not cancel (e.g. it steered just as the turn
                     // was being interrupted): end its attempt instead of leaving it waiting.
-                    let sink = act.sink.lock().unwrap();
                     if !sink.cancel.is_cancelled() {
                         sink.send(AttemptMsg::Failed("codex turn was interrupted".into()));
                     }
@@ -1395,8 +1465,9 @@ async fn run_turn(
                         )),
                         other => AttemptMsg::Failed(format!("codex turn ended: {other}")),
                     };
-                    act.sink.lock().unwrap().send(msg);
+                    sink.send(msg);
                 }
+                act.finishing.store(true, Ordering::SeqCst);
                 break;
             }
             _ => {}
