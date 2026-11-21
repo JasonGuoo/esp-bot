@@ -77,6 +77,10 @@ pub enum Chunk {
     Content(String),
     /// Thinking text (ignored for output; char count only).
     Reasoning(usize),
+    /// The provider's actual terminal reason, possibly with its last text delta.
+    /// Only `stop` means the answer finished naturally; `[DONE]` alone cannot
+    /// turn a preceding `length`/`aborted` result into a complete answer.
+    Finished { reason: String, content: Option<String> },
     Done,
     Error(String),
     Ignore,
@@ -100,6 +104,9 @@ pub fn parse_chunk(data: &str) -> Chunk {
         return Chunk::Error(truncate(&msg, 200));
     }
     let delta = &v["choices"][0]["delta"];
+    if let Some(reason) = v["choices"][0]["finish_reason"].as_str().filter(|s| !s.is_empty()) {
+        return Chunk::Finished { reason: reason.to_owned(), content: delta["content"].as_str().filter(|s| !s.is_empty()).map(str::to_owned) };
+    }
     if let Some(s) = delta["content"].as_str() {
         if !s.is_empty() {
             return Chunk::Content(s.to_owned());
@@ -169,7 +176,15 @@ mod tests {
         let d = r#"{"choices":[{"delta":{"role":"assistant","content":""}}]}"#;
         assert_eq!(parse_chunk(d), Chunk::Ignore);
         let d = r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"total_tokens":3}}"#;
-        assert_eq!(parse_chunk(d), Chunk::Ignore);
+        assert_eq!(parse_chunk(d), Chunk::Finished { reason: "stop".into(), content: None });
+    }
+
+    #[test]
+    fn terminal_reason_is_preserved_alongside_the_last_delta() {
+        for reason in ["stop", "length", "content_filter", "aborted", "insufficient_system_resource"] {
+            let data = serde_json::json!({"choices":[{"delta":{"content":"最后一段"},"finish_reason":reason}]}).to_string();
+            assert_eq!(parse_chunk(&data), Chunk::Finished { reason: reason.into(), content: Some("最后一段".into()) });
+        }
     }
 
     #[test]

@@ -107,7 +107,7 @@ impl Brain {
                 self.models.call("transcribe",json!({"wav_base64":wav,"language":"zh"})).await
             }).await?;
             let text=result["text"].as_str().unwrap_or("").trim().to_owned();
-            if text.is_empty(){return Err("asr_no_speech".into());}
+            if !asr_has_content(&text){return Err("asr_no_speech".into());}
             if text.chars().count()>4000{return Err("asr_transcript_too_long".into());}
             timings.input_audio_ms=result.pointer("/quality/duration_ms").and_then(Value::as_u64);
             source.text=text.clone();
@@ -496,6 +496,8 @@ fn voice_excerpt(pcm: &[u8], index: usize, segment: &Value, identity: &memory::I
     })
 }
 
+fn asr_has_content(text:&str)->bool { text.chars().any(char::is_alphanumeric) }
+
 fn explicit_print_request(transcript:&str,quote:&str)->bool{
     let text=transcript.to_lowercase();let quote=quote.to_lowercase();
     if !text.contains(quote.as_str()) || ["不要打印","不用打印","不必打印","别打印","不想打印","暂不打印","先不打印","取消打印","停止打印","怎么打印","如何打印",
@@ -576,6 +578,12 @@ mod tests {
             assert!(!note.contains(unplayed) && !note.contains("明天有雨"));
         }
         assert!(!supplement_context("unknown", None, &recent).contains(question));
+    }
+
+    #[test]
+    fn punctuation_only_asr_is_not_a_user_utterance() {
+        for text in ["", " ", ".", "……", "。！？", "— , \n"] { assert!(!super::asr_has_content(text), "{text:?}"); }
+        for text in ["嗯", "好。", "0", "OK!", "小呆", "é"] { assert!(super::asr_has_content(text), "{text:?}"); }
     }
 
     #[test]
