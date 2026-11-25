@@ -120,7 +120,7 @@
 
 | 拟议业务能力 | 复用服务 | 首批结果与边界 |
 | --- | --- | --- |
-| `identity.remember_self/status/correct/forget_voice` | `memory/voice_album.rs`、`identity.rs`、`household.rs` | [身份连续性规格](identity-continuity.md)；只把名字绑定到可信当前来源，名字/声音/历史分别回执 |
+| `identity.remember_self/status/correct/forget_voice` | `memory/voice_album.rs`、`identity.rs`、`household.rs` | [身份连续性规格](identity-continuity.md)；所有入口先经 bot-server 名字校验（拒绝称谓/亲属词与冒犯性名字）；只把名字绑定到可信当前来源；无可靠声音匹配的自报不解锁私密内容，保存新名字需可靠声音匹配或 App 确认；名字/声音/历史分别回执 |
 | `memory.remember/recall/correct/forget` | SQLite 来源、现有 memory/household、Graphiti 派生索引 | 说话者和事实主体分开；明确范围；遗忘先 fence 派生物，清理可恢复 |
 | `reminder.create/list/cancel` | `memory/proactive.rs` 与现有 gateway/设备提醒路径 | 首版一次性提醒；时区、日期和文本可核查。`reminder.update` 与循环提醒首批 unsupported，不假称已修改 |
 | `clock.now/timezone` | 宿主当前时钟、已发布的家庭 IANA 时区与来源 | 纯查询，不写操作账本；当前时刻与时区来源可解释，时钟异常不伪装精确可靠 |

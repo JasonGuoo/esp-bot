@@ -61,6 +61,7 @@
 
 ### 4.1 显式记忆：可保存、可查、可更正、可忘记
 
+0. 创建或重命名人物的记忆写入必须经过 bot-server 共享名字校验器（[identity-continuity §3.1](../identity-continuity.md#31-名字校验由-bot-server-统一负责owner-决定)）：称谓/亲属词不能成为人物名字，只能写入 `relationship`；冒犯性名字拒绝且不写入。校验器由 RA-08 与 RA-07a 共用，先于两者的首个写入实现。
 1. 定义有限的 remember/recall/correct/forget schema。区分“记住我喜欢紫色”的明确请求、一般聊天提到偏好、故事引用和否定；显式记忆不能仅靠关键词生成。
 2. 使用 host 当前来源与已允许的主体 handle。Jason 说“妈妈喜欢紫色”，source speaker、事实主体与当前授权是不同字段；不能把所有事实自动写到说话者 profile，也不能因声纹候选解锁私密范围。
 3. 从管理 RPC 提取 typed 领域事务，复用现有 `save_memory`/household confirm/forget 语义和来源检查。业务提交与 `assistant_operations` 幂等结果同事务，冲突按目标 revision 返回。

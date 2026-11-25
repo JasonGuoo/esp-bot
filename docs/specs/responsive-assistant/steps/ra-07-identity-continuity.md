@@ -2,9 +2,20 @@
 
 日期：2026-11-25。状态：**待实现**。验证：**not_run**。
 
-依赖：[RA-05 能力目录](ra-05-capability-registry.md)、[RA-06 上下文与任务控制](ra-06-context-and-task-control.md)。总议题：[#36](https://github.com/JasonGuoo/esp-bot/issues/36)。领域依据：[identity-continuity.md](../identity-continuity.md)。源码基线为 `46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`；以下新增接口、字段、表与验证均为拟议，当前未实现。
+依赖（按 PR #37 review 拆分）：**RA-07a** 依赖 [RA-05 能力目录](ra-05-capability-registry.md) 与 [RA-08](ra-08-assistant-adapters.md) 共用的 bot-server 名字校验器；**RA-07b** 依赖 RA-07a 与 [RA-06 上下文与任务控制](ra-06-context-and-task-control.md)。总议题：[#36](https://github.com/JasonGuoo/esp-bot/issues/36)。领域依据：[identity-continuity.md](../identity-continuity.md)。源码基线为 `46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`；以下新增接口、字段、表与验证均为拟议，当前未实现。
 
 ## 1. 目标与非目标
+
+本步骤分两部分交付、分别验收：
+
+### RA-07a：称呼与当前声音
+
+进入 M2：bot-server 名字校验、保存称呼（§4.1）、绑定当前可靠声音（§4.2）、`identity.status/correct/forget_voice`（§4.4）。主要复用 `voice_album.rs` 的晚命名和 2026-11-18 的声音匹配称呼路径，不做历史回认。
+
+### RA-07b：历史关联
+
+之后单独验收：历史回查与重新关联（§4.3），包括对留存音频重新分段、跨模型特征比对的限制、代表性样本询问，以及向 Graphiti 的传播。RA-07b 未完成不阻塞 M2。
+
 
 用户可能先聊过很多次，后来才说“记住，我是 Jason”。本步骤让小呆能保存当前自报称呼、使用已有合格声音证据建立人物关系、在证据允许的范围内关联历史，并继续聊天。用户可以查询“你记住我的声音了吗”、补充样本、说明“刚才不是我”、改称呼或忘记声音。
 
@@ -64,9 +75,10 @@ checkpoint 至少包含原 self-introduction SourceRef、目标 person、已接�
 
 ### 4.1 先提交当前自我介绍的可确定部分
 
+0. 先经 bot-server 共享名字校验器（[identity-continuity §3.1](../identity-continuity.md#31-名字校验由-bot-server-统一负责owner-决定)）：称谓/亲属词与冒犯性词（中英文及变体）返回 rejected，小呆礼貌重问，不保存任何内容。同一校验器也用于声音匹配得到的名字、App/控制台登记与声音组命名、以及创建/重命名人物的记忆写入；任何路径不能绕过。称谓只可另存为 `relationship` 字段，不作身份主键，也不单独解析到成员。
 1. `identity.remember_self` 仅接受称呼、用户明确表达的绑定意图与 `target_handle=current_speaker`。模型不填写 person 权限、音频 URL/path、guardian 或 source revision。提案来源必须是当前有效用户输入；故事、引用、否定和演练不构成自动登记请求。
 2. 宿主用已有 SourceRef 解析该句话对应的音频/分段。`current_speaker` 不能解析为最近任意音频；ASR 与 diarization 无法可靠对齐、多说话者或重叠时返回声音待核对。先保留当前自报称呼，不将混合音频登记到某个人。
-3. 解析已有当前人物关系与同名冲突。唯一、可靠且受允许的现有实体可更新称呼；同名多实体、相反人工标注、模板冲突进入 needs_input。只保存用户已明确要求的称呼不应再额外问一遍确认。
+3. 解析已有当前人物关系与同名冲突。所称成员已有确认声音而当前声音不匹配时返回 conflict：不绑定、不合并、不读取其私密范围或私密 OpenCode profile，只作本次称呼并提示家长。同名多实体、相反人工标注、模板冲突进入 needs_input。保存新名字须具备可靠的单人声音匹配，或 owner 在 App 中确认；两者都没有时只作本次 activation 的称呼并提交复核。
 4. 在短事务中写称呼断言、人物关系与同意图的 `assistant_operations` 结果，提交后才发 applied。事务失败不能说“记住了”。这一步不等待声纹、历史回查、Graphiti、harness 清理或输出播放。
 5. 发布身份投影更新到 RA-06；名字进入后续合法上下文。已播放语句不回写，前一用户的名字不能成为后一名未知说话者的默认身份。
 
@@ -78,7 +90,7 @@ checkpoint 至少包含原 self-introduction SourceRef、目标 person、已接�
 9. 缺样但收集政策允许时，任务进入 needs_input；请求一个短、自然的有效样本，仍需正常激活/授权输入。无法或不允许收集时返回 partial/unavailable，保留已保存称呼。模型不得设置 `guardian_confirmed=true`；受既有 enrollment 政策限制的动作返回 needs_authorization，授权方式变更另行评审。
 10. 声音关系提交后报告其实际依据；bound 不代表无误识别。所有新匹配结果仍是可修订证据，不成为家庭/私密授权 token。
 
-### 4.3 后台有条件关联历史
+### 4.3 后台有条件关联历史（RA-07b）
 
 11. 从当前合法匿名组和其片段生成有上限的候选集合。逐段验证来源存在、留存允许、模型/前处理兼容、声音质量、未被独立人工纠正；不按设备、日期、话题或文风补认。
 12. 有合法原音频但无特征时，可在后台按既有授权重新提取；只有同维度的不同模型 embedding 不可直接比较。原音频/特征均已删除时记录 no_evidence；文本只能按用户明确指认建立人工关系。
@@ -125,11 +137,13 @@ checkpoint 至少包含原 self-introduction SourceRef、目标 person、已接�
 | `HistoryHasBoundedEvidence` | 逐段来源集、仅平均向量、纯文本、留存过期；不能全库归名 |
 | `SpeakerDoesNotRewriteSemanticSubject`、`NoAuthorityPromotion` | Jason 说妈妈偏好，后来补齐身份；事实主体/任务授权不被改写 |
 | `IdentityDoesNotReplayOperations` | 更正前后记录任务/effect 调用次数；不重放媒体、打印、提醒或旧工具 |
+| `NameValidatedEverywhere` | 称谓/亲属词与冒犯性名字（含变体）经语音、声音匹配命名、App 登记、记忆写入四个入口都被拒绝且不落库 |
+| `SelfClaimNeverUnlocksPrivate` | 无可靠声音匹配的“我是妈妈/我是<名字>”不读取私密记忆、不使用私密 OpenCode profile；不匹配已有成员声音时为 conflict |
 | `CancelledWorkflowDoesNotContinueBinding` | cancel 与批次提交竞争，CAS 阻止未授权后续关联；已提交称呼仍可查 |
 
 复用 RA-05 `CapabilityExecution`、RA-06 `ContextSnapshot` / `TaskControl` 和既有 `ReplyTiming` 的约束：身份永久挂起时首轮回答与 Stop 仍可推进；晚到名字只进入后续快照，不改冻结句子。
 
-实现回归落在 `memory/identity_continuity.rs`、`voice_album.rs`、`identity.rs` 及 `brain/assistant_adapters/identity.rs` 的真实领域/adapter 测试，覆盖 [ID-01–ID-16](../identity-continuity.md)。TLA 不能证明声学准确率；真实说话者、成人/儿童、距离、噪声、交叠、误认/漏认与阈值需独立实测。未测保持 not_run，不填虚构成功率。
+实现回归落在 `memory/identity_continuity.rs`、`voice_album.rs`、`identity.rs` 及 `brain/assistant_adapters/identity.rs` 的真实领域/adapter 测试，覆盖 [ID-01–ID-20](../identity-continuity.md)。TLA 不能证明声学准确率；真实说话者、成人/儿童、距离、噪声、交叠、误认/漏认与阈值需独立实测。未测保持 not_run，不填虚构成功率。
 
 ## 7. 迁移与回滚
 
@@ -142,6 +156,9 @@ checkpoint 至少包含原 self-introduction SourceRef、目标 person、已接�
 ## 8. 完成定义
 
 - [ ] 已经聊过多次后才说名字的端到端流程成立，复用有效匿名证据；无证据路径同样自然、准确。
+- [ ] bot-server 名字校验器在全部入口生效；称谓只存为 relationship；冒犯性名字礼貌重问且不保存；ID-17～ID-20 有真实回归。
+- [ ] 无可靠声音匹配的自报不解锁私密内容；保存新名字需可靠声音匹配或 App 确认。
+- [ ] RA-07a 与 RA-07b 分别记录完成与验收状态。
 - [ ] 名字、声音、历史三状态独立，applied 及 read_result 真实；不因保存称呼虚报认声。
 - [ ] 当前 self-intro 来源由宿主绑定，多人/文本/迟到/引用/否定等边界有真实 adapter 回归。
 - [ ] 名字别名、同名、误聚类、逐条人工更正、跨模型不兼容与留存关闭均有明确行为。
