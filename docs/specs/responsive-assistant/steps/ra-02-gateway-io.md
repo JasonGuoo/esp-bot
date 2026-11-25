@@ -134,6 +134,10 @@ Stop 的返回表示本地 scope 已撤权。provider interrupt、候选 ASR 回
 
 计划命令为 `./tools/check-tla-twins.sh protocol/GatewayDispatch` 及受影响现有模型；模型配置与 `checks.sh` 同实现提交，不新增 CI。[formal 入口](../../../../formal/tla/README.md)。
 
+## 固件预算
+
+本步原则上不改固件：Mac 内部区分 transport/queued/accepted/recorded，线上保持现有 v3 回执语义。若确需固件适配，须先估算并实测体积（上限约 4 KB），只刷 app 分区；见[实施计划 §4.1](../implementation-plan.md#41-固件预算与刷写)。
+
 ## 兼容、迁移与回滚
 
 先切内部 reader/writer 和存储适配，保持现有 v3 可观察语义；新 pending/receipt/foreground 事件仅在能力协商后启用。缺失协商的旧端可以继续旧行为，不能仅因 Mac 有新内部状态就收到无法理解的完成事件。

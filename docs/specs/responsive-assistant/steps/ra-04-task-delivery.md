@@ -173,6 +173,10 @@ sequenceDiagram
 
 在实现 PR 中同步 `.tla`、`.cfg`、`checks.sh` 和 [formal 索引](../../../../formal/tla/README.md)。计划命令 `./tools/check-tla-twins.sh macos/TaskDelivery`、`./tools/check-tla-twins.sh protocol/TurnPlayback`，以及受影响的 Supplement/ListeningGate。TLA 的最终交付活性只在存在合法互动机会、存储和设备继续获得处理机会时成立；用户一直离线时 pending_delivery 是正确状态。
 
+## 固件预算
+
+M1 主路径使用既有 `purpose=final` 内容段，固件改动为 0 KB，不刷机。可选的 `turn.response_closed` 须在启用前估算并实测体积（上限约 4 KB），遵守 app-only 刷写与约 34 KB 总余量；见[实施计划 §4.1](../implementation-plan.md#41-固件预算与刷写)。
+
 ## 兼容、迁移与回滚
 
 数据库采用增量 migration：已有 task 保持原 ID、attempt、effect receipt 与 source；历史结果缺少可靠播放证据时不能推断为 delivered。首次 migration 为可恢复的 terminal/awaiting_input 记录建立去重 inbox，明确既有已删除/失效来源的排除规则，防止迁移后突然大批播报。

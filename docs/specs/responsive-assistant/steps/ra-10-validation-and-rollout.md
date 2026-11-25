@@ -114,7 +114,7 @@ documented → implemented → host_evidence → mac_evidence → device_evidenc
 
 ### 4.4 第四步：S31 半双工与真人脚本
 
-使用实际 **ESP32-S31-Korvo-1 V1.1**。保留 owner 音量、现有配对与模型分区；沿用既有板上验证流程。验收不默认开启 AEC，不把声学打断当作本方案前置保证。
+使用实际 **ESP32-S31-Korvo-1 V1.1**。只刷 app 分区，并在验收记录中附 `idf.py size` 及相对约 34 KB 余量的消耗（见[实施计划 §4.1](../implementation-plan.md#41-固件预算与刷写)）。保留 owner 音量、现有配对与模型分区；沿用既有板上验证流程。验收不默认开启 AEC，不把声学打断当作本方案前置保证。
 
 执行 acceptance 的 S31 必测项，覆盖完整唤醒词、触摸补充、本地 Stop、播放回执、缺尾帧、断网/重连、提醒不录音、长任务期间连续聊天、多人晚登记。记录屏幕/扬声器/麦克风门与主机事件的对应关系，不仅看 App 文本框。
 
