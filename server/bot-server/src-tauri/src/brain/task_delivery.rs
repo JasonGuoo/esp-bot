@@ -48,6 +48,8 @@ pub fn on_committed_turn(user_text: &str, kind: &str) -> TurnDelivery {
 
 pub fn asks_to_expand(text: &str) -> bool {
     let text = text.trim();
+    // "不要听完整的" contains the yes phrase and is still a refusal.
+    if declines_expansion(text) { return false; }
     text.contains("展开") || text.contains("全部告诉") || text.contains("完整的") || text.contains("听完整")
         || text == "好" || text == "好的" || text == "要"
 }
@@ -130,6 +132,9 @@ mod tests {
         assert_eq!(on_committed_turn("树叶为什么是绿的", "result"), TurnDelivery::Defer);
         assert_eq!(on_committed_turn("", "result"), TurnDelivery::Speak);
         assert_eq!(on_committed_turn("展开完整的", "result"), TurnDelivery::Speak);
+        assert_eq!(on_committed_turn("不要听完整的", "result"), TurnDelivery::Defer);
+        assert!(!asks_to_expand("不要听完整的"));
+        assert!(asks_to_expand("好"));
         assert_eq!(on_committed_turn("今天好冷", "needs_input"), TurnDelivery::Speak);
     }
 
