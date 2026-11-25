@@ -1,5 +1,9 @@
 # 设备与声音：轻量终端、并行理解和可追溯的说话人
 
+**2026-11-25 新目标，待实现：** [随时回应架构](../responsive-assistant/architecture.md)将 Luna 与其他后端统一移出交互控制边界。现有模型后台任务继续复用；网关 PCM 尾包、TTS 准备、存储和网络发送改为事件驱动。具体见 [RA-02 网关 I/O](../responsive-assistant/steps/ra-02-gateway-io.md)、[RA-03 Luna](../responsive-assistant/steps/ra-03-luna-worker.md)、[RA-04 交付](../responsive-assistant/steps/ra-04-task-delivery.md)。本次只改文档，不改变当前线协议或声学能力。
+
+后续停止先由设备撤销播放许可并清未播内容，服务端异步取消与清理；PCM commit 未收齐时保留本轮 token 与截止时间，控制循环继续接收停止/音频/断线事件。任务 ACK 与任务终态分开，允许普通新轮次的完成边界需由两端协商，不能把 ACK 冒充 final。原有半双工、唤醒授权、单 codec 和真实硬件回执规则继续有效。
+
 设计与源码交付：2026-11-16。**源码开发完成，待测试。** 本文保留[家庭陪伴设计](README.md)的职责与验收契约；实际接线、配置及限制见 [实施记录](implementation-2026-11-16.md) 和 [固件接线记录](../../../firmware/HOUSEHOLD_INTEGRATION.md)。本轮未编译、未运行模型、未执行 Mac GUI 或实板验收，没有 CI。[2026-11-15 验收](../../review-acceptance-2026-11-15.md) 对应旧版本，不能证明本轮识别、播放或 AEC 效果。
 
 ## 1. 设备承担即时互动，Mac 承担理解和工作

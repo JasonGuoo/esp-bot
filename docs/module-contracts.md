@@ -1,5 +1,7 @@
 # Module contracts and local event bus — esp-bot V1
 
+**2026-11-25 proposed extension:** [Responsive assistant](specs/responsive-assistant/README.md), tracked in [#36](https://github.com/JasonGuoo/esp-bot/issues/36), adds a backend-independent interaction controller, typed assistant capabilities, a durable result inbox and late identity binding. Section 10 specifies the new ownership boundary. This is a documentation change; proposed events and fields are not deployed protocol or schema.
+
 **2026-11-16 target extension:** [Household companion design](specs/household-companion/README.md) separates household records, activation, persistent tasks and presentation. Section 9 below describes the proposed server/domain contracts; new fields are **not yet implemented wire fields**. Existing firmware ownership, `RuntimeToken` and versioned WSS behavior remain authoritative until a compatible implementation lands.
 
 **Current source status:** [2026-11-14 review corrections](review-fixes-2026-11-14.md) records the source changes; [2026-11-15 acceptance](review-acceptance-2026-11-15.md) records subsequent local builds and device checks. Older dated transport inventories below are historical; firmware WSS v3 now exists. This revision adds a token-bound `TURN_SUBMITTED` edge and a non-capturing `SUBMITTED` conversation stage; runtime remains the behavior authority.
@@ -138,10 +140,24 @@ These are HC-01 design contracts. They do not change today's JSON schema or gran
 
 ### Completion, cancellation and compatibility
 
-Task ACK/progress playback completion returns to the same task; it does not trigger the final-answer follow-up transition. Wake ACK returns to capture readiness within the same activation, before a user task exists. Preview playback keeps its existing settings-only scope. A final content segment may complete playback while its independent Mac task is still working on another requested artifact; both states remain visible.
+Task ACK/progress playback completion does not finish the task or by itself trigger final-answer follow-up. The existing device waits for the current presentation boundary. The 2026-11-25 RA-04 target adds a separately negotiated foreground completion boundary, after required playback receipts, so a delegated task can continue while ordinary conversation resumes. Wake ACK returns to capture readiness within the same activation, before a user task exists. Preview playback keeps its existing settings-only scope. A final content segment may complete playback while its independent Mac task is still working on another requested artifact; both states remain visible.
 
 Stopping playback, ending capture, cancelling generation, cancelling a task and deleting a conversation have different effects. Cancellation invalidates old output permissions immediately, and cannot retroactively undo a print job already accepted by an external queue. Tasks completing after disconnect are stored without automatically acquiring a new output lease.
 
 Schema migrations preserve legacy private scopes and retention choices. Source corrections/deletions propagate through summaries, graph projections and affected OpenCode context; a background retry must not resurrect removed data. Graph `group_id` is a namespace, not an ACL.
 
 Capability negotiation must state supported formats, dimensions, resource limits, sync and cancellation semantics. Unsupported required presentation segments yield an explicit partial/failure or authorized fallback. No arbitrary remote HTML/scripts or per-frame pupil/motor control are added. See [implementation steps](specs/household-companion/implementation-plan.md) and [presentation/tasks](specs/household-companion/presentation-and-tasks.md).
+
+## 10. Responsive assistant contracts — proposed, 2026-11-25
+
+The internal [control contract](specs/responsive-assistant/steps/ra-01-control-contracts.md) separates foreground references from durable operation/task references. The existing firmware RuntimeToken keeps its meaning; a server turn ID, model generation, operation revision and delivery revision are not interchangeable.
+
+- The interaction controller owns state transitions and output admission, not model execution or IO. It may wait for its next event, but handlers must not await a backend, writer, database lock, queue space or cancellation cleanup. Even synchronous helper calls are reviewed for blocking work.
+- Slow work returns typed events carrying the source revisions and lifecycle references actually read. Revalidate them on receipt. Stale foreground output is discarded without discarding an independently valid persisted task result.
+- Local output fencing precedes asynchronous cancellation. Stop, turn/supplement cancellation, durable task cancellation and service shutdown have separate scopes and receipts. A backend cancellation acknowledgment is not proof of external-effect reversal.
+- All dispatch paths have bounded capacity and explicit overflow behavior. Stop/revocation cannot wait behind media; replaceable snapshots may coalesce; durable intents/results may not be silently dropped or acknowledged before their storage commit.
+- Current output, task execution and result delivery are separate states. [RA-04](specs/responsive-assistant/steps/ra-04-task-delivery.md) defines the inbox and compatible foreground completion transition; new fields require negotiation before device use.
+- A [capability proposal](specs/responsive-assistant/capabilities.md) contains model-suggested business parameters. The host injects trusted household/source/speaker scope, checks availability and policy, and routes to a typed adapter. Device format negotiation and semantic assistant capabilities are different catalogs.
+- Identity observations never grant permissions. [Late naming](specs/responsive-assistant/identity-continuity.md) revises evidence-based attribution; names are mutable attributes, and raw utterances and executed effects retain their original provenance.
+
+See [step plan](specs/responsive-assistant/implementation-plan.md) for migration/rollback and [acceptance](specs/responsive-assistant/acceptance.md) for model-to-implementation mappings. No runtime behavior or existing verification claim changes in this documentation PR.

@@ -1,5 +1,7 @@
 # 小呆系统架构：Bot 交互终端与 Mac 家庭后端
 
+**2026-11-25 设计增量，待实现：** [让小呆随时回应](specs/responsive-assistant/README.md)与 [issue #36](https://github.com/JasonGuoo/esp-bot/issues/36)定义交互控制、Luna/后端隔离、独立任务交付、统一能力和迟到身份绑定。第 9 节是本次后续实现目标；第 1～8 节保留原有架构与交付基线。具体当前缺口以[固定源码审查](specs/responsive-assistant/research.md)为准，不能从旧“源码交付”推导已满足新目标。
+
 **当前设计与源码交付：2026-11-16；开发基线：`5ae0c780e146a72ebf10f71f4d6976a0ed47e2fe`。** 本文是系统职责与产品约束的总入口。新家庭设计详见 [家庭陪伴规格](specs/household-companion/README.md)，事件与所有权见 [模块契约](module-contracts.md)，开发次序见 [实施计划](specs/household-companion/implementation-plan.md)。
 
 **源码开发完成，待测试：** 家庭、任务、呈现、身份和记忆链路已接线，具体入口、配置及剩余限制见 [2026-11-16 实施记录](specs/household-companion/implementation-2026-11-16.md)。本轮未编译、未运行模型、未执行 Mac GUI/打印/实板验收，没有 CI。[2026-11-15 验收](review-acceptance-2026-11-15.md) 只证明对应旧版本；各旧日期交付快照继续保留。
@@ -89,3 +91,24 @@ Mac 任务有独立 `task_id`、状态、进度、取消、素材与效果回执
 已有 [#7～#11](https://github.com/JasonGuoo/esp-bot/issues?q=is%3Aissue+is%3Aopen) 的停止、路由冷却、稳定会话、设置关闭顺序和 TTS 进度路径已作源码修正，仍单独保持待测试，不因源码合并宣称已验收。
 
 坚持官方示例和成熟项目优先、一个所有者、明确来源、可取消和诚实回执。**No CI。** 没有合适硬件/模型时继续写模块化代码，交付时分别说明已写源码、构建、本机运行与实板验收。
+
+## 9. 随时回应与个人助理能力 — 2026-11-25 目标
+
+交互控制参考 AIRI 的纯 Policy / Runtime 边界：状态与事件产生新的状态及命令，外部服务完成工作后发回带版本的事件。选择依据、上游完成范围和当前源码事实见[研究](specs/responsive-assistant/research.md)。保留 Rust/Tauri、Tokio 与 OpenCode，不整体更换框架。
+
+| 责任 | 后续目标与边界 |
+| --- | --- |
+| 设备本地控制 | `bot_runtime` 立即决定停止、输入与输出许可；本地反馈不等待 Mac；默认半双工和单音频 owner 保持 |
+| Mac 交互控制 | 只做状态决策、版本检查、许可仲裁及非阻塞有界提交；不等待模型、DB、媒体、网络发送或取消 join |
+| Luna / 对话服务 | 独立接受有版本的请求，返回内容或受控动作提案；内部保留会话顺序，独立处理取消、期限和资源预算 |
+| 能力服务 | 从真实适配器生成可用能力目录，绑定可信来源并验证请求；管理操作 ID、幂等、补参、状态与效果回执 |
+| 任务与交付 | 复用 TaskService；当前回答释放与任务完成分开，结果先持久进入收件箱，再申请当前输出许可 |
+| 身份与记忆 | 话语、匿名声音证据、稳定人物和称呼分开；迟到身份只按证据修订来源和派生视图 |
+
+当前推理已经运行在后台 task；仍需迁出网关分支中的准备/传输/同步存储等待，并解除 Delivery 与后台 tasks 对普通输入的共同门控。[RA-01～RA-04](specs/responsive-assistant/implementation-plan.md)同时定义服务端与设备完成边界，不能只删除一个 busy 条件。任务 ACK 不伪装为任务成功；新前台完成语义需协商并保留真实播放回执。
+
+“能力”须有自然入口、就绪状态、可信输入、执行与持续工作流、查询/补参/取消/恢复及真实回执。[RA-05～RA-08](specs/responsive-assistant/capabilities.md)先打通任务控制、身份、显式记忆、提醒和设备操作；协议能力标志不代替模型语义能力目录。
+
+“记住，我是 Jason”可发生于任何已授权对话阶段。称呼保存、声音确认、历史关联分别报告；复用已存在的匿名声音组，样本不足时继续工作流，无证据历史不自动归名。更正/删除按来源传播，不扩展权限，不重放已执行工具。[身份连续性](specs/responsive-assistant/identity-continuity.md)
+
+实现随步更新 TLA+、配置与对应实现回归；延迟、声纹与声学打断需真实测量。当前文档不新增运行代码或模型文件，所有新验收保持未运行。[实施与验收](specs/responsive-assistant/acceptance.md)

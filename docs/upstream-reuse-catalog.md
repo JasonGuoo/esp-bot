@@ -1,5 +1,19 @@
 # Reuse-first upstream catalog — 小呆 (updated 2026-11-16)
 
+## 2026-11-25 responsive assistant design references
+
+[Issue #36](https://github.com/JasonGuoo/esp-bot/issues/36) and the [responsive assistant specifications](specs/responsive-assistant/README.md) add the following reference decisions. This documentation change imports no upstream code or dependency; source versions, primary links and limitations are recorded in the [research note](specs/responsive-assistant/research.md).
+
+| Reference | Reuse boundary | Decision |
+| --- | --- | --- |
+| AIRI voice Policy / Runtime | Pure event/state rules, revision checks, device-local interruption | Primary interaction-controller design reference; not a whole-framework migration or measured speed ranking |
+| TEN extension groups | Message-driven execution and thread/process isolation | Apply isolation to existing Mac services; same-group callbacks still share a thread |
+| Pipecat frame processor | Priority control/system frames and speech pipeline interruption | Add explicit queue bounds and asynchronous cancellation cleanup in our host |
+| LiveKit Agents voice | Named speech interruption and completion evidence | Comparative reference; retain the selected OpenCode and local model stack |
+| Sherpaw speaker tracking | Revisable speaker evidence and model-version-aware voiceprints | Data-model reference for late naming; keep current ECAPA and voice_album |
+
+The RA target is not implemented by listing these references. Any future copied library/model code requires pinned license and dependency review as below.
+
 > Decision: **stop reinventing existing hardware/software subsystems**. Default to a proven upstream driver, protocol, media engine, voice pipeline, or complete product mechanism before writing a new implementation. This is the permanent upstream research register: preserve links, what to borrow, integration boundaries and license caveats. **Listing is not a claim that the dependency has been integrated or tested on our board.**
 
 Canonical system decision: [local-first-hybrid-brain.md](local-first-hybrid-brain.md). Hardware target: ESP32-S31-Korvo-1 **V1.1**, not S3; primary AI computer: user's **Mac M4 Pro / 48 GB unified memory** with Rust/Tauri **bot-server** as product entry point.

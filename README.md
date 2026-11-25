@@ -1,5 +1,11 @@
 # esp-bot
 
+## 新设计：让小呆随时回应（2026-11-25，待实现）
+
+[总 issue #36](https://github.com/JasonGuoo/esp-bot/issues/36) 与[设计/specs](docs/specs/responsive-assistant/README.md)确定下一阶段：交互控制循环不等待 Luna 或任何后端，独立管理持续任务和结果交付，以统一能力契约接通记忆、提醒、任务与设备操作，并支持多次匿名对话以后才说“我是 Jason”。[十步实施计划](docs/specs/responsive-assistant/implementation-plan.md)提供依赖、详细规格、迁移与验收入口。
+
+**本次为文档交付，运行时改造尚未实现。** 保留现有 Mac 后端、OpenCode、SQLite、S31 runtime 和默认半双工；不将下方历史验收记录当作新设计已通过，也不因文档 PR 关闭实施 issue。
+
 ## 当前交付：Mac 后端的家庭陪伴机器人（2026-11-16）
 
 小呆负责本地唤醒、及时应答、表情、采集与有界播放；Mac `bot-server` 负责声音理解、OpenCode、家庭记忆、图文音视频制作和打印等任务。日常对话按家庭每天一份记录组织，成员是参与者，后台持续整理可追溯的共同经历。本阶段不开发设备独立联网 Agent。
