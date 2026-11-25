@@ -15,6 +15,8 @@ pub struct Offer {
     pub ttl_ms: u32,
     pub show_if_absent: bool,
     pub reminder_id: Option<String>,
+    pub delivery_id: Option<String>,
+    pub delivery_revision: i64,
     pub local_date: String,
 }
 
@@ -60,12 +62,47 @@ pub fn plan(settings: &ProactiveSettings, facts: &Facts, offer_id: u32) -> Optio
         // Do not let that stale offer appear on screen after its TTL expires.
         show_if_absent: false,
         reminder_id: Some(reminder.id.clone()),
+        delivery_id: None,
+        delivery_revision: 0,
+        local_date: facts.local.format("%Y-%m-%d").to_string(),
+    })
+}
+
+fn task_result_blocked(settings: &ProactiveSettings, facts: &Facts) -> Option<&'static str> {
+    if !settings.enabled { return Some("disabled"); }
+    if facts.busy { return Some("busy"); }
+    if quiet(settings, &facts.local) { return Some("quiet_hours"); }
+    if facts.today.iter().filter(|line| matches!(line.status.as_str(), "started" | "spoken")).count() >= settings.daily_cap as usize {
+        return Some("daily_cap");
+    }
+    None
+}
+
+/// Opt-in speech for a result the person asked to hear. The installed firmware
+/// drops `moment != "reminder"`, so this offer is silent there until that check changes.
+pub fn plan_task_result(settings: &ProactiveSettings, facts: &Facts, offer_id: u32, line: &str, delivery_id: &str, revision: i64) -> Result<Offer, &'static str> {
+    if let Some(reason) = task_result_blocked(settings, facts) { return Err(reason); }
+    if line.is_empty() || delivery_id.is_empty() { return Err("result_missing"); }
+    Ok(Offer {
+        offer_id,
+        moment: "task_result",
+        trigger: format!("task_result:{delivery_id}"),
+        line: line.to_owned(),
+        ttl_ms: REMINDER_TTL_MS,
+        show_if_absent: false,
+        reminder_id: None,
+        delivery_id: Some(delivery_id.to_owned()),
+        delivery_revision: revision,
         local_date: facts.local.format("%Y-%m-%d").to_string(),
     })
 }
 
 /// Recheck the actual scheduled reminder before synthesising any audio.
 pub fn admit(settings: &ProactiveSettings, facts: &Facts, offer: &Offer) -> Result<(), &'static str> {
+    if offer.moment == "task_result" {
+        if offer.delivery_id.is_none() { return Err("result_missing"); }
+        return task_result_blocked(settings, facts).map_or(Ok(()), Err);
+    }
     if offer.moment != "reminder" || offer.reminder_id.is_none() { return Err("moment_off"); }
     if let Some(reason) = blocked(settings, facts) { return Err(reason); }
     if facts.today.iter().any(|line| matches!(line.status.as_str(),"started"|"spoken") && line.trigger_source == offer.trigger) {
@@ -98,7 +135,24 @@ impl Brain {
         let (settings, facts) = self.proactive_facts()?;
         let random = uuid::Uuid::new_v4().as_u128();
         let offer_id = (random as u32).max(1);
-        let Some(offer) = plan(&settings, &facts, offer_id) else { return Ok(None) };
+        if let Some(offer) = plan(&settings, &facts, offer_id) {
+            self.proactive_journal(device_id, &offer, "offered", None);
+            return Ok(Some(offer));
+        }
+        if !self.config.responsive.speak_task_results { return Ok(None); }
+        let mut chosen = None;
+        for id in self.tasks.rescan_inbox(super::task_delivery::RESCAN_BATCH)? {
+            let Some(row) = self.tasks.inbox_by_id(&id)? else { continue };
+            if row.kind == "result" && row.tell_me && !row.private_scope && matches!(row.state.as_str(), "pending_delivery" | "deferred") && self.tasks.offer_ready(&row.delivery_id) {
+                chosen = Some(row);
+                break;
+            }
+        }
+        let Some(ready) = chosen else { return Ok(None); };
+        let offer = match plan_task_result(&settings, &facts, offer_id, &ready.summary, &ready.delivery_id, ready.revision) {
+            Ok(offer) => offer,
+            Err(reason) => { self.emit("proactive.line", None, json!({"status":"declined","reason":reason,"moment":"task_result"})); return Ok(None); }
+        };
         self.proactive_journal(device_id, &offer, "offered", None);
         Ok(Some(offer))
     }
@@ -147,7 +201,7 @@ mod tests {
         let settings=ProactiveSettings::default();
         for (h,m) in [(8,0),(14,0),(18,0)] { assert!(plan(&settings,&facts(h,m),1).is_none()); }
         let offer=Offer { offer_id:1,moment:"morning",trigger:"morning".into(),line:"早上好".into(),
-            ttl_ms:1000,show_if_absent:false,reminder_id:None,local_date:"2026-11-19".into() };
+            ttl_ms:1000,show_if_absent:false,reminder_id:None,delivery_id:None,delivery_revision:0,local_date:"2026-11-19".into() };
         assert_eq!(admit(&settings,&facts(8,0),&offer),Err("moment_off"));
     }
 

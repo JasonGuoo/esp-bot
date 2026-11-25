@@ -64,7 +64,7 @@
 | RA-01 | [控制契约与状态所有权](steps/ra-01-control-contracts.md) | 待实现 |
 | RA-02 | [网关 I/O 解耦](steps/ra-02-gateway-io.md) | 待实现 |
 | RA-03 | [Luna 服务隔离](steps/ra-03-luna-worker.md) | 待实现 |
-| RA-04 | [独立任务交付](steps/ra-04-task-delivery.md) | 待实现 |
+| RA-04 | [独立任务交付](steps/ra-04-task-delivery.md) | implemented, host-tested, pending board acceptance |
 | RA-05 | [能力目录与受控调用](steps/ra-05-capability-registry.md) | 待实现 |
 | RA-06 | [连续上下文与任务控制](steps/ra-06-context-and-task-control.md) | 待实现 |
 | RA-07 | [迟到的身份介绍](steps/ra-07-identity-continuity.md)：RA-07a 称呼与当前声音、RA-07b 历史关联 | 待实现 |

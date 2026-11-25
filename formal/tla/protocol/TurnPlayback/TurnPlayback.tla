@@ -4,8 +4,8 @@ EXTENDS Naturals, Sequences
 CONSTANTS MaxTurns, MaxSegments
 ASSUME MaxTurns \in Nat \ {0} /\ MaxSegments \in Nat \ {0}
 
-VARIABLES turn, segment, last, narrated, media, runtime, sawEnd, audioQ, endQ
-vars == <<turn, segment, last, narrated, media, runtime, sawEnd, audioQ, endQ>>
+VARIABLES turn, segment, last, narrated, media, runtime, sawEnd, audioQ, endQ, delegated, taskRunning
+vars == <<turn, segment, last, narrated, media, runtime, sawEnd, audioQ, endQ, delegated, taskRunning>>
 
 \* A turn names a fresh runtime token. A segment number doubles as the local
 \* playback id; deliberately reuse the same numbers in successive turns.
@@ -19,6 +19,7 @@ Init ==
     /\ turn = 1 /\ segment = 1 /\ last \in 1..MaxSegments /\ narrated \in BOOLEAN
     /\ media = EmptyMedia /\ runtime = Device("Answer") /\ sawEnd = FALSE
     /\ audioQ = <<>> /\ endQ = <<>>
+    /\ delegated \in BOOLEAN /\ taskRunning = delegated
 
 \* Model one optional duplicate per notification. FIFO order within each
 \* queue is preserved; their relative service order is independent.
@@ -27,20 +28,20 @@ Enqueue(q, msg) == {Append(q, msg), Append(Append(q, msg), msg)}
 Display ==
     /\ InAnswer /\ ~media.displayed
     /\ media' = [media EXCEPT !.displayed = TRUE]
-    /\ UNCHANGED <<turn, segment, last, narrated, runtime, sawEnd, audioQ, endQ>>
+    /\ UNCHANGED <<turn, segment, last, narrated, runtime, sawEnd, audioQ, endQ, delegated, taskRunning>>
 
 StartAudio ==
     /\ InAnswer /\ narrated /\ media.displayed /\ ~media.started
     /\ runtime.playback = 0
     /\ runtime' = [runtime EXCEPT !.playback = segment]
     /\ media' = [media EXCEPT !.started = TRUE]
-    /\ UNCHANGED <<turn, segment, last, narrated, sawEnd, audioQ, endQ>>
+    /\ UNCHANGED <<turn, segment, last, narrated, sawEnd, audioQ, endQ, delegated, taskRunning>>
 
 HardwareDone ==
     /\ InAnswer /\ media.started /\ ~media.drained
     /\ media' = [media EXCEPT !.drained = TRUE]
     /\ audioQ' \in Enqueue(audioQ, Current)
-    /\ UNCHANGED <<turn, segment, last, narrated, runtime, sawEnd, endQ>>
+    /\ UNCHANGED <<turn, segment, last, narrated, runtime, sawEnd, endQ, delegated, taskRunning>>
 
 \* The collector observes real device receipts. Intermediate reports only
 \* release the next segment. The final seal also posts PRESENTATION_DONE.
@@ -49,12 +50,12 @@ ReportSegment ==
     /\ (~narrated \/ media.drained)
     /\ media' = [media EXCEPT !.reported = TRUE]
     /\ IF segment = last THEN endQ' \in Enqueue(endQ, turn) ELSE endQ' = endQ
-    /\ UNCHANGED <<turn, segment, last, narrated, runtime, sawEnd, audioQ>>
+    /\ UNCHANGED <<turn, segment, last, narrated, runtime, sawEnd, audioQ, delegated, taskRunning>>
 
 NextSegment ==
     /\ InAnswer /\ media.reported /\ segment < last
     /\ segment' = segment + 1 /\ narrated' \in BOOLEAN /\ media' = EmptyMedia
-    /\ UNCHANGED <<turn, last, runtime, sawEnd, audioQ, endQ>>
+    /\ UNCHANGED <<turn, last, runtime, sawEnd, audioQ, endQ, delegated, taskRunning>>
 
 TakeAudio ==
     /\ audioQ # <<>> /\ audioQ' = Tail(audioQ)
@@ -62,7 +63,7 @@ TakeAudio ==
                   THEN IF runtime.endPending THEN Device("Followup")
                        ELSE [runtime EXCEPT !.playback = 0]
                   ELSE runtime
-    /\ UNCHANGED <<turn, segment, last, narrated, media, sawEnd, endQ>>
+    /\ UNCHANGED <<turn, segment, last, narrated, media, sawEnd, endQ, delegated, taskRunning>>
 
 TakeEnd ==
     /\ endQ # <<>> /\ endQ' = Tail(endQ)
@@ -72,11 +73,11 @@ TakeEnd ==
                         ELSE IF runtime.playback # 0
                              THEN [runtime EXCEPT !.endPending = TRUE]
                              ELSE Device("Followup")
-    /\ UNCHANGED <<turn, segment, last, narrated, media, audioQ>>
+    /\ UNCHANGED <<turn, segment, last, narrated, media, audioQ, delegated, taskRunning>>
 
 Stop ==
     /\ runtime.mode # "Stopped" /\ runtime' = Device("Stopped")
-    /\ UNCHANGED <<turn, segment, last, narrated, media, sawEnd, audioQ, endQ>>
+    /\ UNCHANGED <<turn, segment, last, narrated, media, sawEnd, audioQ, endQ, delegated, taskRunning>>
 
 \* A supplement interrupts an answer. From Stopped a fresh wake is needed.
 \* From Followup this represents an authorized next question and its answer.
@@ -84,7 +85,7 @@ NewTurn ==
     /\ turn < MaxTurns /\ turn' = turn + 1
     /\ segment' = 1 /\ last' \in 1..MaxSegments /\ narrated' \in BOOLEAN
     /\ media' = EmptyMedia /\ runtime' = Device("Answer") /\ sawEnd' = FALSE
-    /\ UNCHANGED <<audioQ, endQ>>
+    /\ UNCHANGED <<audioQ, endQ, delegated, taskRunning>>
 
 Produce == Display \/ StartAudio \/ HardwareDone \/ ReportSegment \/ NextSegment
 Quiescent == ~InAnswer /\ audioQ = <<>> /\ endQ = <<>> /\ UNCHANGED vars
@@ -116,4 +117,12 @@ OldReceiptsAreInert ==
 FinishesUnlessInterrupted ==
     \A t \in 1..MaxTurns :
         (turn = t /\ InAnswer) ~> (turn # t \/ runtime.mode \in {"Followup", "Stopped"})
+
+\* A delegated explanation still needs the final segment's hardware receipt.
+\* Closing that foreground does not finish the background task.
+DelegatedKeepsTheTask == delegated => taskRunning
+DelegatedReleaseUsesTheFinalReceipt ==
+    delegated /\ runtime.mode = "Followup" =>
+        (segment = last /\ sawEnd /\ media.reported /\ media.displayed /\
+         (~narrated \/ media.drained))
 =============================================================================

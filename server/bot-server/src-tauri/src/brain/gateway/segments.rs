@@ -11,6 +11,9 @@ pub(super) struct Delivery {
     pub request_id:String,pub progress_seq:u64,pub progress_only:bool,
     /// The producer can still add speech. A segment receipt alone cannot finish this turn.
     pub live_content:bool,
+    /// Set when this foreground answer delegated a durable task. The outcome stays
+    /// open until the explanation's playback receipt.
+    pub foreground_task:Option<String>,
     pub(super) current_spoken:Option<String>,
     /// When the current segment was handed to the device, and how long it may
     /// play before a missing receipt releases the foreground.
@@ -28,7 +31,7 @@ impl Delivery {
             expires_at_ms:crate::time::now_ms() as i64+120_000,revoked:false})?;
         let playback_id=brain.tasks.begin_playback(&plan,&lease_id)?;
         Ok(Self{plan,token,turn_id,activation_id:activation.into(),lease_id,playback_id,index,current_seq:0,total_sent:0,pending:segments.into(),current:None,
-            tasks:tasks.into(),audio_requested:audio,started:Instant::now(),last_progress:Instant::now(),preparing_task:false,request_id:String::new(),progress_seq:1000,progress_only:false,live_content:false,report_since:None,report_budget:segment_report_budget(0,0),receipt_sequence:0,current_spoken:None,current_rendered:None,current_visual_unavailable:false})
+            tasks:tasks.into(),audio_requested:audio,started:Instant::now(),last_progress:Instant::now(),preparing_task:false,request_id:String::new(),progress_seq:1000,progress_only:false,live_content:false,foreground_task:None,report_since:None,report_budget:segment_report_budget(0,0),receipt_sequence:0,current_spoken:None,current_rendered:None,current_visual_unavailable:false})
     }
     pub fn next(&mut self,brain:&Brain)->Result<Option<(Value,Option<Playback>,DisplayResult)>,String>{
         if !brain.memory.pending_household_cleanup()?.is_empty(){return Err("source_cleanup_pending".into());}
@@ -212,7 +215,14 @@ pub(super) fn scene_for(speech:&str,expression:&str)->crate::brain::scene::Scene
 
 pub(super) struct TaskReady {
     pub token:RuntimeToken,pub activation_id:String,pub task_id:String,pub progress_only:bool,
+    pub delivery_id:String,pub delivery_revision:i64,pub kind_result:bool,pub promise_full:bool,
     pub result:Result<(PresentationPlan,Vec<PreparedSegment>),String>,
+}
+pub(super) async fn prepare_line(brain:Arc<Brain>,task:crate::brain::tasks::TaskRecord,speech:&str)->Result<(PresentationPlan,Vec<PreparedSegment>),String>{
+    let context=crate::brain::presentation::PlanContext{household_id:task.household_id,daily_conversation_id:task.daily_conversation_id,
+        conversation_turn_id:task.conversation_turn_id,task_id:Some(task.task_id)};
+    let (plan,segments,_)=brain.prepare_presentation(context,scene_for(speech,"happy"),None,&[],"",true,&[],None,None).await?;
+    Ok((plan,segments))
 }
 pub(super) async fn prepare_task(brain:Arc<Brain>,task:crate::brain::tasks::TaskRecord)->Result<(PresentationPlan,Vec<PreparedSegment>),String>{
     if matches!(task.state,crate::brain::tasks::TaskState::Succeeded|crate::brain::tasks::TaskState::Partial){
@@ -240,7 +250,10 @@ pub(super) async fn prepare_task(brain:Arc<Brain>,task:crate::brain::tasks::Task
         crate::brain::tasks::TaskState::Cancelled=>"这项任务已经取消。".into(),
         crate::brain::tasks::TaskState::Unknown=>"暂时还不能确认结果，我保留了任务记录，请在 Mac 上检查。".into(),
         crate::brain::tasks::TaskState::AwaitingInput=>task.result["summary"].as_str().unwrap_or("还需要补充一些信息，请在 Mac 上查看任务。可以接着告诉我缺少的参数。").to_owned(),
-        crate::brain::tasks::TaskState::Succeeded|crate::brain::tasks::TaskState::Partial=>task.result["summary"].as_str().unwrap_or("任务有了新的结果，可以在 Mac 上查看。").to_owned(),
+        crate::brain::tasks::TaskState::Succeeded|crate::brain::tasks::TaskState::Partial=>{
+            let full=task.result["summary"].as_str().unwrap_or("任务有了新的结果，可以在 Mac 上查看。");
+            super::super::task_delivery::spoken_result(full).0
+        },
         _=>"任务仍在处理中。".into(),
     };
     let context=crate::brain::presentation::PlanContext{household_id:task.household_id,daily_conversation_id:task.daily_conversation_id,

@@ -176,6 +176,7 @@ impl Brain {
             self.emit("turn.understood",Some(&input.turn_id),json!({"preview":text.chars().take(80).collect::<String>(),"conversation_turn_id":journal.conversation_turn_id}));
             text
         }else{self.skip_stage(&input.turn_id,"asr","text_input",&mut timings);source.text.clone()};
+        self.note_understood(&input.turn_id, &transcript);
         if let Some(context)=&work.context {
             if let Ok(mut current)=context.lock() {
                 current.source=journal.conversation_turn_id.clone();
@@ -360,6 +361,7 @@ impl Brain {
                 }
             }
             if proposal.capability=="agent.work" {proposal.input["prompt"]=proposal.input.get("prompt").cloned().unwrap_or(json!(proposal.source_quote));}
+            if super::task_delivery::asks_to_be_told(&transcript) { proposal.input["tell_when_done"]=json!(true); }
             proposal.input["source_turn_ids"]=json!(source_refs);
             proposal.input["private_profile_id"]=json!(input.profile_id);
             if let Some(id)=&proposal.resume_task_id {

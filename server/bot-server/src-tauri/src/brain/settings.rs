@@ -41,10 +41,13 @@ pub struct ResponsiveConfig {
     /// final segment and ordinary chat is not held for a background task.
     /// Set `false` in `brain.json` to roll back without discarding accepted tasks.
     pub quick_decouple: bool,
+    /// RA-04. Speak a finished task without a wake, and only when the person asked
+    /// to be told. Default off. The installed firmware still drops this moment.
+    pub speak_task_results: bool,
 }
 
 impl Default for ResponsiveConfig {
-    fn default() -> Self { Self { quick_decouple: true } }
+    fn default() -> Self { Self { quick_decouple: true, speak_task_results: false } }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -238,6 +241,7 @@ mod tests {
         let mut config: BrainConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config.models.asr_backend, "whisper");
         assert!(config.responsive.quick_decouple, "RA-00 defaults on; false is the rollback");
+        assert!(!config.responsive.speak_task_results, "speaking a task result is opt-in");
         assert!(validate(&config).is_ok());
         config.responsive.quick_decouple = false;
         assert!(validate(&config).is_ok());
