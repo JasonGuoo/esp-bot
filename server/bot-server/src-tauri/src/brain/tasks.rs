@@ -69,7 +69,7 @@ pub struct TaskService{
     scheduler:Mutex<Option<tokio::task::JoinHandle<()>>>,reconciler:Mutex<Option<tokio::task::JoinHandle<()>>>,runners:Mutex<HashMap<String,tokio::task::JoinHandle<()>>>,
     /// Test fault: the next durable result write fails before commit.
     fail_result_writes:AtomicU32,
-    persist_pending:Mutex<Vec<String>>,
+    persist_pending:Mutex<Vec<UnstoredResult>>,
     hint_pending:AtomicBool,
 }
 impl TaskService{
@@ -151,6 +151,7 @@ impl TaskService{
             if !service.accepting.load(Ordering::Acquire){break;}
             if service.redacting.load(Ordering::Acquire){continue;}
             let _=service.purge_expired();
+            service.retry_persist_pending();
             let Ok(records)=service.pending_prints() else{continue};
             for task in records{
                 let active=service.active.lock().map(|a|a.contains_key(&task.task_id)).unwrap_or(true);if active{continue;}
@@ -381,9 +382,12 @@ impl TaskService{
         super::capabilities::reconcile_print(self,&task).await?;self.get(id)
     }
     pub fn set_state(&self,id:&str,mut state:TaskState,stage:&str,result:Option<Value>)->Result<(),String>{
-        if deliverable(state) && self.fail_result_writes.swap(0,Ordering::AcqRel)>0 {
-            self.note_persist_pending(id);
-            return Err("task_store_full".into());
+        if deliverable(state) {
+            let faults=self.fail_result_writes.load(Ordering::Acquire);
+            if faults>0 && self.fail_result_writes.compare_exchange(faults,faults-1,Ordering::AcqRel,Ordering::Acquire).is_ok() {
+                self.note_unstored(id,None,"",None);
+                return Err("task_store_full".into());
+            }
         }
         let mut db=self.db.lock().map_err(|_|"task_database_lock")?;let tx=db.transaction().map_err(db_error)?;
         let task=query_task(&tx,id)?;let mut result=result.unwrap_or_else(||task.result.clone());
@@ -410,6 +414,7 @@ impl TaskService{
         let hint=inbox_hint_due(&tx)?;
         tx.commit().map_err(db_error)?;drop(db);
         self.hint_pending.store(hint,Ordering::Release);
+        self.clear_unstored(id);
         if changed{self.emit(&task,"task.state",json!({"state":state,"stage":stage,"task_revision":task_revision,"result_revision":revision}));}Ok(())
     }
     async fn commit_state_retry(&self,id:&str,state:TaskState,stage:&str,result:Option<Value>){
@@ -417,19 +422,43 @@ impl TaskService{
             match self.set_state(id,state,stage,result.clone()) {
                 Ok(())=>return,
                 Err(error) if attempt<2 && storage_retryable(&error) => tokio::time::sleep(Duration::from_millis(20*(attempt as u64+1))).await,
-                Err(_)=>{self.note_persist_pending(id);return;}
+                Err(_)=>{self.note_unstored(id,Some(state.as_str()),stage,result);return;}
+            }
+        }
+    }
+    /// Writes that failed three times are tried again from the task clock.
+    pub fn retry_persist_pending(&self){
+        let batch=self.persist_pending.lock().map(|mut pending|std::mem::take(&mut *pending)).unwrap_or_default();
+        let mut again=Vec::new();
+        for item in batch {
+            let Some(state)=item.state.as_deref() else { again.push(item); continue; };
+            if self.set_state(&item.id,TaskState::parse(state),&item.stage,item.result.clone()).is_err() {
+                again.push(item);
+            }
+        }
+        if let Ok(mut pending)=self.persist_pending.lock(){
+            for item in again {
+                if pending.len()>=super::task_delivery::MAX_PERSIST_PENDING {break;}
+                if pending.iter().any(|have|have.id==item.id) {continue;}
+                pending.push(item);
             }
         }
     }
     pub fn fail_next_result_write(&self){self.fail_result_writes.fetch_add(1,Ordering::AcqRel);}
-    pub fn persist_pending(&self)->Vec<String>{self.persist_pending.lock().map(|v|v.clone()).unwrap_or_default()}
+    pub fn persist_pending(&self)->Vec<String>{self.persist_pending.lock().map(|v|v.iter().map(|item|item.id.clone()).collect()).unwrap_or_default()}
     pub fn hint_pending(&self)->bool{self.hint_pending.load(Ordering::Acquire)}
-    fn note_persist_pending(&self,id:&str){
+    fn note_unstored(&self,id:&str,state:Option<&str>,stage:&str,result:Option<Value>){
         if let Ok(mut pending)=self.persist_pending.lock(){
-            if pending.iter().any(|item|item==id){return;}
+            if let Some(existing)=pending.iter_mut().find(|item|item.id==id){
+                if state.is_some(){existing.state=state.map(str::to_owned);existing.stage=stage.to_owned();existing.result=result;}
+                return;
+            }
             if pending.len()>=super::task_delivery::MAX_PERSIST_PENDING{return;}
-            pending.push(id.to_owned());
+            pending.push(UnstoredResult{id:id.to_owned(),state:state.map(str::to_owned),stage:stage.to_owned(),result});
         }
+    }
+    fn clear_unstored(&self,id:&str){
+        if let Ok(mut pending)=self.persist_pending.lock(){pending.retain(|item|item.id!=id);}
     }
     fn publish_hint(&self){
         if let Ok(db)=self.db.lock(){if let Ok(hint)=inbox_hint_due(&db){self.hint_pending.store(hint,Ordering::Release);}}
@@ -459,8 +488,9 @@ impl TaskService{
     pub fn expansion_target(&self,household:&str,speaker:Option<&str>)->Result<Option<InboxView>,String>{
         valid_id(household)?;
         let db=self.db.lock().map_err(|_|"task_database_lock")?;
-        let mut statement=db.prepare("SELECT i.delivery_id FROM delivery_inbox i JOIN tasks t ON t.id=i.task_id WHERE t.household_id=?1 AND i.migrated=0 AND i.state='partial' AND i.kind='result' ORDER BY i.created_at_ms DESC LIMIT 8").map_err(db_error)?;
-        let rows=statement.query_map(params![household],|r|r.get::<_,String>(0)).map_err(db_error)?;
+        let fresh=now()-super::task_delivery::PARTIAL_WAIT_MS;
+        let mut statement=db.prepare("SELECT i.delivery_id FROM delivery_inbox i JOIN tasks t ON t.id=i.task_id WHERE t.household_id=?1 AND i.migrated=0 AND i.state='partial' AND i.kind='result' AND i.created_at_ms>=?2 ORDER BY i.created_at_ms DESC LIMIT 8").map_err(db_error)?;
+        let rows=statement.query_map(params![household,fresh],|r|r.get::<_,String>(0)).map_err(db_error)?;
         let ids=rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
         drop(statement);
         for id in ids {
@@ -536,7 +566,7 @@ impl TaskService{
         valid_id(delivery_id)?;
         let db=self.db.lock().map_err(|_|"task_database_lock")?;
         db.execute("UPDATE delivery_inbox SET created_at_ms=?2 WHERE delivery_id=?1",params![delivery_id,created_at_ms]).map_err(db_error)?;
-        Ok(())
+        drop(db);self.publish_hint();Ok(())
     }
     pub fn retain(&self)->Result<(),String>{
         let db=self.db.lock().map_err(|_|"task_database_lock")?;
@@ -569,19 +599,17 @@ impl TaskService{
         if n!=1{return Err("delivery_conflict".into());}
         Ok(())
     }
-    pub fn release_attempt(&self,delivery_id:&str,activation:&str,prefix:&str)->Result<(),String>{
-        if delivery_id.is_empty(){return Ok(());}
-        valid_id(delivery_id)?;if !activation.is_empty(){valid_id(activation)?;}
-        let _=activation;
+    /// Release this claim only. A newer lease, or a row that already settled, stays.
+    pub fn release_attempt(&self,delivery_id:&str,lease_id:&str,prefix:&str)->Result<(),String>{
+        if delivery_id.is_empty()||lease_id.is_empty(){return Ok(());}
+        valid_id(delivery_id)?;valid_id(lease_id)?;
         let db=self.db.lock().map_err(|_|"task_database_lock")?;
-        let row=load_inbox(&db,delivery_id)?;
-        if matches!(row.state.as_str(),"delivered"|"invalidated"){return Ok(());}
-        // An offered attempt with no played prefix goes back to pending so another
-        // device turn can claim it. A played prefix stays partial.
         let state=if prefix.is_empty(){"pending_delivery"}else{"partial"};
-        db.execute("UPDATE delivery_inbox SET state=?2,hold_activation=NULL,attempted_lease_id=NULL,playback_id=NULL,delivery_revision=delivery_revision+1,confirmed_prefix=CASE WHEN ?3='' THEN confirmed_prefix ELSE ?3 END WHERE delivery_id=?1 AND state NOT IN ('delivered','invalidated')",
-            params![delivery_id,state,prefix]).map_err(db_error)?;
-        drop(db);self.publish_hint();Ok(())
+        let n=db.execute("UPDATE delivery_inbox SET state=?3,hold_activation=NULL,attempted_lease_id=NULL,playback_id=NULL,delivery_revision=delivery_revision+1,confirmed_prefix=CASE WHEN ?4='' THEN confirmed_prefix ELSE ?4 END WHERE delivery_id=?1 AND attempted_lease_id=?2 AND state='offered'",
+            params![delivery_id,lease_id,state,prefix]).map_err(db_error)?;
+        drop(db);
+        if n==1{self.publish_hint();}
+        Ok(())
     }
     pub fn inbox_state(&self,task_id:&str)->Result<Option<String>,String>{
         valid_id(task_id)?;let db=self.db.lock().map_err(|_|"task_database_lock")?;
@@ -1003,8 +1031,10 @@ fn scope_visible(scope:&str,private_scope:bool,speaker:Option<&str>)->bool{
     speaker.is_some_and(|speaker|scope==format!("person:{speaker}"))
 }
 fn inbox_hint_due(db:&Connection)->Result<bool,String>{
-    db.query_row("SELECT EXISTS(SELECT 1 FROM delivery_inbox WHERE migrated=0 AND private_scope=0 AND state IN ('pending_delivery','offered','partial','deferred'))",[],|r|r.get(0)).map_err(db_error)
+    let fresh=now()-super::task_delivery::PARTIAL_WAIT_MS;
+    db.query_row("SELECT EXISTS(SELECT 1 FROM delivery_inbox WHERE migrated=0 AND private_scope=0 AND (state IN ('pending_delivery','offered','deferred') OR (state='partial' AND created_at_ms>=?1)))",[fresh],|r|r.get(0)).map_err(db_error)
 }
+struct UnstoredResult{id:String,state:Option<String>,stage:String,result:Option<Value>}
 fn prune_inbox(db:&Connection)->Result<(),String>{
     let now=now();
     let cutoff=now-super::task_delivery::RETENTION_MS;
@@ -1039,7 +1069,7 @@ fn store_terminal_inbox(db:&Connection,task:&TaskRecord,state:TaskState,result:&
     let (scope,private)=recipient_scope(&task.input);
     let tell=task.input["tell_when_done"].as_bool().unwrap_or(false)||super::task_delivery::asks_to_be_told(task.input["prompt"].as_str().unwrap_or(""));
     let invalidated=source_invalidated(db,&task.conversation_turn_id)?;
-    let same:Option<i64>=db.query_row("SELECT result_revision FROM delivery_inbox WHERE task_id=?1 AND kind=?2 AND result_ref=?3 AND recipient_scope=?4 AND state NOT IN ('invalidated') ORDER BY result_revision DESC LIMIT 1",params![task.task_id,kind,body,scope],|r|r.get(0)).optional().map_err(db_error)?;
+    let same:Option<i64>=db.query_row("SELECT result_revision FROM delivery_inbox WHERE task_id=?1 AND kind=?2 AND result_ref=?3 AND recipient_scope=?4 AND state NOT IN ('invalidated','delivered') ORDER BY result_revision DESC LIMIT 1",params![task.task_id,kind,body,scope],|r|r.get(0)).optional().map_err(db_error)?;
     if let Some(revision)=same{return Ok(revision);}
     prune_inbox(db)?;
     let revision=(task.result_revision as i64).saturating_add(1).max(1);
@@ -1472,6 +1502,8 @@ mod tests {
         let offered = service.claim_delivery(&aged.delivery_id, aged.revision, "lease-age", "playback-age").unwrap();
         service.apply_playback(&aged.delivery_id, offered, "lease-age", true, &aged.summary, false).unwrap();
         service.age_row(&aged.delivery_id, crate::time::now_ms() as i64 - crate::brain::task_delivery::PARTIAL_WAIT_MS - 1).unwrap();
+        assert!(service.expansion_target("house", None).unwrap().is_none(), "a summary older than the wait is not expanded");
+        assert!(!service.hint_pending(), "a stale summary does not keep the curious hint");
         service.retain().unwrap();
         assert_eq!(service.inbox_state(&second.task_id).unwrap().as_deref(), Some("delivered"));
         drop(service);
@@ -1579,6 +1611,57 @@ mod tests {
         service.forget_sources(&["turn".into()], false).await.unwrap();
         assert!(service.inbox_by_id(&row.delivery_id).unwrap().is_none());
         assert_eq!(service.outbox_count().unwrap(), 0);
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_late_release_cannot_clear_a_newer_claim() {
+        let dir = std::env::temp_dir().join(format!("xiaodai-inbox-lease-{}", uuid::Uuid::new_v4()));
+        let service = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        let task = sample(&service, "intent-lease", "查资料");
+        service.set_state(&task.task_id, TaskState::Succeeded, "done", Some(json!({"summary": "短结果。"}))).unwrap();
+        let row = service.inbox_row(&task.task_id).unwrap().unwrap();
+        service.claim_delivery(&row.delivery_id, row.revision, "lease-live", "playback-live").unwrap();
+        service.release_attempt(&row.delivery_id, "lease-stale", "").unwrap();
+        assert_eq!(service.inbox_state(&task.task_id).unwrap().as_deref(), Some("offered"));
+        service.release_attempt(&row.delivery_id, "lease-live", "").unwrap();
+        assert_eq!(service.inbox_state(&task.task_id).unwrap().as_deref(), Some("pending_delivery"));
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_heard_question_is_asked_again_after_resume() {
+        let dir = std::env::temp_dir().join(format!("xiaodai-inbox-heard-{}", uuid::Uuid::new_v4()));
+        let service = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        let task = sample(&service, "intent-heard", "查资料");
+        service.set_state(&task.task_id, TaskState::AwaitingInput, "needs_input", Some(json!({"summary": "还缺年份"}))).unwrap();
+        let first = service.inbox_row(&task.task_id).unwrap().unwrap();
+        let offered = service.claim_delivery(&first.delivery_id, first.revision, "lease-heard", "playback-heard").unwrap();
+        assert_eq!(service.apply_playback(&first.delivery_id, offered, "lease-heard", true, "还缺年份", true).unwrap(), "delivered");
+        service.resume(&task.task_id, json!({"year": "2024"}), false).unwrap();
+        service.set_state(&task.task_id, TaskState::AwaitingInput, "needs_input", Some(json!({"summary": "还缺年份"}))).unwrap();
+        let second = service.inbox_row(&task.task_id).unwrap().unwrap();
+        assert_ne!(first.delivery_id, second.delivery_id);
+        assert_eq!(second.state, "pending_delivery");
+        assert_eq!(service.inbox_by_id(&first.delivery_id).unwrap().unwrap().state, "delivered");
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_result_that_failed_to_store_is_retried_without_a_restart() {
+        let dir = std::env::temp_dir().join(format!("xiaodai-inbox-retry-{}", uuid::Uuid::new_v4()));
+        let service = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        let task = sample(&service, "intent-retry", "查资料");
+        service.fail_result_writes.store(3, std::sync::atomic::Ordering::SeqCst);
+        service.commit_state_retry(&task.task_id, TaskState::Succeeded, "done", Some(json!({"summary": "有结果"}))).await;
+        assert!(service.inbox_state(&task.task_id).unwrap().is_none());
+        assert!(service.persist_pending().contains(&task.task_id));
+        service.retry_persist_pending();
+        assert_eq!(service.inbox_state(&task.task_id).unwrap().as_deref(), Some("pending_delivery"));
+        assert!(!service.persist_pending().contains(&task.task_id));
         drop(service);
         let _ = std::fs::remove_dir_all(dir);
     }
