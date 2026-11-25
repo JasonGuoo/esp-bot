@@ -1,5 +1,7 @@
 # Mac 为主的家庭后端：部署与复用决策
 
+**2026-11-25 增量设计，待实现：** [随时回应规格](specs/responsive-assistant/README.md)细化同一 Mac 后端内的控制/工作边界：Luna、OpenCode、模型、存储和发送均在交互控制循环之外；保留现有部署与模型栈。下文日期对应其原始决策，本次不将方案写成已安装能力。
+
 **当前选择：2026-11-16。** 用户已明确当前依赖 Mac，Bot 只连接配对的本地后端，不在本阶段开发独立联网 Agent。本页保留 Local-First 的设备离线互动和本机数据边界，更新原 2026-10-30 路线。总体权威见 [architecture.md](architecture.md)，详细设计和步骤见 [家庭陪伴规格](specs/household-companion/README.md)。
 
 本次是设计修订。当前源码及真实运行范围见 [11 月 15 日验收](review-acceptance-2026-11-15.md)；[独立 ESP32 Agent 可行性研究](research/esp32-s31-standalone-agent-feasibility-2026-11-13.md)保留为研究，不再列为当前产品配置或开发门槛。
@@ -64,3 +66,11 @@ BLE 仍用于 Mac 配对、Wi-Fi 安全配置与低带宽控制的后续目标�
 - [开源记忆比较与固定版本](research/household-memory-open-source-2026-11-16.md)、[项目复用目录](upstream-reuse-catalog.md)。
 
 复用之前核查对应版本、许可证与模型/资产条款。**不新增 CI，不把设计、模型下载或编译成功写成实板功能验收。**
+
+## 8. Mac 内部隔离与能力入口 — 2026-11-25 目标
+
+Mac 交互控制器采用事件与状态决策，外部工作通过非阻塞有界命令提交、带版本事件返回。保留独立模型 lane；同步 CPU/文件/数据库工作不进入控制执行环境，Luna 内部会话顺序仍由其服务管理。故障、过载或取消清理不能占住本地停止和状态反馈。
+
+现有 TaskService、SQLite、voice_album、提醒和设备接口优先复用；统一的[能力服务](specs/responsive-assistant/capabilities.md)把模型结构化提案接到真实适配器，公布当前就绪状态与效果回执。MCP 可作为适配边界，但不会把所有内部函数直接开放给模型。
+
+当前输出与后台任务分离，结果先进入持久收件箱，再按激活和输出许可交付。恢复未知效果时先核对，不能用重新运行工具代替恢复。十步变更与各项回滚约束见[实施计划](specs/responsive-assistant/implementation-plan.md)。

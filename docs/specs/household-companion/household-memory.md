@@ -1,5 +1,11 @@
 # 家庭会话与可追溯记忆设计
 
+**2026-11-25 增量设计，待实现：** [身份连续性](../responsive-assistant/identity-continuity.md)与[能力契约](../responsive-assistant/capabilities.md)定义任何时刻“记住，我是 Jason”、显式记住/更正/遗忘，以及可供前台立即读取的版本化上下文。见 [issue #36](https://github.com/JasonGuoo/esp-bot/issues/36)、[RA-06](../responsive-assistant/steps/ra-06-context-and-task-control.md)、[RA-07](../responsive-assistant/steps/ra-07-identity-continuity.md)、[RA-08](../responsive-assistant/steps/ra-08-assistant-adapters.md)。下文旧交付状态保持原范围，本次不修改 schema 或迁移数据。
+
+新增目标将原始话语、可修订声音观察/匿名组、稳定人物 ID 和称呼分开。命名复用现有 voice_album，但姓名保存、声音确认、历史关联分别提交和回执；只对有证据且仍允许使用的旧片段修订归属。模型不能把所有未知家庭对话归给 Jason，也不能利用识别结果授予权限。人物是事实主语还是消息说话者必须分开记录。
+
+显式记忆动作由能力 adapter 执行短事务，后续索引整理异步进行；来源撤回立即限制读取，派生清理与重建有可查询状态。控制循环使用可重建的快照，不等待图检索或数据库锁；姓名/声音/记忆的删除范围分别处理，原有私域、留存和原文来源规则继续有效。
+
 日期：2026-11-16。状态：**源码开发完成，待测试**。当前接口、schema v5 迁移、默认设置及部署条件见 [家庭记忆实现说明](memory-implementation.md) 和 [总实施记录](implementation-2026-11-16.md)；旧个人接口保留在 [Mac 记忆说明](../../mac-memory.md)。本轮未编译、未安装或运行 Graphiti/识别/抽取模型、未执行 Mac GUI 或实板测试，没有 CI。本规范与
 [总设计](README.md)、[开发步骤](implementation-plan.md) 配套，主要覆盖
 HC-02、HC-04、HC-09、HC-10、HC-11。
