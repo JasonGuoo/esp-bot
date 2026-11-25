@@ -1,1 +1,1 @@
-server_tests brain::gateway::tests::a_turn_cancel_retires_an_inflight_failure_prep brain::orchestration::tests::a_named_handle_or_the_immediate_clarification_does_fill
+server_tests brain::gateway::tests::a_turn_cancel_retires_an_inflight_failure_prep brain::gateway::tests::a_failed_prep_after_an_ack_interrupts_only_the_live_answer brain::orchestration::tests::a_named_handle_or_the_immediate_clarification_does_fill brain::orchestration::tests::a_journalled_clarification_keeps_chat_on_the_core_and_sends_the_answer_to_the_task
