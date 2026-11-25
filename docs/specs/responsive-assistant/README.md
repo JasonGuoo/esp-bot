@@ -2,7 +2,7 @@
 
 日期：2026-11-25。总跟踪：[issue #36](https://github.com/JasonGuoo/esp-bot/issues/36)。核查基线：[`46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`](https://github.com/JasonGuoo/esp-bot/tree/46ecdfbd99eba8e9158f8953b9ca251a45bc1d92)。
 
-**状态：设计与分步规格已编写，待审阅；RA-00～RA-10 运行时改造尚未实现。** 本次仅修改文档，不改变当前固件、模型、数据库、协议或权限；不把已有 HC 的“源码交付”或旧实板记录当作本方案通过。文档 PR 关联本 issue，但不自动关闭后续实施与验收。
+**状态：设计已合并。RA-00 与 #35 为 implemented, host-tested, pending board acceptance。RA-01～RA-10 运行时改造尚未实现。** 不把主机测试或旧实板记录当作本方案通过。文档与实现都不自动关闭后续实板验收。
 
 ## 1. 用户希望得到什么
 
@@ -60,7 +60,7 @@
 
 | 步骤 | 规格 | 实施状态 |
 | --- | --- | --- |
-| RA-00 | [Mac 侧快速解耦（无协议变更）](steps/ra-00-quick-decoupling.md) | 待实现；建议最先进行 |
+| RA-00 | [Mac 侧快速解耦（无协议变更）](steps/ra-00-quick-decoupling.md) | implemented, host-tested, pending board acceptance |
 | RA-01 | [控制契约与状态所有权](steps/ra-01-control-contracts.md) | 待实现 |
 | RA-02 | [网关 I/O 解耦](steps/ra-02-gateway-io.md) | 待实现 |
 | RA-03 | [Luna 服务隔离](steps/ra-03-luna-worker.md) | 待实现 |

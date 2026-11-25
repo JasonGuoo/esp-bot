@@ -1,6 +1,6 @@
 # 随时回应：分步实施计划
 
-日期：2026-11-25。总 issue：[#36](https://github.com/JasonGuoo/esp-bot/issues/36)。基线：`46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`。**本次交付仅为设计与 specs；以下运行时步骤全部待实现，相关验收均未运行。**
+日期：2026-11-25。总 issue：[#36](https://github.com/JasonGuoo/esp-bot/issues/36)。基线：`46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`。**M0（RA-00 与 #35）已实现并完成主机测试，待实板验收。RA-01～RA-10 仍待实现，相关实板验收均未运行。**
 
 本计划建立在现有 HC 实现上，优先修复控制和交付边界，再把已存在的功能接成能力。各步的具体代码位置、接口、失败策略和回归见独立规格，不在旧 HC issue 中重复声称已完成。
 
@@ -62,7 +62,9 @@ flowchart TD
 
 ### M0：快速解耦（RA-00、#35）
 
-仅 Mac、无协议与固件变更：委派回复以真实 final 段结束本轮，后台任务不再使普通输入返回 session_busy；待补参任务不再强制闲聊走 OpenCode；三处分支内等待先 fence 后迁出。用既有分阶段计时对比前后；#35 steer 竞争单独修复。
+**状态：implemented, host-tested, pending board acceptance。**
+
+仅 Mac、无协议与固件变更：委派回复以真实 final 段结束本轮，后台任务不再使普通输入返回 session_busy；待补参任务不再强制闲聊走 OpenCode；三处分支内等待先 fence 后迁出。用既有分阶段计时对比前后；#35 steer 竞争单独修复。开关是 `brain.json` 的 `responsive.quick_decouple`，默认 `true`；设为 `false` 恢复基线。任务记录仍在 `TaskService`。开关打开时，结果和补问在下一次设备主动发起的轮次里先说出来（设备处于 COMMITTED），不在空闲时推送；没确认的段不会一直占住前台。App 控制台不再显示 `waiting_task`。跨会话、断线之后的持久交付仍是 RA-04，本步不新建收件箱。主机回归已跑；S31 与真人验收未跑。
 
 ### M1：交互可用性（RA-04、RA-01～RA-03）
 
@@ -130,7 +132,8 @@ S31 app 分区在 2026-11-18 各阶段之后只剩约 34 KB 余量（当时额�
 | --- | --- | --- |
 | 总结、框架选择与代码审查 | 已完成本次文档核查 | 代码基线或上游边界变化时更新 |
 | 本组设计、RA-00 与十步 specs | 已编写，待 PR 审阅 | 文档 PR 合并后标记设计已合并 |
-| RA-00～RA-10 实现 | 待实现 | 对应行为代码与必要模型/回归实际交付 |
+| RA-00 实现与 #35 steer 交接 | implemented, host-tested, pending board acceptance | 主机 `cargo test` / `cargo clippy` 与 `SteerHandoff` TLC 已跑；实板未跑 |
+| RA-01～RA-10 实现 | 待实现 | 对应行为代码与必要模型/回归实际交付 |
 | 运行、延迟、声纹、Mac/S31 联合验收 | `not_run` | 在记录环境中执行并附证据 |
 
 文档 PR 使用 `Refs #36`，不用自动关闭关键词。以后源码完成但实板未验收时继续明确“开发完成，待测试”，不能从勾选文档推导运行通过。旧 issue 的修复和验收状态不被本计划覆盖。

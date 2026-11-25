@@ -11,14 +11,14 @@ use crate::client::AttemptMsg;
 use crate::config::{BargeIn, CodexConfig};
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
 pub type BoxRead = Pin<Box<dyn AsyncRead + Send>>;
@@ -472,6 +472,167 @@ impl Sink {
     }
 }
 
+/// Notifications kept while a `turn/steer` request is in flight. The reader may deliver
+/// the steer's userMessage before the RPC waiter resumes; those events stay here until
+/// the ACK commits the handoff or the request is withdrawn.
+const STEER_HOLD_LIMIT: usize = 64;
+
+enum SteerHold {
+    /// Request written, ACK not applied. `run_turn` appends instead of publishing.
+    Armed { id: u64, buffered: VecDeque<Value>, overflow: bool },
+    /// ACK is being applied. Still buffers so nothing is published between the take and the sink swap.
+    Sealing { id: u64, buffered: VecDeque<Value>, overflow: bool },
+    /// ACK accepted and the sink already belongs to the new owner. `run_turn` drains `buffered`.
+    Ready { id: u64, buffered: VecDeque<Value>, overflow: bool },
+    /// ACK rejected, timed out, or the turn was already sealed/cancelled. `replay` is the
+    /// pre-steer prefix; steer output is not in it.
+    Dropped { replay: VecDeque<Value>, suppress_after: bool },
+}
+
+enum HoldTake {
+    Idle,
+    /// Still collecting. Do not publish.
+    Buffering,
+    Events { events: VecDeque<(u64, Value)>, suppress_after: bool },
+    Overflow,
+}
+
+fn is_user_message(v: &Value) -> bool {
+    v["method"] == "item/started" && v["params"]["item"]["type"] == "userMessage"
+}
+
+fn is_turn_terminal(v: &Value) -> bool {
+    v["method"] == "turn/completed"
+}
+
+/// A userMessage clears the pending flag only for the steer that captured it.
+/// Epoch 0 is an untagged event that arrived after that steer had already committed.
+fn user_message_clears_pending(pending: bool, current_epoch: u64, event_epoch: u64) -> bool {
+    pending && current_epoch != 0 && (event_epoch == 0 || event_epoch == current_epoch)
+}
+
+fn output_visible(act: &Active, live: bool) -> bool {
+    live && !act.steer_pending.load(Ordering::SeqCst) && !act.steer_suppress.load(Ordering::SeqCst)
+}
+
+fn push_limited(buffered: &mut VecDeque<Value>, overflow: &mut bool, v: Value) {
+    if buffered.len() >= STEER_HOLD_LIMIT {
+        if is_turn_terminal(&v) {
+            if let Some(pos) = buffered.iter().rposition(|e| !is_turn_terminal(e)) {
+                buffered.remove(pos);
+            } else {
+                buffered.pop_front();
+            }
+            buffered.push_back(v);
+        } else {
+            *overflow = true;
+        }
+        return;
+    }
+    buffered.push_back(v);
+}
+
+/// Keep the pre-steer prefix and one terminal. Drop the steer userMessage and everything
+/// that follows it, except the terminal that lets the original turn finish.
+fn withdraw_buffer(buffered: VecDeque<Value>) -> (VecDeque<Value>, bool) {
+    let mut replay = VecDeque::new();
+    let mut suppress_after = false;
+    let mut terminal = None;
+    for v in buffered {
+        if !suppress_after && is_user_message(&v) {
+            suppress_after = true;
+            continue;
+        }
+        if is_turn_terminal(&v) {
+            terminal = Some(v);
+            break;
+        }
+        if !suppress_after {
+            replay.push_back(v);
+        }
+    }
+    if let Some(v) = terminal {
+        replay.push_back(v);
+    }
+    (replay, suppress_after)
+}
+
+fn buffer_sealed_without_steer(buffered: &VecDeque<Value>) -> bool {
+    let mut saw_steer = false;
+    for v in buffered {
+        if is_user_message(v) {
+            saw_steer = true;
+        }
+        if is_turn_terminal(v) && !saw_steer {
+            return true;
+        }
+    }
+    false
+}
+
+fn hold_is_buffering(hold: &Option<SteerHold>) -> bool {
+    matches!(hold, Some(SteerHold::Armed { .. } | SteerHold::Sealing { .. }))
+}
+
+fn push_buffered(act: &Active, v: Value) -> Result<(), Value> {
+    let mut slot = act.steer_hold.lock().unwrap();
+    match slot.as_mut() {
+        Some(SteerHold::Armed { buffered, overflow, .. } | SteerHold::Sealing { buffered, overflow, .. }) => {
+            push_limited(buffered, overflow, v);
+            Ok(())
+        }
+        // A notification that arrives after the ACK still belongs to this handoff.
+        // Keep it behind events already buffered so a terminal cannot overtake its userMessage.
+        Some(SteerHold::Ready { buffered, overflow, .. }) => {
+            push_limited(buffered, overflow, v);
+            Ok(())
+        }
+        _ => Err(v),
+    }
+}
+
+async fn hold_slot_clear(act: &Active, cancel: &CancellationToken) -> bool {
+    let deadline = tokio::time::sleep(Duration::from_secs(2));
+    tokio::pin!(deadline);
+    loop {
+        if cancel.is_cancelled() || act.finishing.load(Ordering::SeqCst) || act.done.is_cancelled() || act.interrupt.is_cancelled() {
+            return false;
+        }
+        if act.steer_hold.lock().unwrap().is_none() {
+            return true;
+        }
+        tokio::select! {
+            _ = act.changed.notified() => {}
+            _ = act.done.cancelled() => return false,
+            _ = cancel.cancelled() => return false,
+            _ = &mut deadline => return false,
+        }
+    }
+}
+
+fn take_hold(act: &Active) -> HoldTake {
+    let taken = {
+        let mut slot = act.steer_hold.lock().unwrap();
+        match slot.as_ref() {
+            Some(SteerHold::Ready { .. } | SteerHold::Dropped { .. }) => slot.take(),
+            Some(SteerHold::Armed { .. } | SteerHold::Sealing { .. }) => return HoldTake::Buffering,
+            None => return HoldTake::Idle,
+        }
+    };
+    // The next steer waits until this slot is empty.
+    act.changed.notify_one();
+    match taken {
+        Some(SteerHold::Ready { overflow: true, .. }) => HoldTake::Overflow,
+        Some(SteerHold::Ready { id, buffered, overflow: false }) => {
+            HoldTake::Events { events: buffered.into_iter().map(|v| (id, v)).collect(), suppress_after: false }
+        }
+        Some(SteerHold::Dropped { replay, suppress_after }) => {
+            HoldTake::Events { events: replay.into_iter().map(|v| (0, v)).collect(), suppress_after }
+        }
+        _ => HoldTake::Idle,
+    }
+}
+
 /// The one in-flight turn on the conversation thread.
 #[derive(Clone)]
 struct Active {
@@ -487,6 +648,13 @@ struct Active {
     interrupt: CancellationToken,
     /// After an accepted steer: drop deltas of the pre-steer answer until the steer's userMessage starts.
     steer_pending: Arc<AtomicBool>,
+    /// Which accepted steer `steer_pending` belongs to. A buffered userMessage clears only this epoch.
+    steer_epoch: Arc<AtomicU64>,
+    /// Withdrawn steer output must not be published, including events that arrive after the barrier drops.
+    steer_suppress: Arc<AtomicBool>,
+    /// Request-scoped handoff. Installed before `turn/steer` is written so an early notification
+    /// cannot be applied before the ACK commits or withdraws the sink swap.
+    steer_hold: Arc<Mutex<Option<SteerHold>>>,
     steer_sent_at: Arc<Mutex<Option<Instant>>>,
     /// The turn completed while a steer was still pending (its text was never answered).
     steer_unanswered: Arc<AtomicBool>,
@@ -505,6 +673,9 @@ impl Active {
             claim: Default::default(),
             interrupt: CancellationToken::new(),
             steer_pending: Default::default(),
+            steer_epoch: Default::default(),
+            steer_suppress: Default::default(),
+            steer_hold: Default::default(),
             steer_sent_at: Default::default(),
             steer_unanswered: Default::default(),
             finishing: Default::default(),
@@ -549,6 +720,10 @@ struct Inner {
     gate: tokio::sync::Mutex<()>,
     active: Mutex<Option<Active>>,
     next_active: AtomicI64,
+    next_steer: AtomicU64,
+    /// Test barrier: when set, `run_turn` pauses after draining a committed steer buffer.
+    apply_pause: Mutex<Option<Arc<Notify>>>,
+    drained_ready: AtomicUsize,
     interrupt: Mutex<Option<InterruptStats>>,
     steer: Mutex<Option<SteerStats>>,
     inputs: Mutex<InputStats>,
@@ -700,6 +875,9 @@ impl CodexEngine {
                 gate: tokio::sync::Mutex::new(()),
                 active: Mutex::new(None),
                 next_active: AtomicI64::new(1),
+                next_steer: AtomicU64::new(1),
+                apply_pause: Mutex::new(None),
+                drained_ready: AtomicUsize::new(0),
                 interrupt: Mutex::new(None),
                 steer: Mutex::new(None),
                 inputs: Mutex::new(InputStats::default()),
@@ -749,6 +927,37 @@ impl CodexEngine {
 
     pub fn last_steer(&self) -> Option<SteerStats> {
         self.inner.steer.lock().unwrap().clone()
+    }
+
+    /// How many notifications the in-flight steer barrier is holding. Tests use this as the
+    /// signal that the notification consumer ran before the ACK was released.
+    pub fn steer_hold_buffered(&self) -> usize {
+        let active = self.inner.active.lock().unwrap();
+        let Some(act) = active.as_ref() else { return 0 };
+        let n = match &*act.steer_hold.lock().unwrap() {
+            Some(SteerHold::Armed { buffered, .. } | SteerHold::Sealing { buffered, .. }) => buffered.len(),
+            _ => 0,
+        };
+        n
+    }
+
+    /// Pause `run_turn` after it drains a committed steer buffer, so a test can commit the next
+    /// steer before the previous userMessage is applied. Production leaves this unset.
+    pub fn pause_before_steer_apply(&self, enabled: bool) {
+        *self.inner.apply_pause.lock().unwrap() = enabled.then(|| Arc::new(Notify::new()));
+    }
+
+    /// Events drained from a committed barrier and not yet applied, while the test pause is held.
+    pub fn steer_apply_waiting(&self) -> usize {
+        self.inner.drained_ready.load(Ordering::SeqCst)
+    }
+
+    pub fn release_steer_apply(&self) {
+        // Taking the pause wakes the one waiter and disarms it, so the next committed
+        // buffer is applied immediately. The waiter already holds its own `Arc`.
+        if let Some(pause) = self.inner.apply_pause.lock().unwrap().take() {
+            pause.notify_one();
+        }
     }
 
     /// What reached the conversation thread: how many inputs, and whether the last one was
@@ -1126,26 +1335,75 @@ impl CodexEngine {
     }
 
     /// `turn/steer` into the active turn; on success the turn's output is handed to this caller.
+    ///
+    /// The barrier is installed before the request is written. Notifications that arrive before
+    /// the ACK is applied stay in that barrier. Success commits the sink swap and then releases
+    /// the buffered events to the new owner. Rejection, timeout, cancellation, or a turn that
+    /// already finished withdraws the barrier and drops the steer's early output.
     #[allow(clippy::too_many_arguments)]
     async fn steer(&self, conn: &Arc<RpcConn>, a: &Active, tid: &str, turn_id: &str, text: &str, cancel: &CancellationToken, idx: usize, tx: &mpsc::UnboundedSender<(usize, AttemptMsg)>) -> bool {
+        let mut stats = SteerStats { turn_id: turn_id.to_owned(), ..Default::default() };
+        if !hold_slot_clear(a, cancel).await {
+            stats.error = Some("steer handoff was not ready".into());
+            *self.inner.steer.lock().unwrap() = Some(stats);
+            return false;
+        }
+        let id = self.inner.next_steer.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut slot = a.steer_hold.lock().unwrap();
+            *slot = Some(SteerHold::Armed { id, buffered: VecDeque::new(), overflow: false });
+        }
+        a.changed.notify_one();
         let p = json!({ "threadId": tid, "expectedTurnId": turn_id, "input": [{ "type": "text", "text": text }] });
         let t = Instant::now();
         let r = conn.request("turn/steer", p, Duration::from_millis(self.inner.cfg.request_timeout_ms)).await;
-        let ack_ms = ms_since(t);
-        let mut stats = SteerStats { turn_id: turn_id.to_owned(), ack_ms, ..Default::default() };
+        stats.ack_ms = ms_since(t);
+        // Keep buffering while the sink swap is decided, so a notification cannot land on the old
+        // owner in the gap between taking the barrier and publishing to the new one.
+        {
+            let mut slot = a.steer_hold.lock().unwrap();
+            match slot.take() {
+                Some(SteerHold::Armed { id: hid, buffered, overflow }) if hid == id => {
+                    *slot = Some(SteerHold::Sealing { id, buffered, overflow });
+                }
+                other => { *slot = other; }
+            }
+        }
         let ok = match r {
             Ok(_) => {
-                // Publishing and handover share this lock: a pending check
-                // made before taking it could send an old tail to the new sink.
                 let mut sink = a.sink.lock().unwrap();
-                if a.finishing.load(Ordering::SeqCst) || a.done.is_cancelled() || a.interrupt.is_cancelled() {
+                let mut slot = a.steer_hold.lock().unwrap();
+                let held = match slot.take() {
+                    Some(SteerHold::Sealing { id: hid, buffered, overflow }) if hid == id => Some((buffered, overflow)),
+                    other => { *slot = other; None }
+                };
+                let Some((buffered, overflow)) = held else {
+                    stats.error = Some("steer handoff lost its barrier".into());
+                    drop(slot);
+                    drop(sink);
+                    *self.inner.steer.lock().unwrap() = Some(stats);
+                    return false;
+                };
+                let sealed = a.finishing.load(Ordering::SeqCst) || a.done.is_cancelled() || a.interrupt.is_cancelled()
+                    || cancel.is_cancelled() || buffer_sealed_without_steer(&buffered);
+                if sealed {
+                    let (replay, suppress_after) = withdraw_buffer(buffered);
+                    *slot = Some(SteerHold::Dropped { replay, suppress_after });
                     stats.error = Some("turn finished before the steer was applied".into());
+                    drop(slot);
+                    drop(sink);
+                    a.changed.notify_one();
                     false
                 } else {
                     *a.steer_sent_at.lock().unwrap() = Some(t);
+                    a.steer_epoch.store(id, Ordering::SeqCst);
                     a.steer_pending.store(true, Ordering::SeqCst);
+                    a.steer_suppress.store(false, Ordering::SeqCst);
+                    *slot = Some(SteerHold::Ready { id, buffered, overflow });
                     let old = std::mem::replace(&mut *sink, Sink { idx, tx: tx.clone(), cancel: cancel.clone() });
                     *a.claim.lock().unwrap() = None;
+                    drop(slot);
+                    drop(sink);
                     a.changed.notify_one();
                     old.send(AttemptMsg::Superseded);
                     stats.ok = true;
@@ -1153,6 +1411,18 @@ impl CodexEngine {
                 }
             }
             Err(e) => {
+                let buffered = {
+                    let mut slot = a.steer_hold.lock().unwrap();
+                    match slot.take() {
+                        Some(SteerHold::Sealing { id: hid, buffered, .. }) if hid == id => buffered,
+                        Some(SteerHold::Armed { id: hid, buffered, .. }) if hid == id => buffered,
+                        other => { *slot = other; VecDeque::new() }
+                    }
+                };
+                let (replay, suppress_after) = withdraw_buffer(buffered);
+                *a.steer_hold.lock().unwrap() = Some(SteerHold::Dropped { replay, suppress_after });
+                a.steer_pending.store(false, Ordering::SeqCst);
+                a.changed.notify_one();
                 stats.error = Some(e);
                 false
             }
@@ -1288,7 +1558,13 @@ async fn run_turn(
     let mut cancelled_at: Option<Instant> = None;
     let mut last_error: Option<String> = None;
     let mut stats = InterruptStats { turn_id: turn_id.clone(), ..Default::default() };
-    let mut pending: std::collections::VecDeque<Value> = buffered.into();
+    let mut pending: VecDeque<(u64, Value)> = buffered.into_iter().map(|v| (0, v)).collect();
+    // A withdrawn steer replays its pre-steer prefix before later output is suppressed.
+    let mut prefix_left: usize = 0;
+    let mut suppress_later = false;
+    // While set, committed steer events stay queued so a test can commit the next steer first.
+    // The socket is still read, so that next steer's early notifications can enter its barrier.
+    let mut apply_hold: Option<Arc<Notify>> = None;
     // item/completed carries the authoritative accumulated agent text. Keep
     // observed deltas per item so a final-only reply or missing final delta is
     // recoverable without speaking an already streamed prefix twice. None
@@ -1305,9 +1581,109 @@ async fn run_turn(
     };
 
     loop {
+        if pending.is_empty() {
+            match take_hold(&act) {
+                HoldTake::Events { events, suppress_after } => {
+                    let n = events.len();
+                    if suppress_after {
+                        prefix_left = n;
+                        suppress_later = true;
+                    }
+                    let pause = inner.as_ref().and_then(|i| i.apply_pause.lock().unwrap().clone());
+                    let held = pause.is_some() && events.iter().any(|(epoch, _)| *epoch != 0);
+                    pending.extend(events);
+                    if held {
+                        if let Some(i) = &inner { i.drained_ready.store(n, Ordering::SeqCst); }
+                        apply_hold = pause;
+                    }
+                }
+                HoldTake::Overflow => {
+                    let sink = act.sink.lock().unwrap();
+                    sink.send(AttemptMsg::Failed("steer handoff exceeded its buffer".into()));
+                    act.finishing.store(true, Ordering::SeqCst);
+                    send_interrupt(&conn);
+                    break;
+                }
+                HoldTake::Buffering | HoldTake::Idle => {}
+            }
+        }
         let cur_cancel = act.effective_cancel();
+        let buffering = hold_is_buffering(&act.steer_hold.lock().unwrap());
+        if let Some(pause) = apply_hold.clone() {
+            tokio::select! {
+                biased;
+                _ = pause.notified() => {
+                    apply_hold = None;
+                    if let Some(i) = &inner { i.drained_ready.store(0, Ordering::SeqCst); }
+                    continue;
+                }
+                _ = cur_cancel.cancelled(), if cancelled_at.is_none() => {
+                    apply_hold = None;
+                    continue;
+                }
+                _ = act.interrupt.cancelled(), if cancelled_at.is_none() => {
+                    apply_hold = None;
+                    continue;
+                }
+                _ = act.changed.notified() => continue,
+                n = rx.recv() => {
+                    if let Some(n) = n {
+                        if let Err(v) = push_buffered(&act, n) { pending.push_back((0, v)); }
+                    } else {
+                        let sink = act.sink.lock().unwrap();
+                        if cancelled_at.is_none() { sink.send(AttemptMsg::Failed("codex app-server exited mid-turn".into())); }
+                        act.finishing.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    continue;
+                }
+                _ = &mut deadline => {
+                    let sink = act.sink.lock().unwrap();
+                    if cancelled_at.is_none() {
+                        send_interrupt(&conn);
+                        sink.send(AttemptMsg::Failed(format!("codex turn timed out after {} ms", timeout.as_millis())));
+                    }
+                    act.finishing.store(true, Ordering::SeqCst);
+                    break;
+                }
+            }
+        }
         let msg = if let Some(m) = pending.pop_front() {
+            if prefix_left > 0 {
+                prefix_left -= 1;
+            } else if suppress_later {
+                act.steer_suppress.store(true, Ordering::SeqCst);
+                suppress_later = false;
+            }
             Some(m)
+        } else if buffering {
+            tokio::select! {
+                biased;
+                _ = cur_cancel.cancelled(), if cancelled_at.is_none() => None,
+                _ = act.interrupt.cancelled(), if cancelled_at.is_none() => None,
+                _ = act.changed.notified() => continue,
+                n = rx.recv() => match n {
+                    Some(n) => {
+                        if let Err(v) = push_buffered(&act, n) { pending.push_back((0, v)); }
+                        continue;
+                    }
+                    None => {
+                        let sink = act.sink.lock().unwrap();
+                        if cancelled_at.is_none() { sink.send(AttemptMsg::Failed("codex app-server exited mid-turn".into())); }
+                        act.finishing.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                },
+                _ = &mut deadline => {
+                    let sink = act.sink.lock().unwrap();
+                    if cancelled_at.is_none() {
+                        send_interrupt(&conn);
+                        sink.send(AttemptMsg::Failed(format!("codex turn timed out after {} ms", timeout.as_millis())));
+                    }
+                    act.finishing.store(true, Ordering::SeqCst);
+                    break;
+                }
+            }
         } else {
             tokio::select! {
                 biased;
@@ -1315,7 +1691,7 @@ async fn run_turn(
                 _ = act.interrupt.cancelled(), if cancelled_at.is_none() => None,
                 _ = act.changed.notified() => continue,
                 n = rx.recv() => match n {
-                    Some(n) => Some(n),
+                    Some(n) => Some((0, n)),
                     None => {
                         let sink = act.sink.lock().unwrap();
                         if cancelled_at.is_none() { sink.send(AttemptMsg::Failed("codex app-server exited mid-turn".into())); }
@@ -1334,7 +1710,7 @@ async fn run_turn(
                 }
             }
         };
-        let Some(v) = msg else {
+        let Some((event_epoch, v)) = msg else {
             // A stale token (the turn was claimed / handed over meanwhile) is not a cancel.
             if !act.interrupt.is_cancelled() && !act.effective_cancel().is_cancelled() {
                 continue;
@@ -1364,7 +1740,9 @@ async fn run_turn(
         let live = cancelled_at.is_none() && !act.interrupt.is_cancelled() && !sink.cancel.is_cancelled();
         match method {
             "item/started" => {
-                if v["params"]["item"]["type"] == "userMessage" && act.steer_pending.load(Ordering::SeqCst) {
+                if v["params"]["item"]["type"] == "userMessage" && user_message_clears_pending(
+                    act.steer_pending.load(Ordering::SeqCst), act.steer_epoch.load(Ordering::SeqCst), event_epoch,
+                ) {
                     // The steer input is now part of the turn; what follows answers it.
                     for (_, recover) in agent_text.values_mut() { *recover = None; }
                     act.steer_pending.store(false, Ordering::SeqCst);
@@ -1372,12 +1750,12 @@ async fn run_turn(
                 if v["params"]["item"]["type"] == "agentMessage" {
                     if let Some(id) = v["params"]["item"]["id"].as_str() {
                         agent_text.entry(id.to_owned()).or_insert_with(|| (String::new(),
-                            (live && !act.steer_pending.load(Ordering::SeqCst)).then_some(0)));
+                            (output_visible(&act, live)).then_some(0)));
                     }
                 }
             }
             "item/agentMessage/delta" => {
-                let visible = live && !act.steer_pending.load(Ordering::SeqCst);
+                let visible = output_visible(&act, live);
                 if let (Some(id), Some(d)) = (v["params"]["itemId"].as_str(), v["params"]["delta"].as_str()) {
                     let (seen, recover) = agent_text.entry(id.to_owned()).or_insert_with(|| (String::new(), None));
                     if visible && !d.is_empty() && recover.is_none() { *recover = Some(seen.len()); }
@@ -1401,7 +1779,7 @@ async fn run_turn(
                 let item = &v["params"]["item"];
                 if item["type"] == "agentMessage" {
                     if let (Some(id), Some(text)) = (item["id"].as_str(), item["text"].as_str()) {
-                        let visible = live && !act.steer_pending.load(Ordering::SeqCst);
+                        let visible = output_visible(&act, live);
                         let (seen, recover) = agent_text.entry(id.to_owned()).or_insert_with(|| (String::new(), visible.then_some(0)));
                         if !visible { *recover = None; }
                         let Some(offset) = *recover else {
@@ -1428,7 +1806,7 @@ async fn run_turn(
                 }
             }
             "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
-                if live && !act.steer_pending.load(Ordering::SeqCst) {
+                if output_visible(&act, live) {
                     let n = v["params"]["delta"].as_str().map(|s| s.chars().count()).unwrap_or(0);
                     sink.send(AttemptMsg::Reasoning(n));
                 }
@@ -1513,6 +1891,30 @@ mod tests {
 
     fn pol() -> WorkspacePolicy {
         WorkspacePolicy::new(Path::new("/srv/小呆 Server"))
+    }
+
+    #[test]
+    fn a_user_message_clears_only_its_own_steer() {
+        assert!(user_message_clears_pending(true, 2, 2));
+        assert!(user_message_clears_pending(true, 2, 0), "untagged event after commit belongs to the current steer");
+        assert!(!user_message_clears_pending(true, 2, 1), "an older steer notification must not clear the newer pending");
+        assert!(!user_message_clears_pending(false, 2, 2));
+        assert!(!user_message_clears_pending(true, 0, 0));
+    }
+
+    #[test]
+    fn withdrawing_a_steer_keeps_the_prefix_and_the_terminal_only() {
+        let mut buffered = VecDeque::new();
+        buffered.push_back(json!({"method":"item/agentMessage/delta","params":{"delta":"旧"}}));
+        buffered.push_back(json!({"method":"item/started","params":{"item":{"type":"userMessage","id":"u-steer"}}}));
+        buffered.push_back(json!({"method":"item/agentMessage/delta","params":{"delta":"泄漏"}}));
+        buffered.push_back(json!({"method":"turn/completed","params":{"turn":{"id":"tu-1","status":"completed"}}}));
+        let (replay, suppress) = withdraw_buffer(buffered);
+        assert!(suppress);
+        assert_eq!(replay.len(), 2);
+        assert_eq!(replay[0]["params"]["delta"], "旧");
+        assert_eq!(replay[1]["method"], "turn/completed");
+        assert!(buffer_sealed_without_steer(&replay));
     }
 
     #[test]

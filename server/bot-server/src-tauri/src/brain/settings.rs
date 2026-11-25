@@ -17,6 +17,10 @@ pub struct BrainConfig {
     pub presentation: super::presentation::PresentationConfig,
     /// Default conversational brain (Xiaodai core); OpenCode keeps tools and tasks.
     pub brain_core: super::fast_core::FastCoreConfig,
+    /// RA-00. One switch for the Mac-only quick decoupling. `false` restores the
+    /// baseline: a background task keeps the foreground busy, and any
+    /// awaiting-input task sends ordinary chat to OpenCode.
+    pub responsive: ResponsiveConfig,
 }
 
 impl Default for BrainConfig {
@@ -24,8 +28,23 @@ impl Default for BrainConfig {
         Self { schema_version: 1, auto_start: false, harness: HarnessConfig::default(),
             models: ModelWorkerConfig::default(), memory: MemoryConfig::default(),
             gateway: GatewayConfig::default(), conversation: ConversationConfig::default(),
-            tasks: Default::default(), presentation: Default::default(), brain_core: Default::default() }
+            tasks: Default::default(), presentation: Default::default(), brain_core: Default::default(),
+            responsive: Default::default() }
     }
+}
+
+/// Mac-only switches for the responsive-assistant steps. Missing keys keep these defaults.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResponsiveConfig {
+    /// RA-00 quick decoupling. Default on, so a delegated turn ends on its real
+    /// final segment and ordinary chat is not held for a background task.
+    /// Set `false` in `brain.json` to roll back without discarding accepted tasks.
+    pub quick_decouple: bool,
+}
+
+impl Default for ResponsiveConfig {
+    fn default() -> Self { Self { quick_decouple: true } }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -218,6 +237,9 @@ mod tests {
     fn old_model_configuration_remains_valid_and_rma_requires_absolute_paths() {
         let mut config: BrainConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config.models.asr_backend, "whisper");
+        assert!(config.responsive.quick_decouple, "RA-00 defaults on; false is the rollback");
+        assert!(validate(&config).is_ok());
+        config.responsive.quick_decouple = false;
         assert!(validate(&config).is_ok());
         config.models.asr_backend = "rma_qwen".into();
         assert_eq!(validate(&config).unwrap_err(), "rma_qwen_paths_required");

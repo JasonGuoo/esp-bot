@@ -1,6 +1,6 @@
 //! Authenticated WSS v3 service. Separate from diagnostic, plaintext LAN v1.
 //! Transport framing is ours; TLS and WebSocket are the upstream libraries.
-use std::{collections::{BTreeMap, VecDeque}, net::SocketAddr, sync::{Arc, Mutex as StdMutex, RwLock}, time::{Duration, Instant}};
+use std::{collections::{BTreeMap, BTreeSet, VecDeque}, net::SocketAddr, sync::{Arc, Mutex as StdMutex, RwLock}, time::{Duration, Instant}};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -437,7 +437,13 @@ fn device_audio_counts(payload:&Value, sent_frames:u32, sent_bytes:usize)->Resul
 struct ActivePeer {
     turn_id:String, request_id:String, token:RuntimeToken, task:TurnTask,
     prefix:Vec<String>, acknowledgement_sent:bool,
+    /// A waiting result was sent as this turn's first segment.
+    lead_sent:bool,
     progress_seq:u32, last_stage:Option<FeedbackStage>, last_progress:Instant,
+}
+
+fn live_presentation_index(prefix_len: usize, acknowledgement_sent: bool, lead_sent: bool) -> u32 {
+    prefix_len as u32 + u32::from(acknowledgement_sent) + 1 + u32::from(lead_sent)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -523,7 +529,19 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
     let mut playback_receipt:Option<PlaybackReceipt>=None;
     let mut display_result:Option<DisplayResult>=None;
     let mut delivery:Option<segments::Delivery>=None;
-    let (task_ready_tx,mut task_ready_rx)=mpsc::channel::<segments::TaskReady>(2);
+    let (task_ready_tx,mut task_ready_rx)=mpsc::channel::<segments::TaskReady>(4);
+    let mut fence_gen: u64 = 1;
+    let mut pending_commit: Option<PendingCommit> = None;
+    let mut pending_preps: Vec<InFlightPrep> = Vec::new();
+    let mut pending_lead: Option<PreparedLead> = None;
+    let mut inflight_lead: Option<PreparedLead> = None;
+    let mut lead_preparing: Option<String> = None;
+    let mut spoken_leads: BTreeSet<String> = BTreeSet::new();
+    let (prep_tx, mut prep_rx) = mpsc::channel::<BackgroundPrep>(4);
+    let (cleanup_tx, mut cleanup_rx) = mpsc::channel::<TurnTask>(4);
+    let cleanup_worker = tokio::spawn(async move {
+        while let Some(mut task) = cleanup_rx.recv().await { task.stop().await; }
+    });
     let mut task_clock=interval(Duration::from_secs(1));
     let mut foreground_clock=interval(Duration::from_secs(1));
     let mut audio_clock=interval(Duration::from_millis(20));
@@ -539,10 +557,40 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
     let mut last_packet=Instant::now();
     loop {
         if let Some((capture,_))=audio.as_mut(){capture.start_candidate(&brain.models);}
-        let phase=if playback.is_some(){"speaking"}else if active.is_some(){"thinking"}else if delivery.as_ref().is_some_and(|d|!d.tasks.is_empty()){"waiting_task"}else if delivery.is_some(){"presenting"}else if audio.is_some(){"listening"}else{"idle"};
+        let quick=brain.config.responsive.quick_decouple;
+        let phase=if playback.is_some(){"speaking"}else if active.is_some(){"thinking"}else if !quick && delivery.as_ref().is_some_and(|d|!d.tasks.is_empty()){"waiting_task"}else if delivery.is_some(){"presenting"}else if audio.is_some(){"listening"}else{"idle"};
         brain.device_activity(&device_id,json!({"phase":phase,"conversation_id":engagement.as_ref().map(|e|&e.conversation_id),
             "turn_id":active.as_ref().map(|a|a.turn_id.as_str()).or_else(||delivery.as_ref().map(|d|d.turn_id.as_str())).or_else(||playback.as_ref().map(|p|p.turn_id.as_str())),
             "cancellable":phase!="idle","runtime":engagement.as_ref().map(|e|e.token)}));
+        if quick && delivery.is_none() && pending_lead.is_some()
+            && active.as_ref().is_some_and(|turn| !turn.lead_sent)
+            && engagement.as_ref().is_some_and(|session| session.output.as_ref().is_some_and(|output| output.live)) {
+            if let Some(lead)=pending_lead.take() {
+                let token=active.as_ref().map(|turn| turn.token);
+                let turn_id=active.as_ref().map(|turn| turn.turn_id.clone());
+                let request_id=active.as_ref().map(|turn| turn.request_id.clone());
+                let activation=engagement.as_ref().map(|session| session.conversation_id.clone()).unwrap_or_default();
+                if let (Some(token), Some(turn_id), Some(request_id))=(token, turn_id, request_id) {
+                    match segments::Delivery::new(&brain,&device_id,&activation,token,turn_id,lead.plan.clone(),lead.segments.clone(),Vec::new(),true,1) {
+                        Ok(mut next)=>{
+                            next.live_content=true;
+                            next.request_id=request_id;
+                            if let Some(turn)=active.as_mut() { turn.lead_sent=true; }
+                            inflight_lead=Some(lead);
+                            delivery=Some(next);
+                        },
+                        Err(_)=>{ pending_lead=Some(lead); },
+                    }
+                } else { pending_lead=Some(lead); }
+            }
+        }
+        if delivery.as_ref().is_some_and(|state| state.report_expired()) {
+            let state=delivery.take().ok_or("presentation_missing")?;
+            if pending_lead.is_none() { pending_lead=inflight_lead.take(); } else { inflight_lead=None; }
+            let _=brain.tasks.revoke_outputs(Some(&state.activation_id));
+            playback=None;plain=None;display_result=None;
+            brain.emit("device.presentation.unconfirmed",Some(&state.turn_id),json!({"code":"playback_report_timeout"}));
+        }
         if let Some(state)=delivery.as_mut() {
             match state.next(&brain) {
                 Ok(Some((event,clip,result)))=>{display_result=Some(result);playback=clip;playback_receipt=None;
@@ -590,7 +638,30 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                     if send(&mut socket,Message::Text(event.to_string())).await.is_err(){break;}
                 }
             },
-            _=task_clock.tick(), if delivery.as_ref().is_some_and(|d|d.current.is_none()&&d.pending.is_empty()&&!d.tasks.is_empty())=>{
+            _=task_clock.tick(), if (!brain.config.responsive.quick_decouple && delivery.as_ref().is_some_and(|d|d.current.is_none()&&d.pending.is_empty()&&!d.tasks.is_empty()))
+                || (brain.config.responsive.quick_decouple && active.is_none() && audio.is_none() && playback.is_none() && delivery.is_none() && engagement.is_some())=>{
+                if brain.config.responsive.quick_decouple {
+                    // Prepare only. The S31 accepts a segment in COMMITTED, which it
+                    // enters on the next device turn, so nothing is sent while idle.
+                    if pending_lead.is_none() && lead_preparing.is_none() && inflight_lead.is_none()
+                        && engagement.as_ref().is_some_and(|session| session.proactive.is_none() && session.output.as_ref().is_some_and(|output| output.presentation)) {
+                        if let Some(session)=engagement.as_ref() {
+                            if let Some(household)=brain.memory.household_settings().ok().and_then(|settings| settings["household_id"].as_str().map(str::to_owned)) {
+                                if let Ok(Some(task))=brain.tasks.ready_for_activation(&household,&session.conversation_id) {
+                                    let key=format!("{}:{}",task.task_id,task.state.as_str());
+                                    if !spoken_leads.contains(&key) {
+                                        let task_id=task.task_id.clone();
+                                        lead_preparing=Some(task_id.clone());
+                                        let tx=task_ready_tx.clone();let brain2=Arc::clone(&brain);
+                                        let token=session.token;let activation_id=session.conversation_id.clone();
+                                        tokio::spawn(async move{let result=segments::prepare_task(brain2,task).await;let _=tx.send(segments::TaskReady{token,activation_id,task_id,progress_only:false,result}).await;});
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let state=delivery.as_mut().ok_or("presentation_missing")?;
                 if state.preparing_task {continue;}
                 let task_id=state.tasks.front().cloned().ok_or("task_missing")?;
@@ -615,6 +686,23 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                 }
             },
             Some(ready)=task_ready_rx.recv()=>{
+                if lead_preparing.as_deref()==Some(ready.task_id.as_str()) && delivery.as_ref().is_none_or(|state| state.tasks.front()!=Some(&ready.task_id)) {
+                    lead_preparing=None;
+                    let session_ok=engagement.as_ref().is_some_and(|session| session.conversation_id==ready.activation_id && session.proactive.is_none());
+                    if session_ok && pending_lead.is_none() {
+                        if let Ok((plan,segments))=ready.result {
+                            let speech=plan.segments.iter().map(|segment|segment.speech.as_str()).filter(|text|!text.is_empty()).collect::<Vec<_>>().join(" ");
+                            let task=brain.tasks.get(&ready.task_id).ok();
+                            let awaiting=task.as_ref().is_some_and(|task| task.state==super::tasks::TaskState::AwaitingInput);
+                            let key=task.as_ref().map(|task| format!("{}:{}",task.task_id,task.state.as_str())).unwrap_or_else(|| ready.task_id.clone());
+                            if !speech.is_empty() && !spoken_leads.contains(&key) {
+                                let segment_ids=segments.iter().map(|segment|segment.segment_id.clone()).collect();
+                                pending_lead=Some(PreparedLead{task_id:ready.task_id,key,plan,segments,speech,awaiting,segment_ids});
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if delivery.as_ref().is_some_and(|d|d.token==ready.token&&d.activation_id==ready.activation_id&&d.tasks.front()==Some(&ready.task_id)) {
                     let mut previous=delivery.take().ok_or("presentation_missing")?;
                     if previous.total_sent>=64 || previous.index>=64 {
@@ -653,6 +741,40 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                     }
                 }
             },
+            Some(event)=prep_rx.recv()=>{
+                let (turn_id, fence) = match &event {
+                    BackgroundPrep::Failure { turn_id, fence, .. } | BackgroundPrep::Proactive { turn_id, fence, .. } => (turn_id, fence),
+                };
+                pending_preps.retain(|prep| !(prep.fence == *fence && prep.turn_id == *turn_id));
+                if !apply_background_prep(&brain,&mut socket,&device_id,fence_gen,&active,&mut engagement,&mut delivery,&mut playback,&mut plain,&mut display_result,&mut pending_reminder,event).await {break;}
+            },
+            _=async {
+                let wait=delivery.as_ref().and_then(|state| state.report_since.map(|sent| state.report_budget.saturating_sub(sent.elapsed())))
+                    .unwrap_or(Duration::from_secs(3600));
+                tokio::time::sleep(wait).await;
+            }, if delivery.as_ref().is_some_and(|state| state.current.is_some())=>{
+                if delivery.as_ref().is_some_and(|state| state.report_expired()) {
+                    if let Some(state)=delivery.take() {
+                        if pending_lead.is_none() { pending_lead=inflight_lead.take(); } else { inflight_lead=None; }
+                        let _=brain.tasks.revoke_outputs(Some(&state.activation_id));
+                        playback=None;plain=None;display_result=None;
+                        brain.emit("device.presentation.unconfirmed",Some(&state.turn_id),json!({"code":"playback_report_timeout"}));
+                    }
+                }
+            },
+            _=async {
+                match pending_commit.as_ref() {
+                    Some(commit)=>tokio::time::sleep_until(commit.deadline).await,
+                    None=>std::future::pending().await,
+                }
+            }, if pending_commit.is_some()=>{
+                if let Some(commit)=pending_commit.take() {
+                    // The capture that missed its tail must not keep the next listen busy.
+                    audio=None;plain=None;
+                    let code=if commit.fence==fence_gen {"plain_audio_drain_timeout"} else {"cancelled"};
+                    if send(&mut socket,Message::Text(response_error(&commit.request_id,code))).await.is_err(){break;}
+                }
+            },
             cancellation=cancellations.recv()=>{
                 let cancellation=match cancellation {
                     Ok(target)=>target,
@@ -662,6 +784,15 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                 };
                 let conversation=engagement.as_ref().map(|session|session.conversation_id.as_str());
                 let close_session=cancellation.closes_session(conversation);
+                if brain.config.responsive.quick_decouple {
+                    let commit_turn=pending_commit.as_ref().and_then(|commit| conversation.map(|id| format!("{id}-{}", commit.token.turn_id)));
+                    let matches_active=active.as_ref().is_some_and(|turn| cancellation.matches_turn(&turn.turn_id, conversation));
+                    if matches_active || retire_deferred(&pending_preps, commit_turn.as_deref(), &cancellation, conversation) {
+                        fence_gen = fence_gen.saturating_add(1);
+                        if answer_pending_commit(&mut socket, &mut pending_commit, "cancelled").await.is_err(){break;}
+                        pending_preps.clear();
+                    }
+                }
                 let cancel_delivery=delivery.as_ref().is_some_and(|d|cancellation.matches_turn(&d.turn_id,conversation));
                 let cancelled_token=audio.as_ref().map(|(_,token)|*token)
                     .or_else(||active.as_ref().map(|turn|turn.token))
@@ -796,7 +927,9 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                     TurnUpdate::Sentence { turn_id, plan, segment, acknowledgement } => {
                         let Some(turn) = active.as_mut().filter(|a| a.turn_id == turn_id) else { continue };
                         let Some(session) = engagement.as_ref() else { continue };
-                        let index = turn.prefix.len() as u32 + u32::from(turn.acknowledgement_sent) + 1;
+                        // The slow "听到了" must not play over a result that is this turn's first segment.
+                        if acknowledgement && (turn.lead_sent || pending_lead.is_some()) { continue; }
+                        let index = live_presentation_index(turn.prefix.len(), turn.acknowledgement_sent, turn.lead_sent);
                         if index > 1 { brain.tasks.revoke_outputs(Some(&session.conversation_id))?; }
                         let speech = segment.scene.speech.clone();
                         let mut next = match segments::Delivery::new(&brain, &device_id, &session.conversation_id,
@@ -837,7 +970,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                 brain.emit("device.turn.completed",Some(&completed.turn_id),json!({"device_id":device_id,"transcript":output.transcript,
                                     "scene":output.scene,"presentation_id":output.presentation.presentation_id,"task_ids":output.task_ids,
                                     "timings":output.timings,"outcome":output.device_outcome,"delivery_pending":true}));
-                                let index = turn.prefix.len() as u32 + u32::from(turn.acknowledgement_sent) + 1;
+                                let index = live_presentation_index(turn.prefix.len(), turn.acknowledgement_sent, turn.lead_sent);
                                 if turn.acknowledgement_sent && turn.prefix.is_empty() {
                                     brain.tasks.revoke_outputs(Some(&activation))?;
                                     delivery=None;
@@ -875,12 +1008,22 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     }
                                     brain.tasks.revoke_outputs(Some(&activation))?;
                                 }
+                                let attached_tasks=if brain.config.responsive.quick_decouple { Vec::new() } else { output.task_ids };
+                                let mut carried=None;
+                                if brain.config.responsive.quick_decouple && turn.prefix.is_empty() {
+                                    if let Some(lead)=pending_lead.take() {
+                                        match segments::prepend_lead(&brain,lead.plan.clone(),lead.segments.clone(),output.presentation.clone(),output.prepared_segments.clone()) {
+                                            Ok((plan,segments))=>{output.presentation=plan;output.prepared_segments=segments;carried=Some(lead);},
+                                            Err(_)=>{pending_lead=Some(lead);},
+                                        }
+                                    }
+                                }
                                 let next=segments::Delivery::new(&brain,&device_id,&activation,completed.token,completed.turn_id.clone(),output.presentation,
-                                    output.prepared_segments,output.task_ids,completed.audio_requested,index);
-                                match next {Ok(mut next)=>{next.total_sent=index-1;next.request_id=completed.id.clone();delivery=Some(next);
+                                    output.prepared_segments,attached_tasks,completed.audio_requested,index);
+                                match next {Ok(mut next)=>{inflight_lead=carried;next.total_sent=index-1;next.request_id=completed.id.clone();delivery=Some(next);
                                     let response=json!({"v":3,"type":"response","id":completed.id,"ok":true,"runtime":completed.token,"payload":{"presentation_pending":true}});
                                     if send(&mut socket,Message::Text(response.to_string())).await.is_err(){break;}
-                                },Err(error)=>{if send(&mut socket,Message::Text(response_error(&completed.id,&error))).await.is_err(){break;}}}
+                                },Err(error)=>{if pending_lead.is_none(){pending_lead=carried;}if send(&mut socket,Message::Text(response_error(&completed.id,&error))).await.is_err(){break;}}}
                                 continue;
                             }
                             let (pcm,audio_error)=if !completed.audio_requested { output.audio=None; (None,None) } else {
@@ -952,12 +1095,47 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                             }
                             // Nothing of the answer was said yet: say an in-character line instead
                             // of a silent technical caption. The code stays in the journal.
+                            // A lead already sent counts as spoken, so a failure uses the same
+                            // live_answer_interrupted cancel as an acknowledgement.
                             let presentation=engagement.as_ref().and_then(|e|e.output.as_ref()).is_some_and(|o|o.presentation);
-                            let spoken=if completed.audio_requested && presentation && turn.prefix.is_empty() {
+                            let wants_failure_speech=completed.audio_requested && presentation && turn.prefix.is_empty();
+                            if wants_failure_speech && brain.config.responsive.quick_decouple && turn.prefix.is_empty() && !turn.acknowledgement_sent {
+                                if let Some(lead)=pending_lead.take() {
+                                    let activation_id=engagement.as_ref().map(|session|session.conversation_id.clone()).unwrap_or_default();
+                                    match segments::Delivery::new(&brain,&device_id,&activation_id,completed.token,completed.turn_id.clone(),lead.plan.clone(),lead.segments.clone(),Vec::new(),true,1) {
+                                        Ok(mut next)=>{
+                                            next.request_id=completed.id.clone();
+                                            inflight_lead=Some(lead);
+                                            delivery=Some(next);
+                                            let response=json!({"v":3,"type":"response","id":completed.id,"ok":true,"runtime":completed.token,"payload":{"presentation_pending":true}});
+                                            if send(&mut socket,Message::Text(response.to_string())).await.is_err(){break;}
+                                            continue;
+                                        },
+                                        Err(_)=>{pending_lead=Some(lead);},
+                                    }
+                                }
+                            }
+                            if wants_failure_speech && brain.config.responsive.quick_decouple {
+                                // Revoke and clear only once the line comes back, and only if an
+                                // acknowledgement, a partial answer, or the live lead was already
+                                // sent. A failed preparation after that sends live_answer_interrupted.
+                                let spoke=turn.acknowledgement_sent || !turn.prefix.is_empty() || turn.lead_sent;
+                                let activation_id=engagement.as_ref().map(|session|session.conversation_id.clone()).unwrap_or_default();
+                                let tx=prep_tx.clone();let brain2=Arc::clone(&brain);let turn_id=completed.turn_id.clone();
+                                let token=completed.token;let request_id=completed.id.clone();let error_text=error.clone();
+                                let index=live_presentation_index(0, turn.acknowledgement_sent, turn.lead_sent);let fence=fence_gen;
+                                pending_preps.push(InFlightPrep{fence,turn_id:turn_id.clone()});
+                                tokio::spawn(async move {
+                                    let result=segments::prepare_failure(&brain2,&turn_id,&error_text).await;
+                                    let _=tx.send(BackgroundPrep::Failure{fence,token,turn_id,request_id,index,activation_id,error:error_text,spoke,result}).await;
+                                });
+                                continue;
+                            }
+                            let spoken=if wants_failure_speech {
                                 segments::prepare_failure(&brain,&completed.turn_id,&error).await.unwrap_or_else(|code|{
                                     brain.emit("device.failure_speech.unavailable",Some(&completed.turn_id),json!({"code":code}));None})
                             } else {None};
-                            if turn.acknowledgement_sent || !turn.prefix.is_empty() {
+                            if turn.acknowledgement_sent || !turn.prefix.is_empty() || turn.lead_sent {
                                 if let Some(session)=&engagement {brain.tasks.revoke_outputs(Some(&session.conversation_id))?;}
                                 if spoken.is_none() {
                                     send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"session.cancelled",
@@ -1005,6 +1183,12 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                     // result. Only actual, authorized new speech does.
                     display_result=None;
                     if let Some(session)=engagement.as_mut(){session.last_user=Instant::now();}
+                    if let Err(error)=seal_pending_audio(&brain,&mut socket,&device_id,&mut engagement,&mut audio,&mut supplement,&mut context,&mut first_speech,&mut active,&mut display_result,last_ack,&completion_tx,&mut pending_commit,&mut fence_gen,&mut pending_preps).await {
+                        let token=audio.as_ref().map(|(_,token)|*token);
+                        audio=None;plain=None;
+                        if answer_pending_commit(&mut socket,&mut pending_commit,"cancelled").await.is_err(){break;}
+                        let _=send(&mut socket,Message::Text(json!({"v":3,"type":"error","code":error,"runtime":token}).to_string())).await;
+                    }
                 }
             },
             incoming=socket.next()=>{
@@ -1020,7 +1204,16 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                             let token=audio.as_ref().map(|(_,token)|*token);audio=None;
                             let _=send(&mut socket, Message::Text(json!({"v":3,"type":"error","code":error,"runtime":token}).to_string())).await;
                         }
-                        else {display_result=None;if let Some(session)=engagement.as_mut(){session.last_user=Instant::now();}}
+                        else {
+                            display_result=None;
+                            if let Some(session)=engagement.as_mut(){session.last_user=Instant::now();}
+                            if let Err(error)=seal_pending_audio(&brain,&mut socket,&device_id,&mut engagement,&mut audio,&mut supplement,&mut context,&mut first_speech,&mut active,&mut display_result,last_ack,&completion_tx,&mut pending_commit,&mut fence_gen,&mut pending_preps).await {
+                                let token=audio.as_ref().map(|(_,token)|*token);
+                                audio=None;
+                                if answer_pending_commit(&mut socket,&mut pending_commit,"cancelled").await.is_err(){break;}
+                                let _=send(&mut socket,Message::Text(json!({"v":3,"type":"error","code":error,"runtime":token}).to_string())).await;
+                            }
+                        }
                     },
                     Message::Text(text)=>{
                         let frame:RequestFrame=match serde_json::from_str(&text){Ok(frame)=>frame,Err(_)=>{let _=send(&mut socket, Message::Text(response_error("","invalid_request"))).await;continue;}};
@@ -1093,12 +1286,26 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         Some((session.token,super::Supplement{reservation:brain.fast.reserve_followup(&previous),live:context.take(),previous}))
                                     } else {None};
                                     if let Some(mut turn)=active.take(){
-                                        // Abort/join only the local producer. Dropping its guards retires
-                                        // the owned OpenCode session and schedules its exact interrupt;
-                                        // a slow provider must not occupy the device control socket.
-                                        turn.task.stop().await;
-                                        brain.emit("turn.cancelled",Some(&turn.turn_id),json!({"code":if is_supplement {"supplemented"} else {"device_stop"}}));
-                                        send(&mut socket,Message::Text(cancelled_response(&turn))).await?;
+                                        // Fence first. The producer's join waits off this branch so a slow
+                                        // provider cannot occupy the device control socket. Dropping the
+                                        // task still aborts it if the bounded cleanup queue is full.
+                                        fence_gen = fence_gen.saturating_add(1);
+                                        answer_pending_commit(&mut socket, &mut pending_commit, "cancelled").await?;
+                                        pending_preps.clear();
+                                        let turn_id = turn.turn_id.clone();
+                                        let response = cancelled_response(&turn);
+                                        if brain.config.responsive.quick_decouple {
+                                            turn.task.abort();
+                                            if cleanup_tx.try_send(turn.task).is_err() { /* Drop aborts. */ }
+                                        } else {
+                                            turn.task.stop().await;
+                                        }
+                                        brain.emit("turn.cancelled",Some(&turn_id),json!({"code":if is_supplement {"supplemented"} else {"device_stop"}}));
+                                        send(&mut socket,Message::Text(response)).await?;
+                                    } else if brain.config.responsive.quick_decouple {
+                                        fence_gen = fence_gen.saturating_add(1);
+                                        answer_pending_commit(&mut socket, &mut pending_commit, "cancelled").await?;
+                                        pending_preps.clear();
                                     }
                                     if let Some(session)=&engagement{brain.tasks.revoke_outputs(Some(&session.conversation_id))?;}
                                     pending_reminder=None;
@@ -1118,7 +1325,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                 },
                                 "proactive.accept"=>{
                                     let session=engagement.as_ref().ok_or("explicit_session_required")?;
-                                    if active.is_some() || playback.is_some() || delivery.is_some(){return Err("session_busy".into());}
+                                    if active.is_some() || playback.is_some() || foreground_delivery_blocks(delivery.as_ref(), brain.config.responsive.quick_decouple){return Err("session_busy".into());}
                                     let token=parse_runtime(&frame.payload)?;session.check_token(token)?;
                                     let id=frame.payload.get("offer_id").and_then(Value::as_u64);
                                     if session.proactive.map(u64::from)!=id {return Err("proactive_offer_unknown".into());}
@@ -1141,6 +1348,17 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         offer:offer.clone(),token,settled:false};
                                     let turn_id=format!("{}-{}",session.conversation_id,token.turn_id);
                                     let conversation=session.conversation_id.clone();
+                                    if brain.config.responsive.quick_decouple {
+                                        pending_reminder=Some(reminder);
+                                        let tx=prep_tx.clone();let brain2=Arc::clone(&brain);let line=offer.line.clone();let local_date=offer.local_date.clone();
+                                        let request_id=frame.id.clone();let fence=fence_gen;
+                                        pending_preps.push(InFlightPrep{fence,turn_id:turn_id.clone()});
+                                        tokio::spawn(async move {
+                                            let result=segments::prepare_proactive(&brain2,&turn_id,&line,&local_date).await;
+                                            let _=tx.send(BackgroundPrep::Proactive{fence,token,turn_id,request_id,conversation_id:conversation,offer,result}).await;
+                                        });
+                                        pending=true;return Ok(json!({}));
+                                    }
                                     let (plan,prepared)=match segments::prepare_proactive(&brain,&turn_id,&offer.line,&offer.local_date).await {
                                         Ok(prepared)=>prepared,
                                         Err(error)=>return Err(error),
@@ -1158,7 +1376,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                 "audio.begin"=>{
                                     let session=engagement.as_mut().ok_or("explicit_session_required")?;
                                     if session.proactive.is_some(){return Err("proactive_session_is_speaker_only".into());}
-                                    if active.is_some() || audio.is_some() || playback.is_some() || delivery.is_some(){return Err("session_busy".into());}
+                                    if active.is_some() || audio.is_some() || playback.is_some() || foreground_delivery_blocks(delivery.as_ref(), brain.config.responsive.quick_decouple){return Err("session_busy".into());}
                                     let token=parse_runtime(&frame.payload)?;session.check_token(token)?;
                                     if frame.payload.get("format").and_then(Value::as_str)!=Some("pcm_s16le") || frame.payload.get("sample_rate").and_then(Value::as_u64)!=Some(16000) || frame.payload.get("channels").and_then(Value::as_u64)!=Some(1){return Err("audio_format_unsupported".into());}
                                     let stream=stream_id(&frame.payload)?;
@@ -1221,7 +1439,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         }
                                     }
                                     let observed=frame.payload["device_monotonic_ms"].as_u64();
-                                    let content=delivery.as_ref().is_none_or(|d|d.current_spoken.is_some() && d.tasks.is_empty() && !d.progress_only);
+                                    let content=delivery.as_ref().is_none_or(|d|d.current_spoken.is_some() && (brain.config.responsive.quick_decouple || d.tasks.is_empty()) && !d.progress_only);
                                     let ack_ms=if status=="started" && delivery.as_ref().is_some_and(|d|d.live_content && d.progress_only) {
                                         first_speech.as_mut().filter(|clock|clock.token==token).and_then(|clock|{
                                             if !clock.sound_recorded {
@@ -1249,6 +1467,14 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         "stream_id":stream,"status":status,"code":code,"runtime":token,
                                         "frames_sent":clip.sequence,"pcm_bytes":clip.pcm.len(),"frames_reported":frames,"bytes_reported":bytes,"written_samples":written,"first_speech":first,"device_commit_to_ack_ms":ack_ms,"device_monotonic_ms":observed}));
                                     if status=="finished" {
+                                        let lead_heard=delivery.as_ref().and_then(|state| state.current.clone()).filter(|id| inflight_lead.as_ref().is_some_and(|lead| lead.segment_ids.iter().any(|segment| segment==id)));
+                                        if lead_heard.is_some() {
+                                            if let Some(lead)=inflight_lead.take() {
+                                                let activation=delivery.as_ref().map(|state| state.activation_id.clone()).unwrap_or_default();
+                                                spoken_leads.insert(lead.key.clone());
+                                                record_played_lead(&brain,&activation,&lead);
+                                            }
+                                        }
                                         if let (Some(current),Some(text))=(&context,delivery.as_ref().filter(|d|!d.progress_only).and_then(|d|d.current_spoken.as_deref())) {
                                             if let Ok(mut current)=current.lock() {
                                                 let room=650usize.saturating_sub(current.delivered.chars().count());
@@ -1281,6 +1507,8 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                 },
                                 "presentation.segment.report"=>{
                                     if playback.is_some() && frame.payload["status"]=="completed" {return Err("presentation_audio_not_completed".into());}
+                                    let lead_heard=delivery.as_ref().and_then(|state| state.current.clone()).filter(|id| inflight_lead.as_ref().is_some_and(|lead| lead.segment_ids.iter().any(|segment| segment==id)));
+                                    let lead_activation=delivery.as_ref().map(|state| state.activation_id.clone());
                                     let state=delivery.as_mut().ok_or("presentation_not_active")?;
                                     let finished=match state.report(&brain,&frame.payload){
                                         Ok(done)=>done,
@@ -1294,6 +1522,12 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         },Err(error)=>return Err(error),
                                     };
                                     let finished = finished && !state.live_content;
+                                    if frame.payload["status"]=="completed" && lead_heard.is_some() {
+                                        if let Some(lead)=inflight_lead.take() {
+                                            spoken_leads.insert(lead.key.clone());
+                                            record_played_lead(&brain, lead_activation.as_deref().unwrap_or(""), &lead);
+                                        }
+                                    }
                                     if finished {delivery=None;plain=None;context=None;}
                                     Ok(json!({"recorded":true,"finished":finished}))
                                 },
@@ -1328,66 +1562,37 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                 "assistant.text"|"audio.commit"=>{
                                     let session=engagement.as_mut().ok_or("explicit_session_required")?;
                                     if session.proactive.is_some(){return Err("proactive_session_is_speaker_only".into());}
-                                    if active.is_some() || playback.is_some() || delivery.is_some(){return Err("session_busy".into());}
+                                    if active.is_some() || playback.is_some() || foreground_delivery_blocks(delivery.as_ref(), brain.config.responsive.quick_decouple){return Err("session_busy".into());}
                                     let token=parse_runtime(&frame.payload)?;session.check_token(token)?;
                                     display_result=None;
-                                    let mut candidate=None;
-                                    let mut input_error=None;
-                                    let (text,wav)=if frame.method=="assistant.text"{
-                                        if audio.is_some(){return Err("audio_capture_in_progress".into());}
-                                        (Some(frame.payload.get("text").and_then(Value::as_str).ok_or("text_required")?.to_owned()),None)
-                                    }else{
+                                    let from_audio=frame.method=="audio.commit";
+                                    let text=if from_audio {
                                         let (capture,capture_token)=audio.as_mut().ok_or("audio_session_required")?;
                                         if token!=*capture_token || capture.stream_id!=stream_id(&frame.payload)? {return Err("audio_session_mismatch".into());}
                                         if let Some(transport)=plain.as_mut() {
                                             let expected=frame.payload.get("frames").and_then(Value::as_u64)
                                                 .and_then(|n|u32::try_from(n).ok()).ok_or("audio_frame_count_required")?;
-                                            finish_plain_input(transport,capture,expected).await?;
+                                            // The tail may still be on the plain socket. Fence it as a
+                                            // later event instead of waiting inside this branch.
+                                            if brain.config.responsive.quick_decouple && capture.sequence<expected {
+                                                if expected==0 || expected as usize>media::MAX_INPUT_PCM/2 || capture.sequence>expected {
+                                                    return Err("audio_frame_count_invalid".into());
+                                                }
+                                                pending_commit=Some(PendingCommit{request_id:frame.id.clone(),token,stream_id:capture.stream_id,expected,
+                                                    deadline:tokio::time::Instant::now()+Duration::from_secs(3),fence:fence_gen,
+                                                    device_commit_ms:frame.payload["device_monotonic_ms"].as_u64(),vad_end_ms:frame.payload["vad_end_ms"].as_u64()});
+                                                pending=true;return Ok(json!({}));
+                                            }
+                                            if !brain.config.responsive.quick_decouple {
+                                                finish_plain_input(transport,capture,expected).await?;
+                                            }
                                         }
-                                        let (mut capture,_)=audio.take().ok_or("audio_session_required")?;
-                                        candidate=capture.candidate.take();
-                                        // A validated but too-short recording is an input
-                                        // failure, not a protocol failure. Route it through
-                                        // the same bounded retry/expiration as worker ASR.
-                                        let wav=match capture.wav_base64() {
-                                            Ok(wav)=>Some(wav),
-                                            Err(error)=>{input_error=Some(error);None},
-                                        };
-                                        (None,wav)
+                                        None
+                                    } else {
+                                        if audio.is_some(){return Err("audio_capture_in_progress".into());}
+                                        Some(frame.payload.get("text").and_then(Value::as_str).ok_or("text_required")?.to_owned())
                                     };
-                                    session.token=token;session.last_turn=Some(token.turn_id);session.last_user=Instant::now();
-                                    let id=format!("{}-{}",session.conversation_id,token.turn_id);
-                                    let input=device_turn_input(session,id.clone(),text,wav);
-                                    let compact=session.output.is_some();
-                                    let audio_requested=input.speak.unwrap_or(false);
-                                    let turn_brain=Arc::clone(&brain);let tx=completion_tx.clone();let request_id=frame.id.clone();
-                                    let completion_id=id.clone();
-                                    let live_output=session.output.as_ref().filter(|o|o.live && o.audio).map(|_|tx.clone());
-                                    first_speech=Some(FirstSpeech{token,admitted:Instant::now(),
-                                        device_commit_ms:frame.payload["device_monotonic_ms"].as_u64(),vad_end_ms:frame.payload["vad_end_ms"].as_u64(),sound_recorded:false});
-                                    let supplement=supplement.take().filter(|(previous,_)|token.directly_follows(*previous)).map(|(_,item)|item);
-                                    context=session.output.as_ref().filter(|o|o.live).map(|_|super::LiveTurnContext::default());
-                                    let shared_context=context.clone();
-                                    // No spoken ack right after the device's own wake reply said the same thing.
-                                    let acknowledge = slow_ack_eligible(live_output.is_some() && frame.method == "audio.commit",
-                                        session.opened.elapsed(), last_ack.map(|when| when.elapsed()));
-                                    let task=tokio::spawn(async move {
-                                        let started = Instant::now();
-                                        let result = match input_error {
-                                            Some(error)=>Err(error),
-                                            None=>turn_brain.turn_with(input, false, super::DeviceWork { output:live_output, candidate, supplement, acknowledge, context:shared_context, spoken_device:audio_requested && compact }).await,
-                                        };
-                                        let _ = tx.send(TurnUpdate::Completed(Box::new(Completed {
-                                            id: request_id, turn_id: completion_id, token, compact, audio_requested,
-                                            processing_time: started.elapsed(), result,
-                                        }))).await;
-                                    });
-                                    brain.emit("device.turn.started",Some(&id),json!({"device_id":device_id}));
-                                    active=Some(ActivePeer{turn_id:id,request_id:frame.id.clone(),token,task:TurnTask(task),
-                                        prefix:Vec::new(),acknowledgement_sent:false,progress_seq:0,last_stage:None,last_progress:Instant::now()});
-                                    // Acknowledges admission, not success. The device may
-                                    // show "thinking" while the actual result is pending.
-                                    send(&mut socket,Message::Text(json!({"v":3,"type":"event","event":"turn.accepted","id":frame.id.clone(),"runtime":token}).to_string())).await?;
+                                    begin_foreground_turn(&brain,&mut socket,&device_id,session,&mut audio,&mut supplement,&mut context,&mut first_speech,&mut active,&mut display_result,last_ack,&completion_tx,&mut fence_gen,&mut pending_preps,frame.id.clone(),token,text,from_audio,frame.payload["device_monotonic_ms"].as_u64(),frame.payload["vad_end_ms"].as_u64()).await?;
                                     pending=true;Ok(json!({}))
                                 },
                                 _=>Err("unsupported_device_method".into()),
@@ -1409,7 +1614,332 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
     if let Some(turn)=active.take(){turn.task.abort();}
     if let Some(session)=&engagement{let _=brain.tasks.revoke_outputs(Some(&session.conversation_id));}
     let _=send(&mut socket, Message::Close(None)).await;
+    cleanup_worker.abort();
     Ok(())
+}
+
+fn foreground_delivery_blocks(delivery: Option<&segments::Delivery>, quick_decouple: bool) -> bool {
+    delivery.is_some_and(|state| state.blocks_new_input(quick_decouple))
+}
+
+/// A result or clarification prepared for the next device-started turn.
+/// It is not a delivery and it is not journalled as played until a receipt.
+#[derive(Clone)]
+struct PreparedLead {
+    task_id: String,
+    key: String,
+    plan: super::presentation::PresentationPlan,
+    segments: Vec<super::orchestration::PreparedSegment>,
+    speech: String,
+    awaiting: bool,
+    segment_ids: Vec<String>,
+}
+
+/// The played result is its own household row. The user's turn keeps the answer
+/// orchestration already stored, including a partial outcome.
+fn record_played_lead(brain: &Brain, activation: &str, lead: &PreparedLead) {
+    if activation.is_empty() || lead.speech.trim().is_empty() { return; }
+    let Ok(task) = brain.tasks.get(&lead.task_id) else { return };
+    let state = task.state.as_str();
+    // A clarification and a later success for the same task are different rows.
+    let turn_id = format!("{activation}-lead-{}-{state}", lead.task_id);
+    if turn_id.len() > 160 { return; }
+    let allow_cloud = brain.memory.household_settings().ok().and_then(|settings| settings["allow_cloud"].as_bool()).unwrap_or(false);
+    let _ = brain.memory.journal_input(&crate::memory::JournalInput {
+        turn_id: turn_id.clone(), activation_id: activation.into(), utterance_id: None, text: String::new(),
+        occurred_at_ms: crate::time::now_ms() as i64, input_kind: "text".into(), speaker_person_id: None,
+        private_profile_id: None, allow_cloud, metadata: json!({"task_result": &lead.task_id, "task_state": state}),
+    });
+    let _ = brain.memory.journal_finish(&turn_id, "completed", Some(&lead.speech), json!({"spoken_device": true}));
+    let _ = brain.memory.journal_receipt(&turn_id, "audio", json!({"status": "finished", "rendered_text": lead.speech}), &format!("lead-{}-{state}", lead.task_id));
+    let mut result = if task.result.is_object() { task.result.clone() } else { json!({}) };
+    result["lead_spoken_state"] = json!(state);
+    if lead.awaiting { result["clarification_turn_id"] = json!(turn_id); }
+    let _ = brain.tasks.set_state(&lead.task_id, task.state, &task.stage, Some(result));
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FailureDisposition { Speak, Interrupt, ErrorOnly, Drop }
+
+/// Nothing was said: an error response is enough. An acknowledgement or a partial
+/// answer with no replacement line cancels that live answer. A stale fence,
+/// a new foreground turn, or a different session token drops the line.
+fn failure_disposition(spoke: bool, speech_ready: bool, fresh: bool) -> FailureDisposition {
+    if !fresh { return FailureDisposition::Drop; }
+    if speech_ready { return FailureDisposition::Speak; }
+    if spoke { FailureDisposition::Interrupt } else { FailureDisposition::ErrorOnly }
+}
+
+async fn answer_pending_commit(socket: &mut GatewaySocket, pending: &mut Option<PendingCommit>, code: &str) -> Result<(), String> {
+    if let Some(commit) = pending.take() {
+        send(socket, Message::Text(response_error(&commit.request_id, code))).await?;
+    }
+    Ok(())
+}
+
+struct PendingCommit {
+    request_id: String,
+    token: RuntimeToken,
+    stream_id: u32,
+    expected: u32,
+    deadline: tokio::time::Instant,
+    fence: u64,
+    device_commit_ms: Option<u64>,
+    vad_end_ms: Option<u64>,
+}
+
+/// Speech or a plain-audio commit still running after its foreground owner was cleared.
+struct InFlightPrep { fence: u64, turn_id: String }
+
+/// A matching cancel retires every deferred result spawned at this fence.
+/// An unrelated turn leaves the fence alone.
+fn retire_deferred(preps: &[InFlightPrep], commit_turn: Option<&str>, cancellation: &super::Cancellation, conversation: Option<&str>) -> bool {
+    cancellation.closes_session(conversation)
+        || preps.iter().any(|prep| cancellation.matches_turn(&prep.turn_id, conversation))
+        || commit_turn.is_some_and(|turn| cancellation.matches_turn(turn, conversation))
+}
+
+enum BackgroundPrep {
+    Failure {
+        fence: u64,
+        token: RuntimeToken,
+        turn_id: String,
+        request_id: String,
+        index: u32,
+        activation_id: String,
+        error: String,
+        spoke: bool,
+        result: Result<Option<(super::presentation::PresentationPlan, Vec<super::orchestration::PreparedSegment>)>, String>,
+    },
+    Proactive {
+        fence: u64,
+        token: RuntimeToken,
+        turn_id: String,
+        request_id: String,
+        conversation_id: String,
+        offer: super::proactive::Offer,
+        result: Result<(super::presentation::PresentationPlan, Vec<super::orchestration::PreparedSegment>), String>,
+    },
+}
+
+type GatewaySocket = tokio_tungstenite::WebSocketStream<tokio_rustls::server::TlsStream<TcpStream>>;
+
+#[allow(clippy::too_many_arguments)]
+async fn begin_foreground_turn(
+    brain: &Arc<Brain>,
+    socket: &mut GatewaySocket,
+    device_id: &str,
+    session: &mut Engagement,
+    audio: &mut Option<(media::AudioInput, RuntimeToken)>,
+    supplement: &mut Option<(RuntimeToken, super::Supplement)>,
+    context: &mut Option<super::LiveTurnContext>,
+    first_speech: &mut Option<FirstSpeech>,
+    active: &mut Option<ActivePeer>,
+    display_result: &mut Option<DisplayResult>,
+    last_ack: Option<Instant>,
+    completion_tx: &mpsc::Sender<TurnUpdate>,
+    fence: &mut u64,
+    pending_preps: &mut Vec<InFlightPrep>,
+    request_id: String,
+    token: RuntimeToken,
+    text: Option<String>,
+    from_audio: bool,
+    device_commit_ms: Option<u64>,
+    vad_end_ms: Option<u64>,
+) -> Result<(), String> {
+    *display_result = None;
+    // A new foreground turn retires a failure or reminder line prepared for the previous one.
+    if brain.config.responsive.quick_decouple {
+        *fence = fence.saturating_add(1);
+        pending_preps.clear();
+    }
+    let (candidate, wav, input_error) = if from_audio {
+        let (mut capture, _) = audio.take().ok_or("audio_session_required")?;
+        let candidate = capture.candidate.take();
+        match capture.wav_base64() {
+            Ok(wav) => (candidate, Some(wav), None),
+            Err(error) => (candidate, None, Some(error)),
+        }
+    } else { (None, None, None) };
+    session.token = token;
+    session.last_turn = Some(token.turn_id);
+    session.last_user = Instant::now();
+    let id = format!("{}-{}", session.conversation_id, token.turn_id);
+    let input = device_turn_input(session, id.clone(), text, wav);
+    let compact = session.output.is_some();
+    let audio_requested = input.speak.unwrap_or(false);
+    let turn_brain = Arc::clone(brain);
+    let tx = completion_tx.clone();
+    let completion_id = id.clone();
+    let live_output = session.output.as_ref().filter(|o| o.live && o.audio).map(|_| tx.clone());
+    *first_speech = Some(FirstSpeech { token, admitted: Instant::now(), device_commit_ms, vad_end_ms, sound_recorded: false });
+    let supplement = supplement.take().filter(|(previous, _)| token.directly_follows(*previous)).map(|(_, item)| item);
+    *context = session.output.as_ref().filter(|o| o.live).map(|_| super::LiveTurnContext::default());
+    let shared_context = context.clone();
+    let acknowledge = slow_ack_eligible(live_output.is_some() && from_audio, session.opened.elapsed(), last_ack.map(|when| when.elapsed()));
+    let started_id = id.clone();
+    let accepted_id = request_id.clone();
+    let task = tokio::spawn(async move {
+        let started = Instant::now();
+        let result = match input_error {
+            Some(error) => Err(error),
+            None => turn_brain.turn_with(input, false, super::DeviceWork {
+                output: live_output, candidate, supplement, acknowledge, context: shared_context,
+                spoken_device: audio_requested && compact,
+            }).await,
+        };
+        let _ = tx.send(TurnUpdate::Completed(Box::new(Completed {
+            id: request_id, turn_id: completion_id, token, compact, audio_requested,
+            processing_time: started.elapsed(), result,
+        }))).await;
+    });
+    brain.emit("device.turn.started", Some(&started_id), json!({"device_id": device_id}));
+    *active = Some(ActivePeer {
+        turn_id: started_id, request_id: accepted_id.clone(), token, task: TurnTask(task),
+        prefix: Vec::new(), acknowledgement_sent: false, lead_sent: false,
+        progress_seq: 0, last_stage: None, last_progress: Instant::now(),
+    });
+    send(socket, Message::Text(json!({"v":3,"type":"event","event":"turn.accepted","id":accepted_id,"runtime":token}).to_string())).await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seal_pending_audio(
+    brain: &Arc<Brain>,
+    socket: &mut GatewaySocket,
+    device_id: &str,
+    engagement: &mut Option<Engagement>,
+    audio: &mut Option<(media::AudioInput, RuntimeToken)>,
+    supplement: &mut Option<(RuntimeToken, super::Supplement)>,
+    context: &mut Option<super::LiveTurnContext>,
+    first_speech: &mut Option<FirstSpeech>,
+    active: &mut Option<ActivePeer>,
+    display_result: &mut Option<DisplayResult>,
+    last_ack: Option<Instant>,
+    completion_tx: &mpsc::Sender<TurnUpdate>,
+    pending_commit: &mut Option<PendingCommit>,
+    fence_gen: &mut u64,
+    pending_preps: &mut Vec<InFlightPrep>,
+) -> Result<(), String> {
+    let Some(commit) = pending_commit.as_ref() else { return Ok(()) };
+    if commit.fence != *fence_gen {
+        answer_pending_commit(socket, pending_commit, "cancelled").await?;
+        return Ok(());
+    }
+    let ready = audio.as_ref().is_some_and(|(capture, token)| *token == commit.token && capture.stream_id == commit.stream_id && capture.sequence >= commit.expected);
+    if !ready { return Ok(()) }
+    let commit = pending_commit.take().ok_or("audio_commit_missing")?;
+    let Some(session) = engagement.as_mut() else {
+        send(socket, Message::Text(response_error(&commit.request_id, "cancelled"))).await?;
+        return Err("explicit_session_required".into());
+    };
+    let request_id = commit.request_id.clone();
+    match begin_foreground_turn(brain, socket, device_id, session, audio, supplement, context, first_speech, active, display_result, last_ack, completion_tx, fence_gen, pending_preps, commit.request_id, commit.token, None, true, commit.device_commit_ms, commit.vad_end_ms).await {
+        Ok(()) => Ok(()),
+        Err(error) if active.is_none() => {
+            send(socket, Message::Text(response_error(&request_id, "cancelled"))).await?;
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_background_prep(
+    brain: &Arc<Brain>,
+    socket: &mut GatewaySocket,
+    device_id: &str,
+    fence_now: u64,
+    active: &Option<ActivePeer>,
+    engagement: &mut Option<Engagement>,
+    delivery: &mut Option<segments::Delivery>,
+    playback: &mut Option<Playback>,
+    plain: &mut Option<plain_audio::PlainAudio>,
+    display_result: &mut Option<DisplayResult>,
+    pending_reminder: &mut Option<PendingReminder>,
+    event: BackgroundPrep,
+) -> bool {
+    match event {
+        BackgroundPrep::Failure { fence, token, turn_id, request_id, index, activation_id, error, spoke, result } => {
+            let spoken = match result {
+                Ok(value) => value,
+                Err(code) => {
+                    brain.emit("device.failure_speech.unavailable", Some(&turn_id), json!({"code": code}));
+                    None
+                }
+            };
+            let fresh = fence == fence_now
+                && active.is_none()
+                && engagement.as_ref().is_some_and(|session| session.token == token && session.conversation_id == activation_id);
+            match failure_disposition(spoke, spoken.is_some(), fresh) {
+                FailureDisposition::Drop => send(socket, Message::Text(response_error(&request_id, "cancelled"))).await.is_ok(),
+                FailureDisposition::ErrorOnly => {
+                    brain.emit("device.turn.failed", Some(&turn_id), json!({"device_id": device_id, "code": error.split(':').next().unwrap_or("turn_failed"), "spoken": false}));
+                    send(socket, Message::Text(response_error(&request_id, &error))).await.is_ok()
+                }
+                FailureDisposition::Interrupt => {
+                    if let Some(session) = engagement.as_ref() { let _ = brain.tasks.revoke_outputs(Some(&session.conversation_id)); }
+                    *delivery = None; *playback = None; *display_result = None; *plain = None;
+                    brain.emit("device.turn.failed", Some(&turn_id), json!({"device_id": device_id, "code": error.split(':').next().unwrap_or("turn_failed"), "spoken": false}));
+                    let event = json!({"v":3,"type":"event","event":"session.cancelled","runtime":token,"code":"live_answer_interrupted"});
+                    send(socket, Message::Text(event.to_string())).await.is_ok()
+                        && send(socket, Message::Text(response_error(&request_id, &error))).await.is_ok()
+                }
+                FailureDisposition::Speak => {
+                    let Some((plan, prepared)) = spoken else { return false };
+                    if spoke {
+                        if let Some(session) = engagement.as_ref() { let _ = brain.tasks.revoke_outputs(Some(&session.conversation_id)); }
+                        *delivery = None; *playback = None; *display_result = None;
+                    }
+                    brain.emit("device.turn.failed", Some(&turn_id), json!({"device_id": device_id, "code": error.split(':').next().unwrap_or("turn_failed"), "spoken": true}));
+                    let Some(session) = engagement.as_ref() else {
+                        return send(socket, Message::Text(response_error(&request_id, &error))).await.is_ok();
+                    };
+                    match segments::Delivery::new(brain, device_id, &session.conversation_id, token, turn_id, plan, prepared, vec![], true, index) {
+                        Ok(mut next) => {
+                            next.total_sent = index.saturating_sub(1);
+                            next.request_id = request_id.clone();
+                            *delivery = Some(next);
+                            let response = json!({"v":3,"type":"response","id":request_id,"ok":true,"runtime":token,"payload":{"presentation_pending":true}});
+                            send(socket, Message::Text(response.to_string())).await.is_ok()
+                        }
+                        Err(install) => send(socket, Message::Text(response_error(&request_id, &install))).await.is_ok(),
+                    }
+                }
+            }
+        }
+        BackgroundPrep::Proactive { fence, token, turn_id, request_id, conversation_id, offer, result } => {
+            if fence != fence_now || active.is_some() || engagement.as_ref().is_none_or(|session| session.token != token) {
+                if pending_reminder.as_ref().is_some_and(|reminder| reminder.token == token) {
+                    if let Some(mut reminder) = pending_reminder.take() { reminder.settle(false, Some("interrupted")); }
+                }
+                return send(socket, Message::Text(response_error(&request_id, "cancelled"))).await.is_ok();
+            }
+            if let Err(reason) = brain.proactive_admit(&offer) {
+                if let Some(mut reminder) = pending_reminder.take() { reminder.settle(false, Some(&reason)); }
+                brain.proactive_journal(device_id, &offer, "declined", Some(&reason));
+                return send(socket, Message::Text(response_error(&request_id, &format!("proactive_declined:{reason}")))).await.is_ok();
+            }
+            match result {
+                Ok((plan, prepared)) => match segments::Delivery::new(brain, device_id, &conversation_id, token, turn_id, plan, prepared, vec![], true, 1) {
+                    Ok(mut next) => {
+                        next.request_id = request_id.clone();
+                        *delivery = Some(next);
+                        let response = json!({"v":3,"type":"response","id":request_id,"ok":true,"runtime":token,"payload":{"presentation_pending":true}});
+                        send(socket, Message::Text(response.to_string())).await.is_ok()
+                    }
+                    Err(error) => {
+                        if let Some(mut reminder) = pending_reminder.take() { reminder.settle(false, Some("presentation_failed")); }
+                        send(socket, Message::Text(response_error(&request_id, &error))).await.is_ok()
+                    }
+                },
+                Err(error) => {
+                    if let Some(mut reminder) = pending_reminder.take() { reminder.settle(false, Some("speech_unavailable")); }
+                    send(socket, Message::Text(response_error(&request_id, &error))).await.is_ok()
+                }
+            }
+        }
+    }
 }
 
 async fn finish_plain_input(transport:&mut plain_audio::PlainAudio,capture:&mut media::AudioInput,expected:u32)->Result<(),String>{
@@ -1454,6 +1984,30 @@ async fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_turn_cancel_retires_an_inflight_failure_prep() {
+        let prep = [InFlightPrep { fence: 1, turn_id: "device-1-4".into() }];
+        let turn = super::super::Cancellation { scope: super::super::CancelScope::Turn("device-1-4".into()), reason: "parent_stop" };
+        let other = super::super::Cancellation { scope: super::super::CancelScope::Turn("device-1-9".into()), reason: "parent_stop" };
+        let session = super::super::Cancellation { scope: super::super::CancelScope::DeviceSession("device-1".into()), reason: "parent_stop" };
+        assert!(retire_deferred(&prep, None, &turn, Some("device-1")), "the console stop targets the prep whose foreground owner is already gone");
+        assert!(!retire_deferred(&prep, None, &other, Some("device-1")));
+        assert!(retire_deferred(&prep, None, &session, Some("device-1")));
+        assert!(retire_deferred(&[], Some("device-1-3"), &super::super::Cancellation {
+            scope: super::super::CancelScope::Turn("device-1-3".into()), reason: "parent_stop",
+        }, Some("device-1")), "a late plain-audio commit is the same kind of deferred work");
+        assert!(!retire_deferred(&[], Some("device-1-3"), &other, Some("device-1")));
+    }
+
+    #[test]
+    fn a_failed_prep_after_an_ack_interrupts_only_the_live_answer() {
+        assert_eq!(failure_disposition(true, false, true), FailureDisposition::Interrupt);
+        assert_eq!(failure_disposition(false, false, true), FailureDisposition::ErrorOnly, "a failure before any speech does not revoke the display");
+        assert_eq!(failure_disposition(true, true, true), FailureDisposition::Speak);
+        assert_eq!(failure_disposition(false, true, true), FailureDisposition::Speak);
+        assert_eq!(failure_disposition(true, false, false), FailureDisposition::Drop, "a new turn or a cancel drops the stale line");
+    }
 
     #[test]
     fn slow_ack_respects_wake_and_recent_speech() {
@@ -1745,6 +2299,56 @@ mod tests {
             assert_eq!(reply["ok"],error.is_none(),"{reply}");
             assert_eq!(reply["error"]["code"].as_str(),error);
         }
+        // The plain-audio tail is not here yet. Stop fences the commit immediately;
+        // frames that arrive afterwards must not admit a model turn.
+        let late_token=json!({"epoch":9,"session_id":12,"turn_id":3,"focus_generation":0});
+        socket.send(Message::Text(json!({"v":3,"type":"request","id":"late-begin","method":"audio.begin",
+            "payload":{"stream_id":130,"format":"pcm_s16le","sample_rate":16000,"channels":1,
+                "transport":"plain_tcp_v1","runtime":late_token}}).to_string())).await.unwrap();
+        let late_begun:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(late_begun["ok"],true,"{late_begun}");
+        let late_audio=&late_begun["payload"]["plain_audio"];
+        let late_hex=late_audio["key"].as_str().unwrap();
+        let late_secret=(0..32).map(|i|u8::from_str_radix(&late_hex[i*2..i*2+2],16).unwrap()).collect::<Vec<_>>();
+        let late_mac=ring::hmac::Key::new(ring::hmac::HMAC_SHA256,&late_secret);
+        let mut late_pcm=tokio::net::TcpStream::connect((late_audio["host"].as_str().unwrap(),late_audio["port"].as_u64().unwrap() as u16)).await.unwrap();
+        let started=Instant::now();
+        socket.send(Message::Text(json!({"v":3,"type":"request","id":"late-commit","method":"audio.commit",
+            "payload":{"stream_id":130,"frames":3,"runtime":late_token}}).to_string())).await.unwrap();
+        socket.send(Message::Text(json!({"v":3,"type":"request","id":"late-cancel","method":"assistant.cancel",
+            "payload":{"runtime":late_token}}).to_string())).await.unwrap();
+        let mut saw_accepted=false;
+        let mut cancel_ok=false;
+        let mut commit_terminal=0u32;
+        let wait_until=Instant::now()+Duration::from_millis(800);
+        while Instant::now()<wait_until && !(cancel_ok && commit_terminal==1) {
+            let message=match timeout(Duration::from_millis(800),socket.next()).await {
+                Ok(Some(Ok(message)))=>message,
+                _=>break,
+            };
+            let Message::Text(text)=message else {continue};
+            let reply:Value=serde_json::from_str(&text).unwrap();
+            if reply["event"]=="turn.accepted" {saw_accepted=true;}
+            if reply["id"]=="late-commit" {
+                commit_terminal+=1;
+                assert_eq!(reply["ok"], false, "{reply}");
+                assert_eq!(reply["error"]["code"], "cancelled", "{reply}");
+            }
+            if reply["id"]=="late-cancel" && reply["ok"]==true {cancel_ok=true;}
+        }
+        assert!(cancel_ok && commit_terminal==1 && !saw_accepted && started.elapsed()<Duration::from_millis(800), "a discarded commit gets one cancelled response and no turn, elapsed {:?}", started.elapsed());
+        for sequence in 0..3u32 {
+            let samples=vec![0u8;640];
+            let data=media::output_frame(130,sequence,&samples);
+            let mut body=vec![b'I'];body.extend_from_slice(&data);
+            let tag=ring::hmac::sign(&late_mac,&body);body.extend_from_slice(tag.as_ref());
+            let _=late_pcm.write_all(&(body.len() as u32).to_be_bytes()).await;
+            let _=late_pcm.write_all(&body).await;
+        }
+        socket.send(Message::Text(json!({"v":3,"type":"request","id":"late-close","method":"session.close","payload":{}}).to_string())).await.unwrap();
+        let late_closed:Value=serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(late_closed["event"],Value::Null,"late frames must not admit a turn: {late_closed}");
+        assert_eq!((&late_closed["id"],&late_closed["ok"]),(&json!("late-close"),&json!(true)),"{late_closed}");
         // Unprompted lines (§12.2) as a fake device: offered only after proactive.ready,
         // the session is speaker-only, and the Mac re-checks its guardrails on accept.
         assert!(welcome["capabilities"].as_array().unwrap().iter().any(|v|v=="proactive.v1"));
@@ -1789,5 +2393,306 @@ mod tests {
         assert_eq!((journal[0].status.as_str(),journal[0].reason.as_deref(),journal[0].moment.as_str()),("declined",Some("disabled"),"reminder"));
         socket.close(None).await.unwrap();brain.stop().await.unwrap();
         assert!(TcpStream::connect(&address).await.is_err());drop(brain);
+    }
+
+    #[tokio::test]
+    async fn a_delegated_task_is_spoken_on_the_next_committed_turn() {
+        let (brain, mut socket, conversation, token) = presented_session(true, false).await;
+        brain.memory.update_household_settings(&json!({"allow_cloud": true, "history_enabled": true})).unwrap();
+        let summary = "还缺资料的年份";
+        let task = activation_task(&brain, &conversation, summary, super::super::tasks::TaskState::AwaitingInput);
+        let begun = send_request(&mut socket, "follow-up", "audio.begin", &json!({"stream_id":140,"format":"pcm_s16le","sample_rate":16000,"channels":1,"runtime":token})).await;
+        assert_eq!(begun["ok"], true, "a follow-up while the task is outstanding is not session_busy: {begun}");
+        let _ = send_request(&mut socket, "follow-stop", "assistant.cancel", &json!({"runtime": token.clone()})).await;
+        // The firmware is in WAIT_NEXT after the previous final segment. It drops
+        // presentation.segment until the device commits the next turn.
+        let early = read_until(&mut socket, Duration::from_secs(3), |_| true).await;
+        assert!(early.iter().all(|event| event["event"] != "presentation.segment"), "an idle Mac must not push a segment the device would drop: {early:?}");
+        let mut committed = token.clone();
+        committed["epoch"] = json!(8);
+        committed["turn_id"] = json!(2);
+        socket.send(Message::Text(json!({"v":3,"type":"request","id":"ask-cold","method":"assistant.text","payload":{"text":"今天好冷","runtime":committed}}).to_string())).await.unwrap();
+        let messages = read_until(&mut socket, Duration::from_secs(8), |event| event["event"]=="presentation.segment" && event["payload"]["scene"]["speech"].as_str().unwrap_or("").contains(summary)).await;
+        let segment = messages.iter().find(|event| event["event"]=="presentation.segment" && event["payload"]["scene"]["speech"].as_str().unwrap_or("").contains(summary))
+            .cloned().unwrap_or_else(|| panic!("the clarification is the first speech of the committed turn: {messages:?}"));
+        assert_eq!(segment["runtime"]["turn_id"], 2, "the segment uses the device's new token");
+        assert!(brain.tasks.get(&task).unwrap().result.get("clarification_turn_id").is_none(), "unplayed speech is not a delivered clarification");
+        let answer = "树叶是绿的，因为里面有叶绿素。";
+        let user_turn = format!("{conversation}-2");
+        // The harness is not accepting, so this turn never reaches execute.
+        // Store the answer the way a completed orchestration turn would.
+        brain.memory.journal_input(&crate::memory::JournalInput {
+            turn_id: user_turn.clone(), activation_id: conversation.clone(), utterance_id: None,
+            text: "今天好冷".into(), occurred_at_ms: crate::time::now_ms() as i64, input_kind: "text".into(),
+            speaker_person_id: None, private_profile_id: None, allow_cloud: true, metadata: json!({}),
+        }).unwrap();
+        brain.memory.journal_finish(&user_turn, "partial", Some(answer), json!({})).unwrap();
+        let mut report = segment["payload"].clone();
+        report["runtime"] = segment["runtime"].clone();
+        report["status"] = json!("completed");
+        let recorded = send_request(&mut socket, "lead-report", "presentation.segment.report", &report).await;
+        assert_eq!(recorded["ok"], true, "{recorded}");
+        let user = brain.memory.household_rpc("household.source", &json!({"conversation_turn_id": user_turn})).unwrap().unwrap();
+        assert_eq!(user["status"], "partial");
+        assert_eq!(user["assistant_generated"], answer, "the lead must not replace the turn's own answer");
+        let played = brain.tasks.get(&task).unwrap();
+        let clarification = played.result["clarification_turn_id"].as_str().unwrap();
+        assert_ne!(clarification, user_turn);
+        assert!(clarification.ends_with("awaiting_input"), "a later success uses a different row: {clarification}");
+        let lead = brain.memory.household_rpc("household.source", &json!({"conversation_turn_id": clarification})).unwrap().unwrap();
+        assert!(lead["assistant_generated"].as_str().unwrap_or("").contains(summary));
+        brain.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_live_turn_speaks_the_result_before_the_answer() {
+        let (brain, mut socket, conversation, token) = presented_session(true, true).await;
+        let summary = "还缺资料的年份";
+        let _task = activation_task(&brain, &conversation, summary, super::super::tasks::TaskState::AwaitingInput);
+        let _quiet = read_until(&mut socket, Duration::from_secs(3), |_| false).await;
+        let mut committed = token.clone();
+        committed["epoch"] = json!(8);
+        committed["turn_id"] = json!(2);
+        let mut device = FirmwareView::committed();
+        socket.send(Message::Text(json!({"v":3,"type":"request","id":"ask-live","method":"assistant.text","payload":{"text":"树叶为什么是绿的","runtime":committed}}).to_string())).await.unwrap();
+        let messages = read_until(&mut socket, Duration::from_secs(8), |event| event["event"]=="presentation.segment").await;
+        let segments: Vec<_> = messages.iter().filter(|event| event["event"]=="presentation.segment").cloned().collect();
+        assert_eq!(segments.len(), 1, "the lead is the only segment; a slow acknowledgement must not play on top: {messages:?}");
+        let segment = segments[0].clone();
+        assert!(device.accept(&segment), "the first segment must be index 1 seq 1 while COMMITTED: {segment}");
+        assert_eq!(segment["payload"]["purpose"], "content");
+        assert_eq!(segment["payload"]["final"], false, "a non-final lead leaves the device in COMMITTED for the answer");
+        assert!(segment["payload"]["scene"]["speech"].as_str().unwrap_or("").contains(summary));
+        assert!(!device.accept(&json!({"event":"presentation.segment","payload":{"presentation_index":1,"seq":1,"purpose":"content","final":false,"presentation_id":"other","output_lease_id":"other"}})), "a second index-1 segment is rejected");
+        let mut follow = segment["payload"].clone();
+        follow["presentation_index"] = json!(2);
+        follow["seq"] = json!(1);
+        follow["purpose"] = json!("content");
+        follow["final"] = json!(true);
+        follow["presentation_id"] = json!("presentation_answer");
+        follow["output_lease_id"] = json!("lease_answer");
+        device.report_completed();
+        assert!(device.accept(&json!({"event":"presentation.segment","payload":follow})), "after a non-final content segment, index+1 seq 1 is the answer");
+        brain.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_live_turn_does_not_keep_the_lead_busy() {
+        let (brain, mut socket, conversation, token) = presented_session(true, true).await;
+        let summary = "还缺资料的年份";
+        let _task = activation_task(&brain, &conversation, summary, super::super::tasks::TaskState::AwaitingInput);
+        let _quiet = read_until(&mut socket, Duration::from_secs(3), |_| false).await;
+        let mut committed = token.clone();
+        committed["epoch"] = json!(8);
+        committed["turn_id"] = json!(2);
+        let mut device = FirmwareView::committed();
+        socket.send(Message::Text(json!({"v":3,"type":"request","id":"ask-fail","method":"assistant.text","payload":{"text":"树叶为什么是绿的","runtime":committed}}).to_string())).await.unwrap();
+        let messages = read_until(&mut socket, Duration::from_secs(8), |event| event["event"]=="presentation.segment").await;
+        let segment = messages.iter().find(|event| event["event"]=="presentation.segment").cloned()
+            .unwrap_or_else(|| panic!("the live lead is sent before the turn fails: {messages:?}"));
+        assert!(device.accept(&segment), "the lead is accepted while COMMITTED: {segment}");
+        let mut report = segment["payload"].clone();
+        report["runtime"] = segment["runtime"].clone();
+        report["status"] = json!("completed");
+        socket.send(Message::Text(json!({"v":3,"type":"request","id":"lead-report","method":"presentation.segment.report","payload":report}).to_string())).await.unwrap();
+        let after = read_until(&mut socket, Duration::from_secs(8), |event| event["event"]=="session.cancelled").await;
+        assert!(after.iter().any(|event| event["id"]=="lead-report" && event["ok"]==true), "the lead receipt is recorded: {after:?}");
+        let cancel = after.iter().find(|event| event["event"]=="session.cancelled")
+            .unwrap_or_else(|| panic!("a spoken lead makes the failed turn live_answer_interrupted: {after:?}"));
+        assert_eq!(cancel["code"], "live_answer_interrupted");
+        for event in &after { device.on_event(event); }
+        assert!(!device.committed, "session.cancelled takes the device out of COMMITTED");
+        let mut later = committed.clone();
+        later["epoch"] = json!(9);
+        later["turn_id"] = json!(3);
+        let begun = send_request(&mut socket, "listen-after-failure", "audio.begin", &json!({"stream_id":143,"format":"pcm_s16le","sample_rate":16000,"channels":1,"runtime":later})).await;
+        assert_eq!(begun["ok"], true, "the lead must not stay session_busy after the turn fails: {begun}");
+        brain.stop().await.unwrap();
+    }
+
+    /// The S31 rules for accepting a presentation segment (brain_secure.c).
+    struct FirmwareView {
+        committed: bool,
+        segment_active: bool,
+        presentation_valid: bool,
+        index: u64,
+        sequence: u64,
+        purpose: String,
+        presentation_id: String,
+        lease: String,
+        live: bool,
+    }
+    impl FirmwareView {
+        fn committed() -> Self {
+            Self { committed: true, segment_active: false, presentation_valid: false, index: 0, sequence: 0,
+                purpose: String::new(), presentation_id: String::new(), lease: String::new(), live: true }
+        }
+        fn accept(&mut self, event: &Value) -> bool {
+            if event["event"] != "presentation.segment" || !self.committed || self.segment_active { return false; }
+            let payload = &event["payload"];
+            let index = payload["presentation_index"].as_u64().unwrap_or(0);
+            let seq = payload["seq"].as_u64().unwrap_or(0);
+            let purpose = payload["purpose"].as_str().unwrap_or("");
+            let presentation = payload["presentation_id"].as_str().unwrap_or("");
+            let lease = payload["output_lease_id"].as_str().unwrap_or("");
+            let fresh = !self.presentation_valid && seq == 1 && index == 1;
+            let same = self.presentation_valid && index == self.index && seq == self.sequence + 1
+                && presentation == self.presentation_id && lease == self.lease;
+            let next = self.presentation_valid && seq == 1 && index == self.index + 1
+                && (self.purpose == "task_ack" || self.purpose == "progress" || (self.live && self.purpose == "content"))
+                && presentation != self.presentation_id && lease != self.lease;
+            if !(fresh || same || next) { return false; }
+            self.presentation_valid = true;
+            self.segment_active = true;
+            self.index = index;
+            self.sequence = seq;
+            self.purpose = purpose.to_owned();
+            self.presentation_id = presentation.to_owned();
+            self.lease = lease.to_owned();
+            true
+        }
+        fn report_completed(&mut self) {
+            if self.segment_active {
+                self.segment_active = false;
+                if self.purpose == "final" { self.committed = false; }
+            }
+        }
+        /// session.cancelled / session.expired end the device turn (brain_secure.c).
+        fn on_event(&mut self, event: &Value) {
+            if event["event"] == "session.cancelled" || event["event"] == "session.expired" {
+                self.committed = false;
+                self.segment_active = false;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_ignored_segment_releases_the_foreground() {
+        let (brain, mut socket, conversation, token) = presented_session(true, false).await;
+        let summary = "还缺资料的年份";
+        let _task = activation_task(&brain, &conversation, summary, super::super::tasks::TaskState::AwaitingInput);
+        let _quiet = read_until(&mut socket, Duration::from_secs(3), |_| false).await;
+        let mut committed = token.clone();
+        committed["epoch"] = json!(8);
+        committed["turn_id"] = json!(2);
+        socket.send(Message::Text(json!({"v":3,"type":"request","id":"ask-ignore","method":"assistant.text","payload":{"text":"在吗","runtime":committed}}).to_string())).await.unwrap();
+        let messages = read_until(&mut socket, Duration::from_secs(8), |event| event["event"]=="presentation.segment").await;
+        assert!(messages.iter().any(|event| event["event"]=="presentation.segment"), "the device is committed, so the segment is offered: {messages:?}");
+        let mut later = committed.clone();
+        later["epoch"] = json!(9);
+        later["turn_id"] = json!(3);
+        let blocked = send_request(&mut socket, "busy-while-unconfirmed", "audio.begin", &json!({"stream_id":141,"format":"pcm_s16le","sample_rate":16000,"channels":1,"runtime":later})).await;
+        assert_eq!(blocked["error"]["code"], "session_busy", "an unconfirmed segment still owns the foreground: {blocked}");
+        tokio::time::sleep(segments::segment_report_budget(0, 3_000) + Duration::from_millis(500)).await;
+        let released = send_request(&mut socket, "listen-after-timeout", "audio.begin", &json!({"stream_id":142,"format":"pcm_s16le","sample_rate":16000,"channels":1,"runtime":later})).await;
+        assert_eq!(released["ok"], true, "a segment the device never confirms must not stay session_busy: {released}");
+        brain.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn switch_off_keeps_the_task_on_the_old_delivery_path() {
+        let (brain, mut socket, conversation, token) = presented_session(false, false).await;
+        let summary = "还缺资料的年份";
+        let _task = activation_task(&brain, &conversation, summary, super::super::tasks::TaskState::AwaitingInput);
+        let deadline = Instant::now() + Duration::from_millis(1600);
+        while Instant::now() < deadline {
+            if let Some(message) = timeout(Duration::from_millis(200), socket.next()).await.ok().and_then(|item| item).and_then(|item| item.ok()) {
+                let Message::Text(text) = message else { continue };
+                let reply: Value = serde_json::from_str(&text).unwrap();
+                assert_ne!(reply["event"], "presentation.segment", "switch off does not speak a task that is not on a delivery: {reply}");
+            }
+        }
+        let begun = send_request(&mut socket, "begin-off", "audio.begin", &json!({"stream_id":141,"format":"pcm_s16le","sample_rate":16000,"channels":1,"runtime":token})).await;
+        assert_eq!(begun["ok"], true, "without a delivery, the task record alone is not session_busy: {begun}");
+        assert_ne!(brain.device_states.lock().unwrap()["test-bot"]["phase"], "waiting_task");
+        brain.stop().await.unwrap();
+    }
+
+    async fn presented_session(quick: bool, live: bool) -> (Arc<Brain>, tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, String, Value) {
+        use tokio_tungstenite::{connect_async_tls_with_config, Connector, tungstenite::{client::IntoClientRequest, http::header::{HeaderName, HeaderValue}}};
+        let dir = std::env::temp_dir().join(format!("xiaodai-idle-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir(&dir).unwrap();
+        let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts/create_gateway_certificate.py");
+        assert!(std::process::Command::new("python3").arg(script).arg("--directory").arg(dir.join("tls")).args(["--ip", "127.0.0.1"]).status().unwrap().success());
+        let mut config = super::super::settings::BrainConfig::default();
+        config.responsive.quick_decouple = quick;
+        config.gateway.enabled = true;
+        config.gateway.bind = "127.0.0.1:0".into();
+        config.gateway.certificate_pem = Some(dir.join("tls/gateway-cert.pem"));
+        config.gateway.private_key_pem = Some(dir.join("tls/gateway-key.pem"));
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        config.harness.base_url = format!("http://{}", occupied.local_addr().unwrap());
+        super::super::settings::save(&dir, &config).unwrap();
+        let brain = super::super::Brain::new(dir, None, Arc::new(|_| {})).unwrap();
+        let issued = brain.credentials.issue("test-bot").unwrap();
+        let bearer = issued["token"].as_str().unwrap().to_owned();
+        assert!(brain.start().await.unwrap_err().contains("configured port is already in use"));
+        let address = brain.gateway.lock().await.as_ref().unwrap().status()["bind"].as_str().unwrap().to_owned();
+        let url = format!("wss://{address}{PATH}");
+        let cert = CertificateDer::pem_file_iter(dir_of(&brain).join("tls/gateway-ca.pem")).unwrap().next().unwrap().unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert).unwrap();
+        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions().unwrap().with_root_certificates(roots).with_no_client_auth();
+        let mut request = url.into_client_request().unwrap();
+        request.headers_mut().insert(HeaderName::from_static("x-espbot-device"), HeaderValue::from_static("test-bot"));
+        request.headers_mut().insert(HeaderName::from_static("authorization"), HeaderValue::from_str(&format!("Bearer {bearer}")).unwrap());
+        let (mut socket, _) = connect_async_tls_with_config(request, None, false, Some(Connector::Rustls(Arc::new(tls)))).await.unwrap();
+        let _welcome: Value = serde_json::from_str(socket.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+        let token = json!({"epoch":7,"session_id":21,"turn_id":1,"focus_generation":0});
+        let mut output = json!({"version":1,"audio":true,"cards":["text","image"],"presentation":{"version":1,"frame_ack":true}});
+        if live { output["live_turns"] = json!(true); }
+        let opened = send_request(&mut socket, "open-presented", "session.open", &json!({"activation":"touch","runtime":token,"output":output})).await;
+        assert_eq!(opened["ok"], true, "{opened}");
+        let conversation = opened["payload"]["conversation_id"].as_str().unwrap().to_owned();
+        (brain, socket, conversation, token)
+    }
+
+    fn dir_of(brain: &Brain) -> std::path::PathBuf { brain.config_dir.clone() }
+
+    fn activation_task(brain: &Brain, conversation: &str, summary: &str, state: super::super::tasks::TaskState) -> String {
+        let now = crate::time::now_ms() as i64;
+        let receipt = brain.memory.journal_input(&crate::memory::JournalInput {
+            turn_id: format!("{conversation}-1"), activation_id: conversation.into(), utterance_id: None,
+            text: "帮我查一下资料".into(), occurred_at_ms: now, input_kind: "text".into(),
+            speaker_person_id: None, private_profile_id: None, allow_cloud: false, metadata: json!({}),
+        }).unwrap();
+        let household = brain.memory.household_settings().unwrap()["household_id"].as_str().unwrap().to_owned();
+        let task = brain.tasks.submit(super::super::tasks::NewTask {
+            household_id: household, daily_conversation_id: receipt.daily_conversation_id,
+            conversation_turn_id: receipt.conversation_turn_id, capability: "agent.work".into(),
+            input: json!({"prompt": "查资料", "activation_id": conversation}), intent_key: format!("intent-{}", uuid::Uuid::new_v4().simple()),
+        }, false).unwrap();
+        if state != super::super::tasks::TaskState::Queued {
+            brain.tasks.set_state(&task.task_id, state, "needs_input", Some(json!({"summary": summary}))).unwrap();
+        }
+        task.task_id
+    }
+
+    async fn send_request(socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, id: &str, method: &str, payload: &Value) -> Value {
+        socket.send(Message::Text(json!({"v":3,"type":"request","id":id,"method":method,"payload":payload}).to_string())).await.unwrap();
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            let Message::Text(text) = message else { continue };
+            let reply: Value = serde_json::from_str(&text).unwrap();
+            if reply["id"].as_str() == Some(id) { return reply; }
+        }
+    }
+
+    async fn read_until(socket: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, budget: Duration, done: impl Fn(&Value) -> bool) -> Vec<Value> {
+        let deadline = Instant::now() + budget;
+        let mut seen = Vec::new();
+        while Instant::now() < deadline {
+            let message = match timeout(Duration::from_millis(400), socket.next()).await {
+                Ok(Some(Ok(message))) => message,
+                _ => continue,
+            };
+            let Message::Text(text) = message else { continue };
+            let reply: Value = serde_json::from_str(&text).unwrap();
+            let finished = done(&reply);
+            seen.push(reply);
+            if finished { break; }
+        }
+        seen
     }
 }

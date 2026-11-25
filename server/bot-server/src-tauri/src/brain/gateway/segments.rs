@@ -1,5 +1,6 @@
 //! One in-flight segment. TCP completion is not a rendered/played receipt.
 use super::*;
+use std::time::Duration;
 use crate::brain::{orchestration::PreparedSegment,presentation::{PresentationPlan,OutputLease,PlaybackPurpose}};
 
 pub(super) struct Delivery {
@@ -11,6 +12,10 @@ pub(super) struct Delivery {
     /// The producer can still add speech. A segment receipt alone cannot finish this turn.
     pub live_content:bool,
     pub(super) current_spoken:Option<String>,
+    /// When the current segment was handed to the device, and how long it may
+    /// play before a missing receipt releases the foreground.
+    pub report_since:Option<Instant>,
+    pub report_budget:Duration,
     receipt_sequence:u64,current_rendered:Option<String>,current_visual_unavailable:bool,
 }
 impl Delivery {
@@ -23,7 +28,7 @@ impl Delivery {
             expires_at_ms:crate::time::now_ms() as i64+120_000,revoked:false})?;
         let playback_id=brain.tasks.begin_playback(&plan,&lease_id)?;
         Ok(Self{plan,token,turn_id,activation_id:activation.into(),lease_id,playback_id,index,current_seq:0,total_sent:0,pending:segments.into(),current:None,
-            tasks:tasks.into(),audio_requested:audio,started:Instant::now(),last_progress:Instant::now(),preparing_task:false,request_id:String::new(),progress_seq:1000,progress_only:false,live_content:false,receipt_sequence:0,current_spoken:None,current_rendered:None,current_visual_unavailable:false})
+            tasks:tasks.into(),audio_requested:audio,started:Instant::now(),last_progress:Instant::now(),preparing_task:false,request_id:String::new(),progress_seq:1000,progress_only:false,live_content:false,report_since:None,report_budget:segment_report_budget(0,0),receipt_sequence:0,current_spoken:None,current_rendered:None,current_visual_unavailable:false})
     }
     pub fn next(&mut self,brain:&Brain)->Result<Option<(Value,Option<Playback>,DisplayResult)>,String>{
         if !brain.memory.pending_household_cleanup()?.is_empty(){return Err("source_cleanup_pending".into());}
@@ -53,6 +58,8 @@ impl Delivery {
         let voice_only=spoken.is_some() && image.is_none() && segment.scene.cards.is_empty()
             && segment.media_kind.is_none() && frozen.visual["kind"]=="none" && !frozen.wait_for_first_frame;
         let hold_ms=if voice_only {0} else {segment.dwell_ms.min(30_000)};
+        self.report_budget=segment_report_budget(pcm.as_ref().map(|bytes| bytes.len()).unwrap_or(0), hold_ms);
+        self.report_since=Some(Instant::now());
         self.current_spoken=spoken.clone();
         self.current_rendered=Some(spoken.unwrap_or_else(||speech.clone()));
         let mut payload=json!({"presentation_id":self.plan.presentation_id,"presentation_index":self.index,"output_lease_id":self.lease_id,
@@ -98,11 +105,49 @@ impl Delivery {
             state:status.into(),device_monotonic_ms:payload["device_monotonic_ms"].as_u64(),sample_position:payload["sample_position"].as_u64(),detail:json!({"code":payload["code"],"visual_unavailable":self.current_visual_unavailable})})?;
         let _=brain.memory.journal_receipt(&self.turn_id,"presentation",json!({"presentation_id":self.plan.presentation_id,
             "segment_id":segment,"status":status,"code":payload["code"],"visual_unavailable":self.current_visual_unavailable,"rendered_text":if status=="completed"{self.current_rendered.as_deref()}else{None}}),&format!("{}_{}",self.playback_id,self.current_seq));
-        self.current=None;self.current_rendered=None;self.current_spoken=None;
+        self.current=None;self.current_rendered=None;self.current_spoken=None;self.report_since=None;
         if !current{return Err("presentation_lease_revoked".into());}
         if status=="failed" {self.pending.clear();return Err("presentation_segment_failed".into());}
         Ok(self.pending.is_empty()&&self.tasks.is_empty())
     }
+    /// RA-00: a delivery that is only waiting on background tasks does not make
+    /// the next foreground input session_busy. While the switch is off, any
+    /// delivery blocks, which is the baseline.
+    pub(super) fn blocks_new_input(&self, quick_decouple: bool) -> bool {
+        if !quick_decouple { return true; }
+        self.current.is_some() || !self.pending.is_empty() || self.live_content || self.progress_only
+    }
+    pub(super) fn report_expired(&self) -> bool {
+        self.current.is_some() && self.report_since.is_some_and(|sent| sent.elapsed() > self.report_budget)
+    }
+}
+
+/// Audio is sent in real time and a card may dwell afterwards. The receipt
+/// deadline is that expected play time plus a fixed margin, so a sentence
+/// longer than a few seconds is not torn down while it is still playing.
+pub(super) fn segment_report_budget(pcm_bytes: usize, hold_ms: u64) -> Duration {
+    let audio_ms = (pcm_bytes as u64).saturating_mul(1000) / 32_000;
+    Duration::from_millis(audio_ms.saturating_add(hold_ms).saturating_add(REPORT_MARGIN_MS))
+}
+
+const REPORT_MARGIN_MS: u64 = 10_000;
+
+/// The pending result or clarification is the first part of the device turn's
+/// presentation, under that turn's plan, so the firmware can accept it while
+/// the turn is COMMITTED.
+pub(super) fn prepend_lead(brain:&Brain, lead_plan:PresentationPlan, lead_segments:Vec<PreparedSegment>, mut answer:PresentationPlan, answer_segments:Vec<PreparedSegment>)->Result<(PresentationPlan,Vec<PreparedSegment>),String>{
+    let mut semantic=lead_plan.segments;
+    semantic.extend(answer.segments);
+    if semantic.is_empty()||semantic.len()>64 { return Err("presentation_segment_limit".into()); }
+    answer.segments=semantic;
+    answer.presentation_id=format!("presentation_{}",uuid::Uuid::new_v4().simple());
+    answer.revision=1;
+    use sha2::{Digest,Sha256};
+    answer.digest=format!("{:x}",Sha256::digest(serde_json::to_vec(&json!({"context":answer.context,"segments":answer.segments})).map_err(|e|e.to_string())?));
+    brain.tasks.save_plan(&answer)?;
+    let mut prepared=lead_segments;
+    prepared.extend(answer_segments);
+    Ok((answer,prepared))
 }
 
 pub(super) fn restore(brain:&Brain,plan:&PresentationPlan)->Result<Vec<PreparedSegment>,String>{
@@ -354,6 +399,67 @@ mod tests {
         assert_eq!(live.report(&brain, &last).unwrap_err(), "presentation_receipt_stale");
         drop(brain);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_delegated_explanation_is_a_final_segment_and_does_not_hold_the_next_turn() {
+        use crate::brain::presentation::{PlanContext, PresentationPlanner};
+        let dir = std::env::temp_dir().join(format!("xiaodai-delegate-{}", uuid::Uuid::new_v4()));
+        let brain = Brain::new(dir.clone(), None, Arc::new(|_| {})).unwrap();
+        let scene = scene_for("好的，我接到这件事了，正在处理，有结果就告诉你。", "thinking");
+        let context = PlanContext { household_id: "house".into(), daily_conversation_id: "day".into(), conversation_turn_id: "turn".into(), task_id: Some("task-1".into()) };
+        let plan = PresentationPlanner::default().freeze(context, &scene, None, false).unwrap();
+        let token = RuntimeToken { epoch: 1, session_id: 1, turn_id: 1, focus_generation: 0 };
+        let segments = restore(&brain, &plan).unwrap();
+        let mut delegated = Delivery::new(&brain, "device", "activation-a", token, "turn".into(), plan.clone(), segments.clone(), vec![], false, 1).unwrap();
+        let (message, _, _) = delegated.next(&brain).unwrap().unwrap();
+        assert_eq!(message["payload"]["purpose"], "final");
+        assert_eq!(message["payload"]["final"], true);
+        assert!(delegated.blocks_new_input(true), "the explanation is still on the wire");
+        let mut report = message["payload"].clone();
+        report["runtime"] = message["runtime"].clone();
+        report["status"] = json!("completed");
+        assert!(delegated.report(&brain, &report).unwrap(), "no background task is attached, so the foreground ends");
+        assert!(!delegated.blocks_new_input(true));
+
+        let mut baseline = Delivery::new(&brain, "device", "activation-b", RuntimeToken { epoch: 2, ..token }, "turn".into(), plan, segments, vec!["task-1".into()], false, 1).unwrap();
+        let (message, _, _) = baseline.next(&brain).unwrap().unwrap();
+        assert_eq!(message["payload"]["purpose"], "task_ack");
+        assert_eq!(message["payload"]["final"], false);
+        let mut report = message["payload"].clone();
+        report["runtime"] = message["runtime"].clone();
+        report["status"] = json!("completed");
+        assert!(!baseline.report(&brain, &report).unwrap(), "the baseline keeps the foreground until the task list is empty");
+        assert!(baseline.blocks_new_input(false));
+        assert!(!baseline.blocks_new_input(true), "with the switch on, a finished explanation does not block the next input");
+        drop(brain);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_segment_longer_than_eight_seconds_still_completes() {
+        use crate::brain::presentation::{PlanContext, PresentationPlanner};
+        let dir = std::env::temp_dir().join(format!("xiaodai-long-{}", uuid::Uuid::new_v4()));
+        let brain = Brain::new(dir.clone(), None, Arc::new(|_| {})).unwrap();
+        let scene = scene_for("这是一段比较长的回答，设备还在播放。", "thinking");
+        let context = PlanContext { household_id: "house".into(), daily_conversation_id: "day".into(), conversation_turn_id: "turn".into(), task_id: None };
+        let plan = PresentationPlanner::default().freeze(context, &scene, None, false).unwrap();
+        brain.tasks.save_plan(&plan).unwrap();
+        let mut segments = restore(&brain, &plan).unwrap();
+        let pcm = vec![0u8; 10 * 32_000];
+        segments[0].audio = Some(json!({"wav_base64": STANDARD.encode(crate::brain::media::pcm_wav(&pcm))}));
+        let token = RuntimeToken { epoch: 1, session_id: 1, turn_id: 1, focus_generation: 0 };
+        let mut delivery = Delivery::new(&brain, "device", "activation", token, "turn".into(), plan, segments, vec![], true, 1).unwrap();
+        let (message, _, _) = delivery.next(&brain).unwrap().unwrap();
+        assert!(delivery.report_budget > Duration::from_secs(8), "ten seconds of audio outlasts a fixed eight-second cutoff");
+        tokio::time::sleep(Duration::from_secs(9)).await;
+        assert!(!delivery.report_expired(), "the segment is still inside its audio budget");
+        let mut report = message["payload"].clone();
+        report["runtime"] = message["runtime"].clone();
+        report["status"] = json!("completed");
+        assert!(delivery.report(&brain, &report).is_ok(), "a normal long segment still accepts its receipt");
+        drop(brain);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
