@@ -721,8 +721,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                 if !apply_background_prep(&brain,&mut socket,&device_id,fence_gen,&active,&mut engagement,&mut delivery,&mut playback,&mut plain,&mut display_result,&mut pending_reminder,event).await {break;}
             },
             _=async {
-                let wait=delivery.as_ref().and_then(|state| state.report_since)
-                    .map(|sent| segments::SEGMENT_REPORT_DEADLINE.saturating_sub(sent.elapsed()))
+                let wait=delivery.as_ref().and_then(|state| state.report_since.map(|sent| state.report_budget.saturating_sub(sent.elapsed())))
                     .unwrap_or(Duration::from_secs(3600));
                 tokio::time::sleep(wait).await;
             }, if delivery.as_ref().is_some_and(|state| state.current.is_some())=>{
@@ -2402,7 +2401,7 @@ mod tests {
         later["turn_id"] = json!(3);
         let blocked = send_request(&mut socket, "busy-while-unconfirmed", "audio.begin", &json!({"stream_id":141,"format":"pcm_s16le","sample_rate":16000,"channels":1,"runtime":later})).await;
         assert_eq!(blocked["error"]["code"], "session_busy", "an unconfirmed segment still owns the foreground: {blocked}");
-        tokio::time::sleep(segments::SEGMENT_REPORT_DEADLINE + Duration::from_millis(500)).await;
+        tokio::time::sleep(segments::segment_report_budget(0, 3_000) + Duration::from_millis(500)).await;
         let released = send_request(&mut socket, "listen-after-timeout", "audio.begin", &json!({"stream_id":142,"format":"pcm_s16le","sample_rate":16000,"channels":1,"runtime":later})).await;
         assert_eq!(released["ok"], true, "a segment the device never confirms must not stay session_busy: {released}");
         brain.stop().await.unwrap();
