@@ -95,7 +95,7 @@ sequenceDiagram
 
 ## 实现清单
 
-- [ ] 建立上述 typed envelope、受限负载和 ID/version 校验；给不适用的 scope 明确 `None` 语义，避免填假 turn ID。
+- [ ] 建立上述 typed envelope、受限负载和 ID/version 校验（本步只冻结 `foreground`/`output`，`operation` 与各类修订随 RA-04/05 冻结）；给不适用的 scope 明确 `None` 语义，避免填假 turn ID。
 - [ ] 写纯 reducer，覆盖当前 foreground/input/output 子状态及 Stop 范围；将 task 状态视为外部已确认事实。
 - [ ] 为每类 effect 定义容量、`Full/Closed` 行为、保留槽与丢弃/合并规则；持久最终结果只传引用，不能靠临时 mailbox 唯一保存。
 - [ ] 建有限 dispatcher：重试有上限，拒绝不生成假 accepted receipt，关键清理按 scope 累积，不偷偷转无界队列。
@@ -130,6 +130,7 @@ sequenceDiagram
 | `ReceiptTruthfulness` | 仅收到/入队不能转为 durable accepted、applied 或 cancelled |
 | `StopScopePreserved` | 不同 scope 的撤权都保留，task 独立于 output stop |
 | `ControlProgress` | 假设本地 scheduler 持续获得运行机会，控制请求最终处理；不假设模型或网络返回 |
+| `MacNeverWidensDeviceAuthority` | Mac 只能收窄设备许可：不开启采集、不延长 token、不授予设备未请求的播放；不一致时以设备 RuntimeToken 为准 |
 
 真实实现回归置于新增模块的测试或现有 Rust 测试组织中，使用可控 pending futures、受限队列、可控单调时钟；不能只测试伪造 reducer 输出。TLC 不能证明实际线程不会阻塞，另需源代码审查与故障注入。按[formal 规范](../../../../formal/tla/README.md)使用本机 `./tools/check-tla-twins.sh macos/ResponsiveControl`，不添加 CI。
 

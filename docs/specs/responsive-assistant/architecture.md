@@ -63,7 +63,7 @@ flowchart TD
 | 所有者 | 拥有的状态 | 允许等待的位置 |
 | --- | --- | --- |
 | 设备 `bot_runtime` | 激活、麦克风许可、本地 Stop、播放资源、可见设备状态 | 既有本地调度契约；不能等 Mac 才停止本地音频 |
-| Mac control reducer | 连接/激活代际、前台轮次、请求接纳、输出权限、有限计时器 | 纯事件转移不等待；不拥有数据库连接或 provider handle |
+| Mac control reducer | 连接/激活代际、前台轮次、请求接纳、输出权限、有限计时器——均为设备权威状态的**镜像** | 纯事件转移不等待；不拥有数据库连接或 provider handle；只能收窄（fence、拒绝、撤权），不能放宽 |
 | control runtime / dispatcher | 有界 mailbox、优先级、dispatch 回执、监督信息 | 顶层等事件；投递使用非阻塞操作，队列满转成显式事件 |
 | gateway reader/writer | 协议解析、transport、帧上限、发送与网络超时 | 各自 I/O worker 内等待；writer 堵塞不占 reducer 或 reader |
 | Luna worker | 既有快核心、家庭会话顺序、stream、路由/退路 | worker 内等待模型和会话锁；不会把锁带进 control |
@@ -72,6 +72,8 @@ flowchart TD
 | output arbiter | 当下谁可说、播放尝试、对应的实际回执 | 仲裁决策不等待；TTS、媒体准备、网络发送另行执行 |
 
 `tokio::spawn` 只是必要机制之一。若其内部运行同步 SQLite、长 CPU 计算或阻塞第三方调用，仍须迁入有并发上限的 blocking executor/独立进程，并防止其耗尽控制所需的执行资源。不能以“所有函数都是 async”作为隔离验收。
+
+**Mac 永不放宽设备许可。** Mac reducer 的 activation/turn 状态只是 `bot_runtime` 权威状态的镜像：它可以 fence、拒绝或撤销，但不能开启采集、延长 RuntimeToken、授予设备未请求的播放，也不能把旧 token 换贴到新轮。两端不一致时以设备 RuntimeToken 为准，Mac 收窄到一致。RA-01 的 `ResponsiveControl` 模型以 `MacNeverWidensDeviceAuthority` 检查这一点。
 
 建议新增位置为 `brain/control_contracts.rs`、`brain/control.rs`、`brain/control_runtime.rs`、`brain/control_dispatch.rs`；gateway I/O、Luna、结果 inbox 各在后续步骤列出最小模块。均为**拟议新增文件**，本次不创建代码占位。
 
@@ -87,6 +89,8 @@ flowchart TD
 | `operation?: OperationRef` | `{ operation_id, operation_revision, task_id? }`；独立于前台代际，关联持久调用和工作流 |
 | `output?: OutputRef` | `{ output_lease_id, playback_id, segment_seq }`；一次输出尝试的权限与实际回执 |
 | `deadline_mono?`, `payload` | 本进程单调时钟截止点；负载经大小限制和类型验证，PCM/大结果只传受限引用 |
+
+**分阶段冻结。** 上表是完整目标；各子引用在首次消费它的步骤中冻结：RA-00/RA-01 只需 `foreground`（RuntimeToken 与 generation）和 `output`（lease）；`operation` 以及 task/operation/result/delivery 四类修订随 RA-04/RA-05 引入。不预先填充尚无所有者的字段，也不用占位值通过检查。
 
 复用 [`contracts.rs`](../../../server/bot-server/src-tauri/src/brain/contracts.rs) 的 `SourceRef`，包括家庭、日记录、episode、turn、utterance 和 `source_revision`。`ForegroundRef.input_revision` 是采集/提交修订，不能替代持久来源版本；RA-06 中拟议的 `TaskRecord.input_revision` 则描述任务要求的版本，两个字段即使同名也不可混用。`task_revision`、`operation_revision`、`result_revision`、`delivery_revision` 分别裁决任务、调用、冻结结果、交付状态；不能互相借用来通过检查。
 
@@ -113,7 +117,7 @@ Control 的版本检查是快速拒绝门，不取代能力执行端在事务/�
 
 完整内容回答继续遵守冻结段顺序和真实播放回执。只委派工作的回答可在 **任务持久接纳 + 本轮必要 ACK 呈现完成 + producer 封口** 后以 `outcome=delegated` 结束前台；任务仍是 queued/running。ACK/progress 不能伪装任务成功，也不自动证明正文已回答。
 
-当前 [WSS v3](../../../shared/mac-brain-v3.md) 与 [`brain_secure.c`](../../../firmware/components/brain_link/brain_secure.c) 要求 `purpose=final` 才进入下一句，ACK/progress 继续等待。拟议增加经能力协商的 `turn.response_closed`（名称待实施冻结），明确 `answered/delegated/partial/failed/cancelled` 与回执边界。旧端必须使用经测试的兼容映射，或保持旧路径；不能仅在 Mac 内释放状态而让设备一直停在 COMMITTED。
+当前 [WSS v3](../../../shared/mac-brain-v3.md) 与 [`brain_secure.c`](../../../firmware/components/brain_link/brain_secure.c) 要求 `purpose=final` 才进入下一句，ACK/progress 继续等待。[模块契约 §9](../../module-contracts.md) 已允许 final 内容段在独立任务仍运行时完成播放，因此 M1 由 Mac 把委派说明作为真实 `purpose=final` 内容段发送，以其硬件回执结束前台，无需协议或固件变更。经能力协商的 `turn.response_closed`（名称待实施冻结）推迟为可选细化，仅在设备确需区分 `answered/delegated/partial/failed/cancelled` 时引入。不能仅在 Mac 内释放状态而让设备一直停在 COMMITTED。
 
 ### 6.2 PendingCommit 不占住控制循环
 

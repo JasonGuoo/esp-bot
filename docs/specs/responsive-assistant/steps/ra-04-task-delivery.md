@@ -44,11 +44,15 @@ RA-06 负责更多 task query/mutate 和快照；RA-09 负责统一崩溃恢复�
 
 ### 2. 委派完成必须有协议闭环
 
-当前 v3 约定 `task_ack/progress` 播完继续等，只有 `purpose=final` 的汇总完成才进入下一句。因此拟议新增协商 capability，使用 `turn.response_closed`（名称在实现时冻结）表达前台答复的 `answered/delegated/partial/failed/cancelled`，与 task.state 分开。
+当前 v3 约定 `task_ack/progress` 播完继续等，只有 `purpose=final` 的汇总完成才进入下一句。[模块契约 §9](../../../module-contracts.md) 已写明“final 内容段可以在独立 Mac 任务仍在处理时完成播放”；耦合在 Mac 代码（`segments.rs:36` 仅在 `self.tasks.is_empty()` 时标 final，`:104` 也以此结束交付），而不在设备契约。
 
-该事件至少绑定当前 runtime/turn/generation、response revision、需要完成的 presentation/lease/segment 与可信回执引用；委派还带已接纳任务的 ID/revision。device 只在对应必需本地媒体已完成、回执关系一致、audio fence 满足时才释放前台/准备追问。事件早于本地硬件完成、旧 token 晚到、重复 final 或失败媒体均不能提前开麦。
+**M1 的主路径（无协议/固件变更）：** 任务获得 `accepted_durable` 后，把本轮 ACK/说明（如“好，我去查，查好告诉你”）作为真实 `purpose=final, final=true` 内容段发送；以该段的硬件回执结束前台，`response_outcome=delegated` 只记录在 Mac 侧；任务不再放入 `Delivery`。回滚只需一个 Mac 开关。
 
-ACK/progress 仍不是任务成功或正文 final；不能把 `task_ack.final=true` 当补丁。旧端若要兼容，可以在验证其契约后，使用一段真实的 foreground final 内容说明“任务已接下，正在继续处理”，把本轮说明结束与工作完成区分；未证明兼容前保留旧路径，不向旧端发送新事件或提前清掉状态。
+**推迟的可选细化：** 只有出现必须由设备区分 `delegated` 与 `answered` 的具体场景时，才新增经协商的 capability `turn.response_closed`（名称在实现时冻结），表达前台答复的 `answered/delegated/partial/failed/cancelled`，与 task.state 分开；同时须给出固件体积估算（见 §固件预算）。
+
+若启用该事件，它至少绑定当前 runtime/turn/generation、response revision、需要完成的 presentation/lease/segment 与可信回执引用；委派还带已接纳任务的 ID/revision。device 只在对应必需本地媒体已完成、回执关系一致、audio fence 满足时才释放前台/准备追问。事件早于本地硬件完成、旧 token 晚到、重复 final 或失败媒体均不能提前开麦。
+
+ACK/progress 仍不是任务成功或正文 final；不能把 `task_ack.final=true` 当补丁。上述主路径使用的是一段真实的 foreground final 内容，说明“任务已接下，正在继续处理”，把本轮说明结束与工作完成区分；接单写库失败时不得发送此段。未经协商不向任何设备发送新事件。
 
 ### 3. TaskRecord 与 operation 的版本
 
@@ -125,7 +129,7 @@ sequenceDiagram
 
 - [ ] 将 foreground、task、operation、delivery、lease 分开建类型和状态，删去后台 tasks 对前台 busy/final 的隐式决定权。
 - [ ] 在移除耦合前实现 producer_closed、必需媒体集合、真实回执和 response_outcome 的完整判定。
-- [ ] 设计并协商 `turn.response_closed`；同步 device 的实际完成与 audio fence 条件；旧端有明确兼容分支。
+- [ ] 以既有 `purpose=final` 真实内容段结束委派轮次（主路径）；`turn.response_closed` 仅在出现具体需求时另行设计、协商并估算固件体积。
 - [ ] 在现有 tasks 数据库增加 revision、冻结结果和 inbox/outbox，迁移保持既有任务、打印证据、来源撤回信息。
 - [ ] 修改 TaskService 的结果/awaiting_input 提交，使 task 状态和待交付记录同事务；通知可以重放且不重跑效果。
 - [ ] 实现单一 output arbiter 和交付 claim/CAS，lease 只能授予当前有效设备/接收范围，迟到 grant 必须被 fence。

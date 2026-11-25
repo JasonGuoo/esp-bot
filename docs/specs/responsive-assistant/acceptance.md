@@ -88,7 +88,7 @@ fairness 只要求有资格的控制事件得到调度；RC/GD 的控制活性�
 | ID / 归属 | 场景与动作 | 可观察的预期 | TLA | 实现回归与硬件边界 |
 | --- | --- | --- | --- | --- |
 | RA-ACC-11 / 04 | 提交耗时任务后，连续进行至少 10 轮无关闲聊；任务仍未完成 | task ID/状态保持；每轮前台正常释放和接纳；不存在因 `delivery.tasks` 非空而持续 `session_busy` | TD/TP | 从真实提交、短回应、receipt 到下一轮的 gateway 回归；S31 必测 |
-| RA-ACC-12 / 04 | 仅委派任务的短 ACK 或当前答案播完，但后台任务仍 Running | 仅委派以已协商 `turn.response_closed(outcome=delegated)`、durable task receipt、producer 封口及必要 ACK 播放回执结束前台；`task_ack` 本身不是 final。任务仍存在，后续结果走 inbox/新输出裁决 | TD/TP | 不能只删 `tasks.is_empty()`；覆盖无内容仅ACK、旧端不支持关闭协议、独立 inbox；S31 必测 |
+| RA-ACC-12 / 04 | 仅委派任务的短 ACK 或当前答案播完，但后台任务仍 Running | 仅委派以真实 `purpose=final` 委派说明段（M1 主路径；若日后协商 `turn.response_closed`，则为其 `outcome=delegated`）、durable task receipt、producer 封口及该段播放回执结束前台；`task_ack` 本身不是 final。任务仍存在，后续结果走 inbox/新输出裁决 | TD/TP | 不能只删 `tasks.is_empty()`；覆盖无内容仅ACK、旧端不支持关闭协议、独立 inbox；S31 必测 |
 | RA-ACC-13 / 06 | 同 scope 有两个 `AwaitingInput`，用户问“你今天开心吗” | 仍为普通闲聊；不因 pending task 的存在把全部输入强送 OpenCode；保留 task 查询能力 | CS/TC | 检查实际路由和两条模型上下文；主机 |
 | RA-ACC-14 / 03,04,06 | 播放中触摸补一句；分别继续原问题、重新说、Stop、跳轮，再补任务参数 | 即时补充只承接允许的原问题与已完整听见的片段；不串到其他人/旧轮；后台 task 不因普通补一句消失 | SP/LW/TD/TP | 复用/扩展 codex_fake 与 gateway 补充回归；S31 必测 |
 | RA-ACC-15 / 03 | 声纹永不返回，TTS 第二句先准备好，第一句稍后；内容/ACK 竞争 | 普通回复不等身份；片段按顺序；实际内容开始后不插过期 ACK；停止后无新语音 | RT/LW/TP | 真实有序前缀及 late identity 回归；Mac 真 TTS/S31 检查断句 |
@@ -146,6 +146,13 @@ fairness 只要求有资格的控制事件得到调度；RC/GD 的控制活性�
 | RA-ACC-52 / 09,10 | 关闭能力/快照/新delivery开关，遇到旧固件或协议缺receipt；仍有未完成操作 | 能力目录/兼容提示准确；已接受任务可查/取消/reconcile；不丢旧结果或伪造播放回执；不把兼容限制标为全通过 | RE/CE/TD/GD | 配置/协议组合回归；Mac+旧/新 S31 固件矩阵 |
 | RA-ACC-53 / 01–09 | 至少 500 次提交、取消、换轮、断连；每次注入不同迟到完成 | live worker/队列/临时文件/内存有上界，控制延迟不持续恶化；旧结果无一次复活 | RC/LW/TC/RE | 真实资源计数+长序列故障回放；主机，S31 长时验收单列 |
 | RA-ACC-54 / 01–10 | 一位用户先交任务、自由聊、晚介绍自己、改要求、停止，再次唤醒询问结果 | 用户听到的接纳/身份/任务状态与证据一致；话题可延续，不需要记内部 ID；不主动唤醒、不凭空认人或宣称已完成 | 所有相关模型，重点 RC/CS/IC/TD | 保存经同意的逐轮验收脚本和可匿名事件 trace；Mac+S31+真人必测，主观体验与客观回执分别记录 |
+
+### 8.1 按 PR #37 review 增补的场景
+
+| ID / 归属 | 场景与动作 | 可观察的预期 | TLA | 实现回归与硬件边界 |
+| --- | --- | --- | --- | --- |
+| RA-ACC-55 / 00,01,02 | Luna 卡住，用户在 THINKING 中再次说“小呆小呆” | 设备发送 cancel/supplement；Mac 先 fence 旧轮再接纳新采集；不返回 `session_busy`；旧轮迟到输出被丢弃 | RC/GD/LG | gateway 回环 + 永不返回的 Luna 替身；S31 必测 |
+| RA-ACC-56 / 01 | Mac 尝试开启采集、延长 token 或授予设备未请求的播放；两端状态不一致 | 全部被拒绝；以设备 RuntimeToken 为准，Mac 收窄到一致 | RC/LG | reducer 单元回归与 `MacNeverWidensDeviceAuthority` |
 
 ## 9. 各步骤的验证交付
 
