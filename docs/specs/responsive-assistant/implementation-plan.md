@@ -64,7 +64,7 @@ flowchart TD
 
 **状态：implemented, host-tested, pending board acceptance。**
 
-仅 Mac、无协议与固件变更：委派回复以真实 final 段结束本轮，后台任务不再使普通输入返回 session_busy；待补参任务不再强制闲聊走 OpenCode；三处分支内等待先 fence 后迁出。用既有分阶段计时对比前后；#35 steer 竞争单独修复。开关是 `brain.json` 的 `responsive.quick_decouple`，默认 `true`；设为 `false` 恢复基线。任务记录仍在 `TaskService`。开关打开时，同一连接只在前台空闲（没有进行中的轮次、采集、播放或交付）时把已完成结果或补问作为新的交付说出来，这件事本身不会变成 `session_busy`，App 控制台也不再显示 `waiting_task`；开关关闭时结果仍挂在原来的 Delivery 上。本步不新建 RA-04 收件箱。主机回归已跑；S31 与真人验收未跑。
+仅 Mac、无协议与固件变更：委派回复以真实 final 段结束本轮，后台任务不再使普通输入返回 session_busy；待补参任务不再强制闲聊走 OpenCode；三处分支内等待先 fence 后迁出。用既有分阶段计时对比前后；#35 steer 竞争单独修复。开关是 `brain.json` 的 `responsive.quick_decouple`，默认 `true`；设为 `false` 恢复基线。任务记录仍在 `TaskService`。开关打开时，结果和补问在下一次设备主动发起的轮次里先说出来（设备处于 COMMITTED），不在空闲时推送；没确认的段不会一直占住前台。App 控制台不再显示 `waiting_task`。跨会话、断线之后的持久交付仍是 RA-04，本步不新建收件箱。主机回归已跑；S31 与真人验收未跑。
 
 ### M1：交互可用性（RA-04、RA-01～RA-03）
 
