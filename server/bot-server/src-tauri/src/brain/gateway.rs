@@ -1438,9 +1438,9 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         let lead_heard=delivery.as_ref().and_then(|state| state.current.clone()).filter(|id| inflight_lead.as_ref().is_some_and(|lead| lead.segment_ids.iter().any(|segment| segment==id)));
                                         if lead_heard.is_some() {
                                             if let Some(lead)=inflight_lead.take() {
-                                                let turn_id=delivery.as_ref().map(|state| state.turn_id.clone()).unwrap_or_default();
+                                                let activation=delivery.as_ref().map(|state| state.activation_id.clone()).unwrap_or_default();
                                                 spoken_leads.insert(lead.key.clone());
-                                                record_played_lead(&brain,&turn_id,&lead);
+                                                record_played_lead(&brain,&activation,&lead);
                                             }
                                         }
                                         if let (Some(current),Some(text))=(&context,delivery.as_ref().filter(|d|!d.progress_only).and_then(|d|d.current_spoken.as_deref())) {
@@ -1476,7 +1476,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                 "presentation.segment.report"=>{
                                     if playback.is_some() && frame.payload["status"]=="completed" {return Err("presentation_audio_not_completed".into());}
                                     let lead_heard=delivery.as_ref().and_then(|state| state.current.clone()).filter(|id| inflight_lead.as_ref().is_some_and(|lead| lead.segment_ids.iter().any(|segment| segment==id)));
-                                    let lead_turn=delivery.as_ref().map(|state| state.turn_id.clone());
+                                    let lead_activation=delivery.as_ref().map(|state| state.activation_id.clone());
                                     let state=delivery.as_mut().ok_or("presentation_not_active")?;
                                     let finished=match state.report(&brain,&frame.payload){
                                         Ok(done)=>done,
@@ -1493,7 +1493,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     if frame.payload["status"]=="completed" && lead_heard.is_some() {
                                         if let Some(lead)=inflight_lead.take() {
                                             spoken_leads.insert(lead.key.clone());
-                                            record_played_lead(&brain,lead_turn.as_deref().unwrap_or(""),&lead);
+                                            record_played_lead(&brain,lead_activation.as_deref().unwrap_or(""),&lead);
                                         }
                                     }
                                     if finished {delivery=None;plain=None;context=None;}
@@ -1603,16 +1603,24 @@ struct PreparedLead {
     segment_ids: Vec<String>,
 }
 
-/// The playback or segment receipt is what makes the line delivered. Until then
-/// the journal keeps the turn running, so clarification matching cannot trust it.
-fn record_played_lead(brain: &Brain, turn_id: &str, lead: &PreparedLead) {
-    if turn_id.is_empty() || lead.speech.trim().is_empty() { return; }
-    let _ = brain.memory.journal_finish(turn_id, "completed", Some(&lead.speech), json!({"spoken_device": true}));
-    let _ = brain.memory.journal_receipt(turn_id, "audio", json!({"status": "finished", "rendered_text": lead.speech}), &format!("lead-{}-{turn_id}", lead.task_id));
-    if !lead.awaiting { return; }
+/// The played result is its own household row. The user's turn keeps the answer
+/// orchestration already stored, including a partial outcome.
+fn record_played_lead(brain: &Brain, activation: &str, lead: &PreparedLead) {
+    if activation.is_empty() || lead.speech.trim().is_empty() { return; }
+    let turn_id = format!("{activation}-lead-{}", lead.task_id);
+    if turn_id.len() > 160 { return; }
+    let allow_cloud = brain.memory.household_settings().ok().and_then(|settings| settings["allow_cloud"].as_bool()).unwrap_or(false);
+    let _ = brain.memory.journal_input(&crate::memory::JournalInput {
+        turn_id: turn_id.clone(), activation_id: activation.into(), utterance_id: None, text: String::new(),
+        occurred_at_ms: crate::time::now_ms() as i64, input_kind: "text".into(), speaker_person_id: None,
+        private_profile_id: None, allow_cloud, metadata: json!({"task_result": &lead.task_id}),
+    });
+    let _ = brain.memory.journal_finish(&turn_id, "completed", Some(&lead.speech), json!({"spoken_device": true}));
+    let _ = brain.memory.journal_receipt(&turn_id, "audio", json!({"status": "finished", "rendered_text": lead.speech}), &format!("lead-{}", lead.task_id));
     let Ok(task) = brain.tasks.get(&lead.task_id) else { return };
     let mut result = if task.result.is_object() { task.result.clone() } else { json!({}) };
-    result["clarification_turn_id"] = json!(turn_id);
+    result["lead_spoken_state"] = json!(task.state.as_str());
+    if lead.awaiting { result["clarification_turn_id"] = json!(turn_id); }
     let _ = brain.tasks.set_state(&lead.task_id, task.state, &task.stage, Some(result));
 }
 
@@ -2356,6 +2364,7 @@ mod tests {
     async fn a_delegated_task_is_spoken_on_the_next_committed_turn() {
         let (brain, mut socket, conversation, token) = presented_session(true).await;
         brain.memory.update_household_settings(&json!({"allow_cloud": true, "history_enabled": true})).unwrap();
+        brain.memory.update_household_settings(&json!({"allow_cloud": true, "history_enabled": true})).unwrap();
         let summary = "还缺资料的年份";
         let task = activation_task(&brain, &conversation, summary, super::super::tasks::TaskState::AwaitingInput);
         let begun = send_request(&mut socket, "follow-up", "audio.begin", &json!({"stream_id":140,"format":"pcm_s16le","sample_rate":16000,"channels":1,"runtime":token})).await;
@@ -2374,13 +2383,29 @@ mod tests {
             .cloned().unwrap_or_else(|| panic!("the clarification is the first speech of the committed turn: {messages:?}"));
         assert_eq!(segment["runtime"]["turn_id"], 2, "the segment uses the device's new token");
         assert!(brain.tasks.get(&task).unwrap().result.get("clarification_turn_id").is_none(), "unplayed speech is not a delivered clarification");
+        let answer = "树叶是绿的，因为里面有叶绿素。";
+        let user_turn = format!("{conversation}-2");
+        // The harness is not accepting, so this turn never reaches execute.
+        // Store the answer the way a completed orchestration turn would.
+        brain.memory.journal_input(&crate::memory::JournalInput {
+            turn_id: user_turn.clone(), activation_id: conversation.clone(), utterance_id: None,
+            text: "今天好冷".into(), occurred_at_ms: crate::time::now_ms() as i64, input_kind: "text".into(),
+            speaker_person_id: None, private_profile_id: None, allow_cloud: true, metadata: json!({}),
+        }).unwrap();
+        brain.memory.journal_finish(&user_turn, "partial", Some(answer), json!({})).unwrap();
         let mut report = segment["payload"].clone();
         report["runtime"] = segment["runtime"].clone();
         report["status"] = json!("completed");
         let recorded = send_request(&mut socket, "lead-report", "presentation.segment.report", &report).await;
         assert_eq!(recorded["ok"], true, "{recorded}");
+        let user = brain.memory.household_rpc("household.source", &json!({"conversation_turn_id": user_turn})).unwrap().unwrap();
+        assert_eq!(user["status"], "partial");
+        assert_eq!(user["assistant_generated"], answer, "the lead must not replace the turn's own answer");
         let played = brain.tasks.get(&task).unwrap();
-        assert_eq!(played.result["clarification_turn_id"], format!("{conversation}-2"));
+        let clarification = played.result["clarification_turn_id"].as_str().unwrap();
+        assert_ne!(clarification, user_turn);
+        let lead = brain.memory.household_rpc("household.source", &json!({"conversation_turn_id": clarification})).unwrap().unwrap();
+        assert!(lead["assistant_generated"].as_str().unwrap_or("").contains(summary));
         brain.stop().await.unwrap();
     }
 
