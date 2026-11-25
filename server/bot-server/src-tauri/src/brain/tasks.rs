@@ -248,7 +248,7 @@ impl TaskService{
     pub fn ready_for_activation(&self,household_id:&str,activation_id:&str)->Result<Option<TaskRecord>,String>{
         valid_id(household_id)?;valid_id(activation_id)?;
         let db=self.db.lock().map_err(|_|"task_database_lock")?;
-        let mut statement=db.prepare("SELECT id FROM tasks WHERE household_id=?1 AND json_extract(input_json,'$.activation_id')=?2 AND state IN ('succeeded','partial','failed','cancelled','unknown','awaiting_input') ORDER BY updated_at_ms,id LIMIT 4").map_err(db_error)?;
+        let mut statement=db.prepare("SELECT id FROM tasks WHERE household_id=?1 AND json_extract(input_json,'$.activation_id')=?2 AND state IN ('succeeded','partial','failed','cancelled','unknown','awaiting_input') AND (json_extract(result_json,'$.lead_spoken_state') IS NULL OR json_extract(result_json,'$.lead_spoken_state') != state) ORDER BY updated_at_ms,id LIMIT 4").map_err(db_error)?;
         let rows=statement.query_map(params![household_id,activation_id],|r|r.get::<_,String>(0)).map_err(db_error)?;
         let ids=rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
         drop(statement);
@@ -784,5 +784,28 @@ mod tests {
         assert_eq!(reopened.attempts(&id).unwrap().len(), 1);
         drop(reopened);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_spoken_task_does_not_hide_the_next_result() {
+        let dir = std::env::temp_dir().join(format!("xiaodai-task-lead-{}", uuid::Uuid::new_v4()));
+        let service = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        let first = service.submit(NewTask {
+            household_id: "house".into(), daily_conversation_id: "day".into(), conversation_turn_id: "turn-first".into(),
+            capability: "agent.work".into(), input: json!({"prompt": "第一件", "activation_id": "device-session"}),
+            intent_key: "intent-first".into(),
+        }, false).unwrap();
+        service.set_state(&first.task_id, TaskState::Succeeded, "done", Some(json!({"summary": "第一件做好了"}))).unwrap();
+        let second = service.submit(NewTask {
+            household_id: "house".into(), daily_conversation_id: "day".into(), conversation_turn_id: "turn-second".into(),
+            capability: "agent.work".into(), input: json!({"prompt": "第二件", "activation_id": "device-session"}),
+            intent_key: "intent-second".into(),
+        }, false).unwrap();
+        service.set_state(&second.task_id, TaskState::AwaitingInput, "needs_input", Some(json!({"summary": "还缺第二件的年份"}))).unwrap();
+        service.set_state(&first.task_id, TaskState::Succeeded, "done", Some(json!({"summary": "第一件做好了", "lead_spoken_state": "succeeded"}))).unwrap();
+        let next = service.ready_for_activation("house", "device-session").unwrap().unwrap();
+        assert_eq!(next.task_id, second.task_id, "the already spoken result must not block the next one");
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
