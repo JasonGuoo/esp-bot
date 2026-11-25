@@ -131,7 +131,7 @@ WSS 上的 `audio.commit` 可能早于独立 PCM 连接的尾帧。此时建立�
 
 结果 delivery 至少带 `delivery_id`、`delivery_revision`、`task_id`、`result_revision`、`recipient_scope`、`result_ref`、`source_refs`、状态和尝试 lease。`offered` 不是 `delivered`，发送成功不是实际播放成功。只有符合该结果呈现策略的真实回执才能记为已交付；部分播放保留可核对的连续内容边界。默认等待有效激活/查询/允许的当前互动机会；任务完成本身不打开麦克风或越过安静策略。
 
-`assistant_operations` 若位于另一数据库，不能声称它与 tasks inbox 跨库原子提交。使用同库事务或有幂等键的 outbox/reconcile；不依靠一次内存事件串起两个数据库的“成功”。
+`assistant_operations` 与 tasks inbox 同放在 `tasks.sqlite3`，以同库短事务提交 operation、task 与 inbox。记忆领域事实仍在记忆库，与操作账本之间使用有幂等键的 outbox/reconcile；不能声称跨库原子，也不依靠一次内存事件串起两个数据库的“成功”。
 
 ## 7. 调度与队列满策略
 

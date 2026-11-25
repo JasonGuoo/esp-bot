@@ -22,14 +22,15 @@
 | `brain/orchestration.rs`、`scene.rs` | 前台执行和部分 task proposal 接纳 | 统一经过可信 dispatch；保留既有 OpenCode 与 `agent.work` 执行路径 |
 | `brain/rpc.rs` | 控制台管理 dispatcher、全局取消、`turn_gate.write()` 与来源清理 | 提取可复用的领域服务；对话入口不调用通用 dispatcher，不继承其全局取消路径 |
 | `brain/tasks.rs` | 持久 task、事件、cancel/resume、effect 边界 | 长工作流仍由其拥有；操作账本只引用 `task_id` 与相关 revision |
-| `memory/store.rs`、`mod.rs`、`additive_schema.sql` | SQLite 与增量表、事务入口 | 增加单一短操作账本与 outbox 接口；迁移方式需满足 RA-09 |
+| `brain/tasks.rs`（`tasks.sqlite3`） | TaskService 的 SQLite 与事务入口 | 在同一数据库增量新增单一短操作账本，与 task 行、result revision、inbox 同事务提交；迁移方式需满足 RA-09 |
+| `memory/store.rs`、`mod.rs`、`additive_schema.sql` | 记忆 SQLite 与增量表 | 记忆领域事实（remember/forget 等）仍在记忆库提交；操作账本只以 ID 引用这些事实 |
 
 拟新增文件：
 
 - `brain/capability_registry.rs`：能力描述、版本化健康投影、scope 过滤。
 - `brain/capability_dispatch.rs`：提案校验、宿主上下文、接纳/执行/查询/取消结果映射。
 - `brain/assistant_adapters/mod.rs`：typed adapter trait 和注册清单；具体业务模块由 RA-07/08 增加。
-- `memory/assistant_operations.rs`：`assistant_operations` 的持久幂等与结果记录；不创建另一个任务 executor。
+- `brain/assistant_operations.rs`：`assistant_operations` 的持久幂等与结果记录，**存放在 `tasks.sqlite3`**，使 `accepted_durable`、task 行与 inbox 成为一次短事务，省去 operation 与 task/inbox 之间的跨库 outbox/reconcile；不创建另一个任务 executor。
 
 以上路径是本系列确定的拟议落点，当前基线不存在。新模块导出在已有 `brain/mod.rs`、`memory/mod.rs` 中接线；不是要求本次文档 PR 创建这些 Rust 文件。
 
@@ -60,6 +61,8 @@ OperationRef { operation_id, operation_revision, task_id? }
 完整定义归 RA-01；这里只说明能力消费方式。mutation/workflow 的 operation 必需；`query_snapshot/query_local` 的只读请求可省略，不能为了创建查询账本而阻塞查询。现有 `SourceRef` 字段保持兼容。宿主从真实输入、快照、权限与已接纳记录构造上下文。音频引用、硬件连接、scope、授权声明、管理确认、任意路径与幂等键不属于模型业务参数。
 
 `target_handle` 是快照中受范围限制的引用，不能凭字符串解锁人物、任务或文件。执行器重新解析 handle 并验证版本。模型填入未知额外权威字段、伪造来源或旧 handle 时返回结构化拒绝；不能忽略这些字段后执行一个可能已改变含义的操作。
+
+**提案如何从模型发出。** 实现前须选定一种并冻结：(a) Codex 工具调用：Luna 通过 `xiaodai-core` 现有工具通道产生结构化调用，代价是一次工具往返；(b) 回答中的带标签结构化块，由 host 在流式输出中解析并从朗读文本中剥离，不增加往返。两者都必须满足 18 Nov 首字预算（p50 < 1.5 s、p95 < 2.5 s），并量测提案解析对首字的影响。**引擎竞速下只接纳胜出引擎的提案**：`xiaodai-core` 的 Luna/HTTP 竞速（`fallback_after_ms` 与 Luna-first degraded）中，落败引擎的提案与文本一起丢弃，不能一次说话执行两次。**依赖回执的句子**（如“已记住”“提醒已设好”）在回执到达前保留，以带标记的句子类型送入切句/TTS，使切句器不把其冻结为已发送；回执失败时替换为真实状态。
 
 `ForegroundRef` 失效后，未接纳的旧提案不能执行。已经 `accepted_durable` 的工作由持久 `OperationRef`、来源/政策、任务版本决定是否继续；新聊天不自动作废它，旧前台输出许可也不会随之恢复。
 

@@ -30,7 +30,7 @@
 
 | 数据 | 权威存储/所有者 | 最小持久关联 |
 | --- | --- | --- |
-| operation | RA-05/08 的 `memory/assistant_operations.rs` | `operation_id`、`operation_revision`、host 幂等键、能力版本、scope、来源、状态、领域对象/回执引用 |
+| operation | RA-05/08 的 `brain/assistant_operations.rs`（位于 `tasks.sqlite3`） | `operation_id`、`operation_revision`、host 幂等键、能力版本、scope、来源、状态、领域对象/回执引用 |
 | task、attempt、input revisions | 既有 `tasks.sqlite3` / `TaskService` | `task_id`、`task_revision`、`input_revision`、attempt、`operation_id`、来源和 effect 证据 |
 | result/needs_input inbox | RA-04，位于 `tasks.sqlite3` | `delivery_id`、`delivery_revision`、kind、task/result revision、recipient scope、result/source refs、送达状态与尝试过的 lease |
 | identity 实体/绑定 | 既有 memory SQLite，复用 RA-07 的来源与声音组 | person/group/source 关系、身份版本、领域提交回执；绑定不是新的权限主体 |

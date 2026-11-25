@@ -102,7 +102,7 @@ sequenceDiagram
 
 此图的箭头表示派发/结果事件，不表示 control await SQLite 或设备。具体 delivery 可以等待自己的持久回执，其他控制/轮次不随之阻塞。
 
-任务终态/awaiting_input 结果、冻结 result revision、inbox 行及 result-ready outbox 在同一 SQLite 短事务内提交。commit 成功后通知丢失，启动/重连/周期性有限补扫可恢复；不能通过重复运行 task “找回结果”。若 `memory/assistant_operations.rs` 在另一数据库，使用其 outbox/reconcile 关联，不能声称跨库原子性。
+任务终态/awaiting_input 结果、冻结 result revision、inbox 行及 result-ready outbox 在同一 SQLite 短事务内提交。commit 成功后通知丢失，启动/重连/周期性有限补扫可恢复；不能通过重复运行 task “找回结果”。`brain/assistant_operations.rs` 的操作账本位于同一 `tasks.sqlite3`，与上述行同事务提交；只有记忆库中的领域事实需要 outbox/reconcile，不能声称跨库原子性。
 
 外部执行已结束但数据库忙/磁盘满时，先是 `result_persist_pending` 执行观察，不能宣称 durable succeeded 或结果已保存。worker 保留受结果大小/并发额度限制的待提交引用并停止继续接入无存储预算的工作；有界重试仍失败就如实报告存储故障。若此时进程崩溃，未提交数据不具备恢复保证，外部效果按证据进入 unknown/reconcile，不能靠重跑副作用恢复“看起来成功”。耐久防丢承诺从事务 commit 成功开始。
 

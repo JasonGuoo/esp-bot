@@ -17,7 +17,7 @@
 | 位置 | 基线已存在的行为 | 本步骤改变的边界 |
 | --- | --- | --- |
 | `server/bot-server/src-tauri/src/brain/orchestration.rs::execute` | core 和 OpenCode 都得到家庭记忆、近期对话、当前可用的说话人注记；Graphiti 有有限等待；收集同日 `AwaitingInput` 任务 | 用同一个版本化快照构造两条模型路径的上下文；删除“任何待补参任务都迫使本轮走慢路径”的条件 |
-| `brain/fast_core.rs::{route,context,mark_seen}` | core 已有完整/增量上下文；`route(..., pending_tasks)` 在参数为真时返回 `pending_task_input` | 改为按本轮的任务指向决定路由；增量去重必须包含快照和各事实版本 |
+| `brain/fast_core.rs::{route,context,mark_seen}` | core 已有完整/增量上下文；`route(..., pending_tasks)` 在参数为真时返回 `pending_task_input` | 该修复已前移到 [RA-00](ra-00-quick-decoupling.md)；本步骤在其上改为按快照中的任务指向决定路由；增量去重必须包含快照和各事实版本 |
 | `brain/tasks.rs::{get,list,events,resume,cancel,progress,set_state}` | 持久任务、取消、事件、补参已存在；`resume` **只接受 `AwaitingInput`**，不能修改 `Running` 任务 | 加入任务控制版本检查、运行中改要求协议及与操作账本的关联；保留既有打印副作用边界 |
 | `memory/household.rs::{household_context_items,household_recent_context,journal_identity_samples}` | 现有来源版本、私域、过期/遗忘处理；迟到身份不得覆盖更新后的来源 | 作为快照投影的权威输入；保持删除和来源更改传播 |
 | `brain/rpc.rs`、`brain/scene.rs`、RA-05 的 `brain/capability_dispatch.rs` | 管理接口可查/取消任务，结构化任务提案可补参；尚无统一的对话任务控制面 | 对话、管理 UI 通过同一个服务入口读取结果/提交操作，避免各写一套状态规则 |
@@ -120,7 +120,7 @@ task.amend(task_id, expected_task_revision,
 
 1. **列出投影依赖与预算。** 将 household、private scope、cloud destination、来源 TTL、身份 generation、任务/送达版本的读取和失效入口逐一登记。对快照条数、字符数、更新队列、刷新并发配置有限上界。配置上界要有饱和行为，不能仅有默认值。
 2. **抽出只读投影器。** 从 `orchestration::execute` 提取同步 SQL/来源检查/家庭记忆组合，放进受限存储 worker。已有 SQLite 仍是权威；不为快照引入新的记忆事实数据库。发布不可变 snapshot 并记录 freshness 和省略原因。
-3. **统一两条回答路径。** core 的 full/delta 和 OpenCode prompt 读取同一快照结构；权限过滤在构造上下文前完成。用版本化事实键处理去重，防止名字更改或任务状态变化被“已发送过”吞掉。
+3. **统一两条回答路径。** core 的 full/delta 和 OpenCode prompt 读取同一快照结构；权限过滤在构造上下文前完成。用版本化事实键处理去重，防止名字更改或任务状态变化被“已发送过”吞掉。Luna 线程每轮只收**增量**快照事实（变化的版本化事实），并设单轮硬字符上限，延续 Phase 4 将每轮增量上下文压到约 73 字符的成果；完整快照只用于新线程、HTTP 路线与 OpenCode prompt。需有稳态大小测试，证明多轮后每轮注入不增长。
 4. **替换全局 pending 路由。** 删除 `pending_tasks: bool` 的全局慢路由含义；保留本轮确实在补参、控制任务或请求能力调用的明确路由。用户说“你今天开心吗”时，后台有十个待补参任务也不影响普通闲聊路径。
 5. **实现任务选择。** 显式 task ID、当前被讨论任务和唯一明确指代可直接匹配；两个可能对象时提一个短澄清问题。多个待补参任务收到“三点”不能随机续跑。别把“补一句”手势的即时对话关系当作后台任务指针。
 6. **添加版本化任务控制。** 在任务数据库增加/迁移 `task_revision`、`input_revision` 和不可变输入版本记录；将 claim、cancel、resume/provide_input、amend、finish 的条件更新串成一套 CAS。保持现有 `active -> db` 顺序，禁止 await 持有数据库/全局活动表锁。

@@ -29,7 +29,9 @@ RA-01 的 `control_contracts.rs` 是唯一 envelope/proposal 定义，不在 wor
 
 拟议 `LunaCommand` 包含 `Respond`、`Supplement`、`ResetContext`、`Warmup`；均由 host 绑定 `ForegroundRef`、source、snapshot/catalog version、上下文引用与 deadline。取消/撤权使用 RA-01 独立 fence，不排在普通 Respond 后等待。
 
-每个家庭/thread 保持一个受控的语义执行序列；首版建议只有一个正在处理和至多一个明确接纳的待处理请求，具体常量须在实现中冻结并加入容量测试。待处理请求不是无提示地“latest wins”：若显式 supersede，旧请求要有 cancelled/superseded 终态；否则新请求返回 worker_busy/overload，不偷偷丢弃已接纳输入。多家庭/worker 的总量也有限。
+每个家庭/thread 保持一个受控的语义执行序列；首版建议只有一个正在处理和至多一个明确接纳的待处理请求，具体常量须在实现中冻结并加入容量测试。待处理请求不是无提示地“latest wins”：若显式 supersede，旧请求要有 cancelled/superseded 终态；否则新请求不得进入 Luna thread，也不偷偷丢弃已接纳输入。多家庭/worker 的总量也有限。
+
+**不能让现有退路退化。** 目前 Luna 卡住并不阻挡新回答：`core.rs` 在 `fallback_after_ms` 后启动 HTTP 路线，Luna-first 健康策略（`core.rs:408-445`）在 Luna degraded 时让最快的近期 HTTP 路线于 t=0 领先。因此“一个处理中、至多一个待处理”的限额只约束 **Luna thread 尝试**，不约束整轮：Luna 会话 gate 超过期限仍被占用时，新的 fresh 轮次由 HTTP 路线在无 thread、无 steer 的情况下回答，并记入现有 Luna 延迟日志。worker_busy/overload 只在所有路线都饱和时返回。健康来源复用 `xiaodai-core` 已有的延迟日志与健康策略，不另建 `HealthChanged` 来源。
 
 拟议 worker 状态为 idle、running、cancelling、unhealthy/restarting，另带有限 pending command。控制保存其**观察快照**，不等状态变 idle 才处理 Stop 或 UI。worker 等内部会话 gate 时仍受 deadline/cancel 约束；supervisor 可回收或隔离不合作的进程。
 
@@ -43,7 +45,7 @@ RA-01 的 `control_contracts.rs` 是唯一 envelope/proposal 定义，不在 wor
 | `ActionProposed(ActionProposal)` | 只交统一验证入口；`capability_id/parameters/target_handle?` 均非权限。RA-05 未启用则明确 unsupported 或沿既有转交路线 |
 | `Escalate` | 单次明确转交，继续使用既有 OpenCode；不把“转交”文字读给用户，也不复制副作用 |
 | `ProducerClosed` | producer 已封口及完整/partial/failed 等生成结果；不等于已播放或任务成功 |
-| `WorkerFailed / HealthChanged` | 版本化错误/健康事实；controller 决定状态与既有 fallback，不能把错误当内容完成 |
+| `WorkerFailed / HealthChanged` | 版本化错误/健康事实（健康来自 `xiaodai-core` 既有延迟日志与 Luna-first 策略）；controller 决定状态与既有 fallback，不能把错误当内容完成 |
 
 所有输出带 RA-01 envelope。只有当前 generation 的前台结果可申请输出；已接受持久任务的结果进入 RA-04 的 operation/task 路径，不能为继续使用旧前台输出而换贴 token。
 
@@ -61,7 +63,7 @@ RA-01 的 `control_contracts.rs` 是唯一 envelope/proposal 定义，不在 wor
 
 ### 4. 显式 supplement 的竞态
 
-[2026-11-20 voice review](../../../review-voice-interaction-2026-11-20.md) 记录的 `turn/steer` ACK/事件竞争必须在本步骤实现时解决：provider 可能先处理/发出 `userMessage`，调用方随后才从 ACK await 恢复，若此时才设置 `steer_pending` 就可能漏掉早到事件。
+该竞争即 [#35](https://github.com/JasonGuoo/esp-bot/issues/35)，与 reducer 无关，应按 [RA-00](ra-00-quick-decoupling.md#并行的独立修复35-steer-竞争) 作为独立小 PR 先行修复，不等待 RA-01/02；本节描述其设计。[2026-11-20 voice review](../../../review-voice-interaction-2026-11-20.md) 记录的 `turn/steer` ACK/事件竞争：provider 可能先处理/发出 `userMessage`，调用方随后才从 ACK await 恢复，若此时才设置 `steer_pending` 就可能漏掉早到事件。
 
 拟议在发送 request 前安装 request-scoped handoff barrier；reader 可在有界范围内保存早到的相关通知，ACK 成功后按 exact turn/request 证据提交 handoff。ACK 拒绝、超时、turn 已封口或被取消时显式撤 barrier，丢弃不适用候选并沿既有 fresh-turn fallback。不能靠 sleep 规避竞争，也不能让 rejected steer 的早到输出流入新 sink。
 

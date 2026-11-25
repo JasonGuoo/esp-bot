@@ -12,6 +12,8 @@
 
 沿用既有 Rust/Tauri、Xiaodai core/Luna、OpenCode、TaskService、SQLite、模型 worker 与设备 runtime；本系列不引入新 agent/runtime，不把所有内部函数转换为 MCP，也不让模型直接调用家长控制台的通用 dispatcher。MCP 可以是对外服务的接入协议，内部可信宿主应使用 typed adapter。
 
+**Grok Bot 委派不进入家庭语音轮次。** `xiaodai-core` 在存在 `~/grok-bot/mcp/server.mjs` 时默认开启 `GrokBotDelegate`（`config.rs:221-264`），但 bot-server 显式关闭它（`brain/fast_core.rs:72-80, 119`，并有测试 `fast_core.rs:731`）。本系列保持关闭；若以后需要，只能作为已登记的 `agent.delegate` workflow 能力加入：经过 scope 过滤、可被 TaskService 拥有和取消、结果走 inbox，不能在 core 内部绕过能力目录。
+
 能力应分成三类：
 
 | 类别 | 运行方式 | 本项目示例 | 主要约束 |
@@ -127,6 +129,7 @@
 | `device.status/volume` | `DeviceVolumes` 与设备固定本地控制 | 在线、当前连接、范围和 hardware-applied 校验；不建立离线设备命令队列 |
 | `presentation.show/replay` | 不可变 plan/artifact、既有输出 lease/回执 | 复用已有准备好的版本，不能用重播触发新的模型/工具副作用 |
 | `presentation.render/media.prepare/print.submit` | 现有 `capabilities.rs`、TaskService、打印 adapter | 保留来源许可、幂等、效果核对；仅在实际支持时进入目录 |
+| `agent.delegate`（暂不启用） | 未来复用 TaskService 与 inbox | 默认关闭，与 bot-server 现状一致；启用前须登记为 workflow 能力、带 scope 过滤与结果回执，测试 `fast_core.rs:731` 保持通过 |
 | `task.status/cancel/provide_input/amend` | 现有 TaskService | 语义目标解析、运行中修改边界与语音入口由 RA-06 定义；`resume` 是已有 AwaitingInput 底层接口，不表示任意运行任务可恢复/改要求 |
 
 提醒及结果投递沿用现有被动陪伴规则：未激活时只有家人明确设置的定时提醒可按已有门控播报；任务完成、识别人脸、日期、回家或习惯推断不会自动开启麦克风或问候。请求“做好后告诉我”可记录待投递意图；交付按 [RA-04 的结果交付体验](steps/ra-04-task-delivery.md#发言仲裁和通知政策)执行：默认只有静默表情提示和下次唤醒先交付，主动说出结果须家庭 opt-in 且走 `proactive.v1` 的 `task_result` moment，不能隐式获得无限播报权。
