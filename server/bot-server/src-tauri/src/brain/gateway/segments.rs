@@ -1,5 +1,6 @@
 //! One in-flight segment. TCP completion is not a rendered/played receipt.
 use super::*;
+use std::time::Duration;
 use crate::brain::{orchestration::PreparedSegment,presentation::{PresentationPlan,OutputLease,PlaybackPurpose}};
 
 pub(super) struct Delivery {
@@ -11,6 +12,9 @@ pub(super) struct Delivery {
     /// The producer can still add speech. A segment receipt alone cannot finish this turn.
     pub live_content:bool,
     pub(super) current_spoken:Option<String>,
+    /// When the current segment was handed to the device. A missing playback
+    /// report must not leave this delivery blocking the next listen.
+    pub report_since:Option<Instant>,
     receipt_sequence:u64,current_rendered:Option<String>,current_visual_unavailable:bool,
 }
 impl Delivery {
@@ -23,7 +27,7 @@ impl Delivery {
             expires_at_ms:crate::time::now_ms() as i64+120_000,revoked:false})?;
         let playback_id=brain.tasks.begin_playback(&plan,&lease_id)?;
         Ok(Self{plan,token,turn_id,activation_id:activation.into(),lease_id,playback_id,index,current_seq:0,total_sent:0,pending:segments.into(),current:None,
-            tasks:tasks.into(),audio_requested:audio,started:Instant::now(),last_progress:Instant::now(),preparing_task:false,request_id:String::new(),progress_seq:1000,progress_only:false,live_content:false,receipt_sequence:0,current_spoken:None,current_rendered:None,current_visual_unavailable:false})
+            tasks:tasks.into(),audio_requested:audio,started:Instant::now(),last_progress:Instant::now(),preparing_task:false,request_id:String::new(),progress_seq:1000,progress_only:false,live_content:false,report_since:None,receipt_sequence:0,current_spoken:None,current_rendered:None,current_visual_unavailable:false})
     }
     pub fn next(&mut self,brain:&Brain)->Result<Option<(Value,Option<Playback>,DisplayResult)>,String>{
         if !brain.memory.pending_household_cleanup()?.is_empty(){return Err("source_cleanup_pending".into());}
@@ -32,7 +36,7 @@ impl Delivery {
         let Some(segment)=self.pending.pop_front() else{return Ok(None)};
         if self.started.elapsed()>Duration::from_secs(120){return Err("presentation_expired".into());}
         if self.total_sent>=64{return Err("presentation_turn_segment_budget".into());}
-        self.total_sent+=1;self.current_seq+=1;self.current=Some(segment.segment_id.clone());
+        self.total_sent+=1;self.current_seq+=1;self.current=Some(segment.segment_id.clone());self.report_since=Some(Instant::now());
         let final_segment=!self.live_content && !self.progress_only&&self.pending.is_empty()&&self.tasks.is_empty();
         let purpose=if self.progress_only{"progress"}else if final_segment{"final"}else if self.index==1&&!self.tasks.is_empty(){"task_ack"}else if self.pending.is_empty()&&!self.tasks.is_empty(){"progress"}else{"content"};
         let pcm=if self.audio_requested {segment.audio.as_ref().and_then(|v|v["wav_base64"].as_str()).map(media::decode_output).transpose()?}else{None};
@@ -98,7 +102,7 @@ impl Delivery {
             state:status.into(),device_monotonic_ms:payload["device_monotonic_ms"].as_u64(),sample_position:payload["sample_position"].as_u64(),detail:json!({"code":payload["code"],"visual_unavailable":self.current_visual_unavailable})})?;
         let _=brain.memory.journal_receipt(&self.turn_id,"presentation",json!({"presentation_id":self.plan.presentation_id,
             "segment_id":segment,"status":status,"code":payload["code"],"visual_unavailable":self.current_visual_unavailable,"rendered_text":if status=="completed"{self.current_rendered.as_deref()}else{None}}),&format!("{}_{}",self.playback_id,self.current_seq));
-        self.current=None;self.current_rendered=None;self.current_spoken=None;
+        self.current=None;self.current_rendered=None;self.current_spoken=None;self.report_since=None;
         if !current{return Err("presentation_lease_revoked".into());}
         if status=="failed" {self.pending.clear();return Err("presentation_segment_failed".into());}
         Ok(self.pending.is_empty()&&self.tasks.is_empty())
@@ -110,6 +114,32 @@ impl Delivery {
         if !quick_decouple { return true; }
         self.current.is_some() || !self.pending.is_empty() || self.live_content || self.progress_only
     }
+    pub(super) fn report_expired(&self) -> bool {
+        self.current.is_some() && self.report_since.is_some_and(|sent| sent.elapsed() > SEGMENT_REPORT_DEADLINE)
+    }
+}
+
+/// Long enough for one spoken sentence and its hardware receipt, and shorter
+/// than the firmware presentation window. A device that never confirms the
+/// segment must not keep the next listen `session_busy`.
+pub(super) const SEGMENT_REPORT_DEADLINE: Duration = Duration::from_secs(8);
+
+/// The pending result or clarification is the first part of the device turn's
+/// presentation, under that turn's plan, so the firmware can accept it while
+/// the turn is COMMITTED.
+pub(super) fn prepend_lead(brain:&Brain, lead_plan:PresentationPlan, lead_segments:Vec<PreparedSegment>, mut answer:PresentationPlan, answer_segments:Vec<PreparedSegment>)->Result<(PresentationPlan,Vec<PreparedSegment>),String>{
+    let mut semantic=lead_plan.segments;
+    semantic.extend(answer.segments);
+    if semantic.is_empty()||semantic.len()>64 { return Err("presentation_segment_limit".into()); }
+    answer.segments=semantic;
+    answer.presentation_id=format!("presentation_{}",uuid::Uuid::new_v4().simple());
+    answer.revision=1;
+    use sha2::{Digest,Sha256};
+    answer.digest=format!("{:x}",Sha256::digest(serde_json::to_vec(&json!({"context":answer.context,"segments":answer.segments})).map_err(|e|e.to_string())?));
+    brain.tasks.save_plan(&answer)?;
+    let mut prepared=lead_segments;
+    prepared.extend(answer_segments);
+    Ok((answer,prepared))
 }
 
 pub(super) fn restore(brain:&Brain,plan:&PresentationPlan)->Result<Vec<PreparedSegment>,String>{
