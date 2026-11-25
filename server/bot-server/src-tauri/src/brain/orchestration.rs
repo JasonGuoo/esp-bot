@@ -7,6 +7,48 @@ use presentation::{PlanContext, PresentationPlan, PresentationPlanner};
 /// Household memory notes given to a model, trimmed on whole items.
 const MEMORY_NOTE_CHARS: usize = 1500;
 
+/// A task that is waiting for a missing parameter. Ordinary chat does not name it.
+pub(crate) struct PendingTaskRef<'a> {
+    pub task_id: &'a str,
+    pub summary: &'a str,
+    pub conversation_turn_id: &'a str,
+}
+
+/// True only when this utterance points at one waiting task: it names that task's
+/// handle, or it is the next line in the same activation after that task's
+/// clarification was the last thing spoken. Two matches stay ordinary chat.
+pub(crate) fn addresses_pending_task(transcript: &str, pending: &[PendingTaskRef<'_>], activation_id: &str, last: Option<&Value>) -> bool {
+    let transcript = transcript.trim();
+    if transcript.is_empty() || pending.is_empty() { return false; }
+    let named: Vec<_> = pending.iter().filter(|task| !task.task_id.is_empty() && transcript.contains(task.task_id)).collect();
+    if named.len() == 1 { return true; }
+    if named.len() > 1 { return false; }
+    let Some(last) = last else { return false };
+    let external = last["turn_id"].as_str().unwrap_or("");
+    let same_activation = !activation_id.is_empty() && (external == activation_id || external.starts_with(&format!("{activation_id}-")));
+    if !same_activation { return false; }
+    let spoken = last["assistant_delivered"].as_str().or_else(|| last["assistant_generated"].as_str()).unwrap_or("");
+    let matched: Vec<_> = pending.iter().filter(|task| {
+        last["conversation_turn_id"].as_str() == Some(task.conversation_turn_id)
+            || (!task.summary.is_empty() && spoken.contains(task.summary))
+    }).collect();
+    matched.len() == 1
+}
+
+/// What the foreground says after task proposals are submitted. A failed write
+/// never uses the acceptance line. `None` means this turn did not delegate.
+pub(crate) fn delegated_reply(proposed: usize, started: usize, invalid: bool) -> Option<&'static str> {
+    if proposed == 0 { return None; }
+    if invalid || started < proposed {
+        return Some(if started == 0 {
+            "这次任务没有启动。请在 Mac 上查看原因，补充信息后再试。"
+        } else {
+            "有一部分任务已接下，另外的任务没有启动。请在 Mac 上查看各项状态。"
+        });
+    }
+    Some("好的，我接到这件事了，正在处理，有结果就告诉你。")
+}
+
 /// How long a turn's context may wait for Graphiti, which starts beside the SQLite reads.
 const GRAPH_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
 
@@ -221,7 +263,16 @@ impl Brain {
         // Default brain: the Xiaodai core answers ordinary turns from the same memory
         // context; OpenCode keeps tools, tasks, private scopes and anything handed back.
         let mut fast_reply=None;
-        let route=self.fast.route(&transcript,input.profile_id.is_some(),!pending_tasks.is_empty());
+        let pending_fill=if self.config.responsive.quick_decouple {
+            let refs: Vec<PendingTaskRef> = pending_tasks.iter().map(|task| PendingTaskRef {
+                task_id: task.task_id.as_str(),
+                summary: task.result["summary"].as_str().unwrap_or(""),
+                conversation_turn_id: task.conversation_turn_id.as_str(),
+            }).collect();
+            let last = bounded_recent.last();
+            addresses_pending_task(&transcript, &refs, &input.conversation_id, last)
+        } else { !pending_tasks.is_empty() };
+        let route=self.fast.route(&transcript,input.profile_id.is_some(),pending_fill);
         match route {
             Ok(())=>{
                 let zone=settings["timezone"].as_str().and_then(|z|z.parse::<chrono_tz::Tz>().ok()).unwrap_or(chrono_tz::Tz::UTC);
@@ -306,11 +357,11 @@ impl Brain {
         if scene.speech.trim().is_empty(){return Err("assistant_empty_reply".into());}
         let mut outcome=reply.structured.as_ref().and_then(|v|v["outcome"].as_str()).unwrap_or("answered").to_owned();
         let task_request_failed=invalid_proposals||task_ids.len()<proposed_task_count;
-        if task_request_failed{
-            outcome="partial".into();scene.cards.clear();
-            scene.speech=if task_ids.is_empty(){"这次任务没有启动。请在 Mac 上查看原因，补充信息后再试。"}
-                else{"有一部分任务已接下，另外的任务没有启动。请在 Mac 上查看各项状态。"}.into();
-        }else if !task_ids.is_empty(){outcome="answered".into();scene.speech="好的，我接到这件事了，正在处理，有结果就告诉你。".into();}
+        if let Some(line)=delegated_reply(proposed_task_count,task_ids.len(),invalid_proposals){
+            if task_request_failed { outcome="partial".into(); scene.cards.clear(); }
+            else { outcome="answered".into(); }
+            scene.speech=line.into();
+        }
         let effect=reply.structured.as_ref().and_then(|v|v["effect"].as_str()).unwrap_or("none");
         let effect_unconfirmed=outcome=="done"&&!display::confirmed_effect(effect,&reply.evidence);
         if effect_unconfirmed {
@@ -599,5 +650,44 @@ mod tests {
         ] {
             assert_eq!(explicit_print_request(said, quote), authorize, "{said}");
         }
+    }
+
+    use super::{addresses_pending_task, delegated_reply, PendingTaskRef};
+
+    fn waiting<'a>(id: &'a str, summary: &'a str, turn: &'a str) -> PendingTaskRef<'a> {
+        PendingTaskRef { task_id: id, summary, conversation_turn_id: turn }
+    }
+
+    #[test]
+    fn ordinary_chat_does_not_fill_a_waiting_task() {
+        let pending = [waiting("task-search", "还缺资料的年份", "turn-ask")];
+        assert!(!addresses_pending_task("今天好冷", &pending, "device-1", None));
+        assert!(!addresses_pending_task("你今天开心吗", &pending, "device-1", None));
+        let other = json!({"turn_id":"device-2-3","conversation_turn_id":"turn-ask","assistant_delivered":"还缺资料的年份"});
+        assert!(!addresses_pending_task("二零二四年", &pending, "device-1", Some(&other)), "a different activation is not the clarification");
+    }
+
+    #[test]
+    fn a_named_handle_or_the_immediate_clarification_does_fill() {
+        let pending = [waiting("task-search", "还缺资料的年份", "turn-ask"), waiting("task-print", "还缺打印页数", "turn-print")];
+        assert!(addresses_pending_task("用 task-print 补上", &pending, "device-1", None));
+        assert!(!addresses_pending_task("task-search 和 task-print 都改一下", &pending, "device-1", None), "two handles stay ordinary chat");
+        let asked = json!({"turn_id":"device-1-4","conversation_turn_id":"turn-ask","assistant_delivered":"还缺资料的年份"});
+        assert!(addresses_pending_task("二零二四年", &pending, "device-1", Some(&asked)));
+        let both = json!({"turn_id":"device-1-4","conversation_turn_id":"other","assistant_delivered":"还缺资料的年份，还缺打印页数"});
+        assert!(!addresses_pending_task("三点", &pending, "device-1", Some(&both)), "two clarifications are not one answer");
+    }
+
+    #[test]
+    fn a_failed_task_write_is_not_an_acceptance() {
+        let accepted = delegated_reply(1, 1, false).unwrap();
+        assert!(accepted.contains("接到这件事"));
+        let failed = delegated_reply(1, 0, false).unwrap();
+        assert!(!failed.contains("接到这件事"));
+        assert!(failed.contains("没有启动"));
+        let partial = delegated_reply(2, 1, false).unwrap();
+        assert!(!partial.contains("接到这件事"));
+        assert!(delegated_reply(0, 0, false).is_none());
+        assert!(delegated_reply(1, 1, true).unwrap().contains("没有启动"));
     }
 }

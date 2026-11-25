@@ -103,6 +103,13 @@ impl Delivery {
         if status=="failed" {self.pending.clear();return Err("presentation_segment_failed".into());}
         Ok(self.pending.is_empty()&&self.tasks.is_empty())
     }
+    /// RA-00: a delivery that is only waiting on background tasks does not make
+    /// the next foreground input session_busy. While the switch is off, any
+    /// delivery blocks, which is the baseline.
+    pub(super) fn blocks_new_input(&self, quick_decouple: bool) -> bool {
+        if !quick_decouple { return true; }
+        self.current.is_some() || !self.pending.is_empty() || self.live_content || self.progress_only
+    }
 }
 
 pub(super) fn restore(brain:&Brain,plan:&PresentationPlan)->Result<Vec<PreparedSegment>,String>{
@@ -352,6 +359,41 @@ mod tests {
         }
         assert!(live.report(&brain, &last).unwrap());
         assert_eq!(live.report(&brain, &last).unwrap_err(), "presentation_receipt_stale");
+        drop(brain);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_delegated_explanation_is_a_final_segment_and_does_not_hold_the_next_turn() {
+        use crate::brain::presentation::{PlanContext, PresentationPlanner};
+        let dir = std::env::temp_dir().join(format!("xiaodai-delegate-{}", uuid::Uuid::new_v4()));
+        let brain = Brain::new(dir.clone(), None, Arc::new(|_| {})).unwrap();
+        let scene = scene_for("好的，我接到这件事了，正在处理，有结果就告诉你。", "thinking");
+        let context = PlanContext { household_id: "house".into(), daily_conversation_id: "day".into(), conversation_turn_id: "turn".into(), task_id: Some("task-1".into()) };
+        let plan = PresentationPlanner::default().freeze(context, &scene, None, false).unwrap();
+        let token = RuntimeToken { epoch: 1, session_id: 1, turn_id: 1, focus_generation: 0 };
+        let segments = restore(&brain, &plan).unwrap();
+        let mut delegated = Delivery::new(&brain, "device", "activation-a", token, "turn".into(), plan.clone(), segments.clone(), vec![], false, 1).unwrap();
+        let (message, _, _) = delegated.next(&brain).unwrap().unwrap();
+        assert_eq!(message["payload"]["purpose"], "final");
+        assert_eq!(message["payload"]["final"], true);
+        assert!(delegated.blocks_new_input(true), "the explanation is still on the wire");
+        let mut report = message["payload"].clone();
+        report["runtime"] = message["runtime"].clone();
+        report["status"] = json!("completed");
+        assert!(delegated.report(&brain, &report).unwrap(), "no background task is attached, so the foreground ends");
+        assert!(!delegated.blocks_new_input(true));
+
+        let mut baseline = Delivery::new(&brain, "device", "activation-b", RuntimeToken { epoch: 2, ..token }, "turn".into(), plan, segments, vec!["task-1".into()], false, 1).unwrap();
+        let (message, _, _) = baseline.next(&brain).unwrap().unwrap();
+        assert_eq!(message["payload"]["purpose"], "task_ack");
+        assert_eq!(message["payload"]["final"], false);
+        let mut report = message["payload"].clone();
+        report["runtime"] = message["runtime"].clone();
+        report["status"] = json!("completed");
+        assert!(!baseline.report(&brain, &report).unwrap(), "the baseline keeps the foreground until the task list is empty");
+        assert!(baseline.blocks_new_input(false));
+        assert!(!baseline.blocks_new_input(true), "with the switch on, a finished explanation does not block the next input");
         drop(brain);
         std::fs::remove_dir_all(dir).unwrap();
     }

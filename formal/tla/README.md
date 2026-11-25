@@ -20,7 +20,7 @@
 
 [Issue #36](https://github.com/JasonGuoo/esp-bot/issues/36) 的[十步规格](../../docs/specs/responsive-assistant/implementation-plan.md)和[验收映射](../../docs/specs/responsive-assistant/acceptance.md)规划交互控制、网关等待、Luna 隔离、独立任务交付、能力操作与迟到身份工作流。**本次为文档-only：未修改运行行为、`.tla`、`.cfg` 或 `checks.sh`，没有新模型检查或实板通过声明。**
 
-后续首次实现各行为时，在同一 PR 更新受影响的现有孪生并建立所需新孪生。规划的 `macos/ResponsiveControl`、`protocol/GatewayDispatch`、`macos/LunaWorker`、`macos/TaskDelivery` 等名称目前仅是规格中的路径，不是已经存在或运行的模型。能力、身份、上下文和恢复的模型范围以验收映射为准。#35 的 steer 交接是 Mac 侧并发，先用 `macos/SteerHandoff` 记录「早到通知只交接一次、撤回后不漏进新回答者、旧通知不能清掉新的等待」；它不替代尚未实现的 LunaWorker。
+后续首次实现各行为时，在同一 PR 更新受影响的现有孪生并建立所需新孪生。规划的 `macos/ResponsiveControl`、`protocol/GatewayDispatch`、`macos/LunaWorker`、`macos/TaskDelivery` 等名称目前仅是规格中的路径，不是已经存在或运行的模型。能力、身份、上下文和恢复的模型范围以验收映射为准。#35 的 steer 交接是 Mac 侧并发，先用 `macos/SteerHandoff` 记录「早到通知只交接一次、撤回后不漏进新回答者、旧通知不能清掉新的等待」；它不替代尚未实现的 LunaWorker。RA-00 不改 `TurnPlayback`：模块契约已经允许 final 内容段在独立任务仍运行时结束播放，这次只是 Mac 不再比契约更严。
 
 控制循环的进展不应依赖模型/网络/数据库必定完成；业务完成则明确其健康与公平调度假设。有界队列、丢弃/合并策略、来源撤回、未知效果核对、重连与持久回执均需对应实现回归。当前六个模型和下方 11 月 20 日记录仍只证明原有范围。
 

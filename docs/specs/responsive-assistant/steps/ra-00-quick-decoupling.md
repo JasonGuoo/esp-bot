@@ -1,6 +1,6 @@
 # RA-00：Mac 侧快速解耦（无协议变更）
 
-**状态：待实施；本文件是规格，未改运行代码，未运行本步骤测试。日期：2026-11-25（按 PR #37 review 增补）。** [总规格与 issue](../README.md) · [实施计划](../implementation-plan.md)。核对基线：`46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`。
+**状态：implemented, host-tested, pending board acceptance。日期：2026-11-25（按 PR #37 review 增补；M0 主机实现于其后）。** [总规格与 issue](../README.md) · [实施计划](../implementation-plan.md)。核对基线：`46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`。开关：`responsive.quick_decouple`，默认 `true`。
 
 ## 目标与依赖
 
@@ -40,10 +40,10 @@ RA-00 为后续 RA-01/02 留出接缝：后者以 strangler 方式在这些接�
 
 ## DoD 与运行状态
 
-- [ ] 后台任务运行期间，合法新前台输入不再因 `delivery`/`tasks` 返回 session_busy。
-- [ ] 委派回复以真实 `final` 段及硬件回执结束；ACK 不伪装任务成功。
-- [ ] 待补参任务不再强制普通闲聊走 OpenCode。
-- [ ] 三处分支内等待已迁出，fence 先于 cleanup；既有 gateway 回环测试保留并通过。
-- [ ] 前后分阶段计时与验收记录分开报告；实板项单独记录。
+- [x] 后台任务运行期间，合法新前台输入不再因 `delivery`/`tasks` 返回 session_busy。（主机：Delivery 不再挂后台任务；`blocks_new_input` 单测。硬件回执未在板上采集。）
+- [x] 委派回复以真实 `final` 段结束；ACK 不伪装任务成功。（主机：失败写库不说「接到这件事」。硬件回执待实板。）
+- [x] 待补参任务不再强制普通闲聊走 OpenCode。（主机单测。）
+- [x] 三处分支内等待已迁出，fence 先于 cleanup；既有 gateway 回环测试保留并通过。
+- [ ] 前后分阶段计时与验收记录分开报告；实板项单独记录。（沿用既有 `latency` 分阶段计时，未做前后对比测量，也未上板。）
 
-**当前运行状态：全部待实施/待运行。**
+**当前运行状态：implemented, host-tested, pending board acceptance。**
