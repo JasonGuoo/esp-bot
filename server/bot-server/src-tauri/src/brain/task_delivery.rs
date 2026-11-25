@@ -12,6 +12,13 @@ pub const MAX_INBOX_ROWS: i64 = 256;
 pub const MAX_RESULT_BYTES: usize = 4_096;
 pub const RESCAN_BATCH: usize = 8;
 pub const MAX_PERSIST_PENDING: usize = 4;
+pub const MAX_OUTBOX: i64 = 64;
+/// Delivered and invalidated rows, and private rows nobody can hear, are dropped after this.
+pub const RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// A summary that asked “要听完整的吗？” is settled if nobody answers.
+pub const PARTIAL_WAIT_MS: i64 = 10 * 60 * 1000;
+/// A task_result offer the installed firmware drops is not repeated immediately.
+pub const OFFER_BACKOFF_MS: i64 = 30 * 60 * 1000;
 /// An existing expression id. The installed firmware rejects SET_EXPRESSION while
 /// passive, so the Mac publishes this hint and does not send a new device event.
 pub const HINT_EXPRESSION: &str = "curious";
@@ -42,6 +49,12 @@ pub fn on_committed_turn(user_text: &str, kind: &str) -> TurnDelivery {
 pub fn asks_to_expand(text: &str) -> bool {
     let text = text.trim();
     text.contains("展开") || text.contains("全部告诉") || text.contains("完整的") || text.contains("听完整")
+        || text == "好" || text == "好的" || text == "要"
+}
+
+pub fn declines_expansion(text: &str) -> bool {
+    let text = text.trim();
+    text.contains("不用") || text.contains("不要") || text.contains("算了") || text.contains("不听") || text == "否"
 }
 
 pub fn asks_to_be_told(text: &str) -> bool {

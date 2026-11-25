@@ -104,10 +104,10 @@ impl TaskService{
           CREATE TABLE IF NOT EXISTS presentation_sources(presentation_id TEXT NOT NULL,source_id TEXT NOT NULL,context_turn_id TEXT NOT NULL,PRIMARY KEY(presentation_id,source_id));
           CREATE INDEX IF NOT EXISTS presentation_source_lookup ON presentation_sources(source_id);
           UPDATE output_leases SET revoked=1;
-          UPDATE task_attempts SET state='interrupted',ended_at_ms=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE ended_at_ms IS NULL;
-          UPDATE tasks SET state=CASE WHEN state='cancel_requested' AND capability IN ('media.prepare','presentation.render') THEN 'cancelled' WHEN capability IN ('media.prepare','presentation.render') THEN 'queued' ELSE 'unknown' END,
-           stage='recovery_required' WHERE state IN ('running','cancel_requested');").map_err(db_error)?;
+          UPDATE task_attempts SET state='interrupted',ended_at_ms=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE ended_at_ms IS NULL;").map_err(db_error)?;
         migrate_delivery(&db)?;
+        settle_interrupted(&db,"recovery_required")?;
+        release_offered_rows(&db)?;
         let hint=inbox_hint_due(&db)?;
         let artifacts=Arc::new(ArtifactStore::open(root.join("artifacts"),config.max_asset_bytes)?);
         let service=Arc::new(Self{slots:Arc::new(Semaphore::new(config.max_concurrent)),config,artifacts,root,db:Mutex::new(db),sink,
@@ -173,8 +173,11 @@ impl TaskService{
         let runners=self.runners.lock().map(|mut hs|std::mem::take(&mut *hs)).unwrap_or_default();
         for h in runners.values(){h.abort();}for(_,h)in runners{let _=h.await;}
         if let Ok(mut active)=self.active.lock(){active.clear();}
-        if let Ok(db)=self.db.lock(){let _=db.execute("UPDATE tasks SET state=CASE WHEN state='cancel_requested' AND capability IN ('media.prepare','presentation.render') THEN 'cancelled' WHEN capability IN ('media.prepare','presentation.render') THEN 'queued' ELSE 'unknown' END,stage='service_stopped' WHERE state IN ('running','cancel_requested')",[]);
-            let _=db.execute("UPDATE task_attempts SET state='interrupted',ended_at_ms=?1 WHERE ended_at_ms IS NULL",[now()]);}
+        if let Ok(db)=self.db.lock(){
+            let _=settle_interrupted(&db,"service_stopped");
+            let _=release_offered_rows(&db);
+            let _=db.execute("UPDATE task_attempts SET state='interrupted',ended_at_ms=?1 WHERE ended_at_ms IS NULL",[now()]);
+        }
     }
 
     /// effect_authorized is a host decision, never a deserialized LLM field.
@@ -197,8 +200,7 @@ impl TaskService{
             if record.capability!=request.capability||record.input!=request.input||record.conversation_turn_id!=request.conversation_turn_id{return Err("task_intent_conflict".into());}
             return Ok(record);
         }
-        let undelivered=undelivered_slots(&tx)?;
-        if undelivered>=super::task_delivery::MAX_UNDELIVERED {return Err("task_result_capacity".into());}
+        prune_inbox(&tx)?;
         let count:i64=tx.query_row("SELECT count(*) FROM tasks",[],|r|r.get(0)).map_err(db_error)?;
         if count>=self.config.max_tasks as i64{return Err("task_capacity_reached".into());}
         let id=format!("task_{}",uuid::Uuid::new_v4().simple());let now=now();
@@ -210,6 +212,11 @@ impl TaskService{
     }
 
     pub fn get(&self,id:&str)->Result<TaskRecord,String>{valid_id(id)?;let db=self.db.lock().map_err(|_|"task_database_lock")?;query_task(&db,id)}
+    pub fn task_for_delivery(&self,delivery_id:&str)->Result<TaskRecord,String>{
+        valid_id(delivery_id)?;let db=self.db.lock().map_err(|_|"task_database_lock")?;
+        let task_id:String=db.query_row("SELECT task_id FROM delivery_inbox WHERE delivery_id=?1",[delivery_id],|r|r.get(0)).map_err(db_error)?;
+        query_task(&db,&task_id)
+    }
     /// Resume the same intent after the user supplies missing parameters. An
     /// accepted or unknown CUPS submission can only be reconciled, never resumed.
     pub fn resume(self:&Arc<Self>,id:&str,patch:Value,effect_authorized:bool)->Result<TaskRecord,String>{
@@ -232,7 +239,7 @@ impl TaskService{
         self.inherit_artifact_sources(&tx,&mut input)?;
         let serialized=serde_json::to_string(&input).map_err(|e|e.to_string())?;if serialized.len()>262_144{return Err("task_input_limit".into());}
         tx.execute("UPDATE tasks SET input_json=?2,state='queued',stage='resumed',result_json='{}',authorized_effect=?3,updated_at_ms=?4,task_revision=task_revision+1 WHERE id=?1",params![id,serialized,task.authorized_effect||effect_authorized,now()]).map_err(db_error)?;
-        tx.execute("UPDATE delivery_inbox SET state='invalidated',delivery_revision=delivery_revision+1 WHERE task_id=?1 AND kind='needs_input' AND state NOT IN ('invalidated','delivered')",[id]).map_err(db_error)?;
+        tx.execute("UPDATE delivery_inbox SET state='invalidated',delivery_revision=delivery_revision+1 WHERE task_id=?1 AND state NOT IN ('invalidated','delivered')",[id]).map_err(db_error)?;
         append_event(&tx,id,"task.resumed",&json!({"attempt_next":task.attempt+1}))?;let record=query_task(&tx,id)?;tx.commit().map_err(db_error)?;drop(db);
         self.publish_hint();
         self.emit(&record,"task.state",json!({"state":"queued","stage":"resumed"}));Ok(record)
@@ -405,6 +412,15 @@ impl TaskService{
         self.hint_pending.store(hint,Ordering::Release);
         if changed{self.emit(&task,"task.state",json!({"state":state,"stage":stage,"task_revision":task_revision,"result_revision":revision}));}Ok(())
     }
+    async fn commit_state_retry(&self,id:&str,state:TaskState,stage:&str,result:Option<Value>){
+        for attempt in 0..3 {
+            match self.set_state(id,state,stage,result.clone()) {
+                Ok(())=>return,
+                Err(error) if attempt<2 && storage_retryable(&error) => tokio::time::sleep(Duration::from_millis(20*(attempt as u64+1))).await,
+                Err(_)=>{self.note_persist_pending(id);return;}
+            }
+        }
+    }
     pub fn fail_next_result_write(&self){self.fail_result_writes.fetch_add(1,Ordering::AcqRel);}
     pub fn persist_pending(&self)->Vec<String>{self.persist_pending.lock().map(|v|v.clone()).unwrap_or_default()}
     pub fn hint_pending(&self)->bool{self.hint_pending.load(Ordering::Acquire)}
@@ -425,7 +441,7 @@ impl TaskService{
         valid_id(household)?;if !activation.is_empty(){valid_id(activation)?;}
         let mut db=self.db.lock().map_err(|_|"task_database_lock")?;let tx=db.transaction().map_err(db_error)?;
         fence_invalid_inbox(&tx)?;
-        let mut statement=tx.prepare("SELECT i.delivery_id FROM delivery_inbox i JOIN tasks t ON t.id=i.task_id WHERE t.household_id=?1 AND i.migrated=0 AND i.state IN ('pending_delivery','deferred') AND (i.hold_activation IS NULL OR i.hold_activation!=?2) ORDER BY i.created_at_ms,i.delivery_id LIMIT 8").map_err(db_error)?;
+        let mut statement=tx.prepare("SELECT i.delivery_id FROM delivery_inbox i JOIN tasks t ON t.id=i.task_id WHERE t.household_id=?1 AND i.migrated=0 AND i.state IN ('pending_delivery','deferred') AND (i.hold_activation IS NULL OR i.hold_activation!=?2) ORDER BY i.created_at_ms, i.delivery_id LIMIT 8").map_err(db_error)?;
         let rows=statement.query_map(params![household,activation],|r|r.get::<_,String>(0)).map_err(db_error)?;
         let ids=rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
         drop(statement);
@@ -438,6 +454,29 @@ impl TaskService{
             return Ok(Some(ReadyDelivery{task,delivery_id:row.delivery_id,delivery_revision:row.revision,kind:row.kind,promise_full:row.promise=="full"}));
         }
         tx.commit().map_err(db_error)?;Ok(None)
+    }
+    /// The frozen full text of a summary that is still waiting for yes or no.
+    pub fn expansion_target(&self,household:&str,speaker:Option<&str>)->Result<Option<InboxView>,String>{
+        valid_id(household)?;
+        let db=self.db.lock().map_err(|_|"task_database_lock")?;
+        let mut statement=db.prepare("SELECT i.delivery_id FROM delivery_inbox i JOIN tasks t ON t.id=i.task_id WHERE t.household_id=?1 AND i.migrated=0 AND i.state='partial' AND i.kind='result' ORDER BY i.created_at_ms DESC LIMIT 8").map_err(db_error)?;
+        let rows=statement.query_map(params![household],|r|r.get::<_,String>(0)).map_err(db_error)?;
+        let ids=rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
+        drop(statement);
+        for id in ids {
+            let row=load_inbox(&db,&id)?;
+            if scope_visible(&row.scope,row.private_scope,speaker) {
+                return Ok(Some(view_of(&row)));
+            }
+        }
+        Ok(None)
+    }
+    /// A no, or the wait expiring, means the summary was the delivery.
+    pub fn settle_partials(&self,household:&str)->Result<usize,String>{
+        valid_id(household)?;
+        let db=self.db.lock().map_err(|_|"task_database_lock")?;
+        let n=db.execute("UPDATE delivery_inbox SET state='delivered',delivery_revision=delivery_revision+1,promise='full' WHERE state='partial' AND task_id IN (SELECT id FROM tasks WHERE household_id=?1)",[household]).map_err(db_error)?;
+        drop(db);self.publish_hint();Ok(n)
     }
     pub fn defer_results(&self,household:&str,activation:&str)->Result<usize,String>{
         valid_id(household)?;if !activation.is_empty(){valid_id(activation)?;}
@@ -488,15 +527,60 @@ impl TaskService{
         if lease.is_empty(){return Err("delivery_lease_mismatch".into());}
         self.apply_playback(delivery_id,revision,lease.as_str(),completed,prefix,completed&&full)
     }
+    pub fn release_offered(&self)->Result<usize,String>{
+        let db=self.db.lock().map_err(|_|"task_database_lock")?;
+        let n=release_offered_rows(&db)?;
+        drop(db);self.publish_hint();Ok(n)
+    }
+    pub fn age_row(&self,delivery_id:&str,created_at_ms:i64)->Result<(),String>{
+        valid_id(delivery_id)?;
+        let db=self.db.lock().map_err(|_|"task_database_lock")?;
+        db.execute("UPDATE delivery_inbox SET created_at_ms=?2 WHERE delivery_id=?1",params![delivery_id,created_at_ms]).map_err(db_error)?;
+        Ok(())
+    }
+    pub fn retain(&self)->Result<(),String>{
+        let db=self.db.lock().map_err(|_|"task_database_lock")?;
+        prune_inbox(&db)?;
+        drop(db);self.publish_hint();Ok(())
+    }
+    pub fn inbox_count(&self)->Result<i64,String>{
+        let db=self.db.lock().map_err(|_|"task_database_lock")?;
+        db.query_row("SELECT count(*) FROM delivery_inbox",[],|r|r.get(0)).map_err(db_error)
+    }
+    pub fn outbox_count(&self)->Result<i64,String>{
+        let db=self.db.lock().map_err(|_|"task_database_lock")?;
+        db.query_row("SELECT count(*) FROM result_outbox",[],|r|r.get(0)).map_err(db_error)
+    }
+    pub fn offer_ready(&self,delivery_id:&str)->bool{
+        let Ok(db)=self.db.lock() else {return false};
+        db.query_row("SELECT offer_not_before_ms IS NULL OR offer_not_before_ms<=?2 FROM delivery_inbox WHERE delivery_id=?1",params![delivery_id,now()],|r|r.get::<_,bool>(0)).unwrap_or(false)
+    }
+    pub fn note_offer_backoff(&self,delivery_id:&str)->Result<(),String>{
+        if delivery_id.is_empty(){return Ok(());}
+        valid_id(delivery_id)?;
+        let db=self.db.lock().map_err(|_|"task_database_lock")?;
+        db.execute("UPDATE delivery_inbox SET offer_not_before_ms=?2 WHERE delivery_id=?1",params![delivery_id,now()+super::task_delivery::OFFER_BACKOFF_MS]).map_err(db_error)?;
+        Ok(())
+    }
+    pub fn rebind_lease(&self,delivery_id:&str,revision:i64,lease_id:&str,playback_id:&str)->Result<(),String>{
+        valid_id(delivery_id)?;valid_id(lease_id)?;valid_id(playback_id)?;
+        let db=self.db.lock().map_err(|_|"task_database_lock")?;
+        let n=db.execute("UPDATE delivery_inbox SET attempted_lease_id=?3,playback_id=?4 WHERE delivery_id=?1 AND delivery_revision=?2 AND state='offered'",params![delivery_id,revision,lease_id,playback_id]).map_err(db_error)?;
+        if n!=1{return Err("delivery_conflict".into());}
+        Ok(())
+    }
     pub fn release_attempt(&self,delivery_id:&str,activation:&str,prefix:&str)->Result<(),String>{
         if delivery_id.is_empty(){return Ok(());}
         valid_id(delivery_id)?;if !activation.is_empty(){valid_id(activation)?;}
+        let _=activation;
         let db=self.db.lock().map_err(|_|"task_database_lock")?;
         let row=load_inbox(&db,delivery_id)?;
         if matches!(row.state.as_str(),"delivered"|"invalidated"){return Ok(());}
-        let state=if prefix.is_empty(){"deferred"}else{"partial"};
-        db.execute("UPDATE delivery_inbox SET state=?2,hold_activation=?3,delivery_revision=delivery_revision+1,confirmed_prefix=CASE WHEN ?4='' THEN confirmed_prefix ELSE ?4 END WHERE delivery_id=?1 AND state NOT IN ('delivered','invalidated')",
-            params![delivery_id,state,activation,prefix]).map_err(db_error)?;
+        // An offered attempt with no played prefix goes back to pending so another
+        // device turn can claim it. A played prefix stays partial.
+        let state=if prefix.is_empty(){"pending_delivery"}else{"partial"};
+        db.execute("UPDATE delivery_inbox SET state=?2,hold_activation=NULL,attempted_lease_id=NULL,playback_id=NULL,delivery_revision=delivery_revision+1,confirmed_prefix=CASE WHEN ?3='' THEN confirmed_prefix ELSE ?3 END WHERE delivery_id=?1 AND state NOT IN ('delivered','invalidated')",
+            params![delivery_id,state,prefix]).map_err(db_error)?;
         drop(db);self.publish_hint();Ok(())
     }
     pub fn inbox_state(&self,task_id:&str)->Result<Option<String>,String>{
@@ -519,10 +603,24 @@ impl TaskService{
         Ok(Some(InboxView{delivery_id:row.delivery_id,revision:row.revision,state:row.state,kind:row.kind,promise_full:row.promise=="full",summary:row.summary,result_text:row.result_text,tell_me:row.tell_me,private_scope:row.private_scope,receipts:row.receipts}))
     }
     pub fn rescan_inbox(&self,limit:usize)->Result<Vec<String>,String>{
-        let db=self.db.lock().map_err(|_|"task_database_lock")?;
-        let mut statement=db.prepare("SELECT delivery_id FROM delivery_inbox WHERE migrated=0 AND state IN ('pending_delivery','deferred','partial','offered') ORDER BY created_at_ms,delivery_id LIMIT ?1").map_err(db_error)?;
-        let rows=statement.query_map([limit.clamp(1,super::task_delivery::RESCAN_BATCH) as i64],|r|r.get::<_,String>(0)).map_err(db_error)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)
+        let limit=limit.clamp(1,super::task_delivery::RESCAN_BATCH) as i64;
+        let mut db=self.db.lock().map_err(|_|"task_database_lock")?;let tx=db.transaction().map_err(db_error)?;
+        let mut statement=tx.prepare("SELECT o.id,o.delivery_id FROM result_outbox o JOIN delivery_inbox i ON i.delivery_id=o.delivery_id WHERE i.migrated=0 AND i.state IN ('pending_delivery','deferred','partial') ORDER BY o.id LIMIT ?1").map_err(db_error)?;
+        let rows=statement.query_map([limit],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?))).map_err(db_error)?;
+        let pairs=rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
+        drop(statement);
+        if !pairs.is_empty() {
+            for (id,_) in &pairs { tx.execute("DELETE FROM result_outbox WHERE id=?1", [id]).map_err(db_error)?; }
+            let ids=pairs.into_iter().map(|(_,delivery)|delivery).collect::<Vec<_>>();
+            tx.commit().map_err(db_error)?;
+            return Ok(ids);
+        }
+        let mut statement=tx.prepare("SELECT delivery_id FROM delivery_inbox WHERE migrated=0 AND state IN ('pending_delivery','deferred','partial') ORDER BY created_at_ms,delivery_id LIMIT ?1").map_err(db_error)?;
+        let rows=statement.query_map([limit],|r|r.get::<_,String>(0)).map_err(db_error)?;
+        let ids=rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
+        drop(statement);
+        tx.commit().map_err(db_error)?;
+        Ok(ids)
     }
     pub fn clear_outbox(&self)->Result<(),String>{
         let db=self.db.lock().map_err(|_|"task_database_lock")?;
@@ -591,13 +689,13 @@ impl TaskService{
                 let latest=self.get(id).ok();let cancelled=task.capability!="print.submit"&&latest.as_ref().is_some_and(|t|matches!(t.state,TaskState::CancelRequested|TaskState::Cancelled));
                 let mut combined=latest.map(|t|t.result).unwrap_or_else(||json!({}));if !combined.is_object(){combined=json!({});}
                 combined["summary"]=json!(if cancelled{"任务已取消。".to_owned()}else{result.summary});combined["artifact_ids"]=json!(result.artifact_ids);combined["data"]=result.data;
-                let _=self.set_state(id,if cancelled{TaskState::Cancelled}else{result.state},"finished",Some(combined));},
+                self.commit_state_retry(id,if cancelled{TaskState::Cancelled}else{result.state},"finished",Some(combined)).await;},
             Err(code)=>{
                 let latest=self.get(id).ok();
                 let external_uncertain=task.capability=="print.submit"&&latest.as_ref().is_some_and(|t|t.stage=="submitting"||t.result.get("submission_started").is_some()||t.result.get("job_id").is_some());
                 let state=if external_uncertain{TaskState::Unknown}else if code=="cancelled"||latest.as_ref().is_some_and(|t|matches!(t.state,TaskState::CancelRequested|TaskState::Cancelled)){TaskState::Cancelled}else{TaskState::Failed};
                 let mut data=latest.map(|t|t.result).unwrap_or_else(||json!({}));if !data.is_object(){data=json!({});}data["error"]=json!(code);
-                let _=self.set_state(id,state,if external_uncertain{"reconcile_required"}else if state==TaskState::Cancelled{"cancelled"}else{"failed"},Some(data));
+                self.commit_state_retry(id,state,if external_uncertain{"reconcile_required"}else if state==TaskState::Cancelled{"cancelled"}else{"failed"},Some(data)).await;
             }
         }
         let _=self.finish_attempt(id);
@@ -657,6 +755,12 @@ impl TaskService{
             tx.execute("UPDATE tasks SET input_json='{}',result_json=?2,stage='content_deleted' WHERE id=?1",params![task.task_id,serde_json::to_string(&tombstone).map_err(|e|e.to_string())?]).map_err(db_error)?;
             tx.execute("DELETE FROM task_events WHERE task_id=?1",[&task.task_id]).map_err(db_error)?;
             tx.execute("UPDATE task_attempts SET result_json='{}' WHERE task_id=?1",[&task.task_id]).map_err(db_error)?;
+            tx.execute("DELETE FROM result_outbox WHERE delivery_id IN (SELECT delivery_id FROM delivery_inbox WHERE task_id=?1)",[&task.task_id]).map_err(db_error)?;
+            if task.capability=="print.submit" {
+                tx.execute("UPDATE delivery_inbox SET result_ref='',summary_ref='',confirmed_prefix='',receipt_refs='[]',source_refs='[]',state='invalidated' WHERE task_id=?1",[&task.task_id]).map_err(db_error)?;
+            } else {
+                tx.execute("DELETE FROM delivery_inbox WHERE task_id=?1",[&task.task_id]).map_err(db_error)?;
+            }
             if task.capability!="print.submit"{tx.execute("DELETE FROM task_attempts WHERE task_id=?1",[&task.task_id]).map_err(db_error)?;tx.execute("DELETE FROM tasks WHERE id=?1",[&task.task_id]).map_err(db_error)?;}
         }
         let plans={let mut statement=tx.prepare("SELECT id,revision,plan_json FROM presentations").map_err(db_error)?;
@@ -898,20 +1002,33 @@ fn scope_visible(scope:&str,private_scope:bool,speaker:Option<&str>)->bool{
     if !private_scope{return scope=="household";}
     speaker.is_some_and(|speaker|scope==format!("person:{speaker}"))
 }
-fn undelivered_slots(db:&Connection)->Result<i64,String>{
-    let inbox:i64=db.query_row("SELECT count(*) FROM delivery_inbox WHERE migrated=0 AND state IN ('pending_delivery','offered','partial','deferred')",[],|r|r.get(0)).map_err(db_error)?;
-    let inflight:i64=db.query_row("SELECT count(*) FROM tasks WHERE state IN ('queued','running')",[],|r|r.get(0)).map_err(db_error)?;
-    Ok(inbox.saturating_add(inflight))
-}
 fn inbox_hint_due(db:&Connection)->Result<bool,String>{
     db.query_row("SELECT EXISTS(SELECT 1 FROM delivery_inbox WHERE migrated=0 AND private_scope=0 AND state IN ('pending_delivery','offered','partial','deferred'))",[],|r|r.get(0)).map_err(db_error)
 }
-fn ensure_inbox_room(db:&Connection)->Result<(),String>{
-    let count:i64=db.query_row("SELECT count(*) FROM delivery_inbox",[],|r|r.get(0)).map_err(db_error)?;
-    if count<super::task_delivery::MAX_INBOX_ROWS{return Ok(());}
-    let oldest:Option<String>=db.query_row("SELECT delivery_id FROM delivery_inbox WHERE migrated=1 ORDER BY created_at_ms,delivery_id LIMIT 1",[],|r|r.get(0)).optional().map_err(db_error)?;
-    let Some(oldest)=oldest else{return Err("task_store_full".into());};
-    db.execute("DELETE FROM delivery_inbox WHERE delivery_id=?1",[oldest]).map_err(db_error)?;Ok(())
+fn prune_inbox(db:&Connection)->Result<(),String>{
+    let now=now();
+    let cutoff=now-super::task_delivery::RETENTION_MS;
+    db.execute("DELETE FROM delivery_inbox WHERE state IN ('delivered','invalidated') AND created_at_ms < ?1",[cutoff]).map_err(db_error)?;
+    db.execute("DELETE FROM delivery_inbox WHERE private_scope=1 AND state!='offered' AND created_at_ms < ?1",[cutoff]).map_err(db_error)?;
+    db.execute("DELETE FROM delivery_inbox WHERE state!='offered' AND expires_at_ms IS NOT NULL AND expires_at_ms < ?1",[now]).map_err(db_error)?;
+    db.execute("UPDATE delivery_inbox SET state='delivered',promise='full',delivery_revision=delivery_revision+1 WHERE state='partial' AND created_at_ms < ?1",[now-super::task_delivery::PARTIAL_WAIT_MS]).map_err(db_error)?;
+    for _ in 0..8 {
+        let open:i64=db.query_row("SELECT count(*) FROM delivery_inbox WHERE migrated=0 AND state IN ('pending_delivery','partial','deferred')",[],|r|r.get(0)).map_err(db_error)?;
+        if open<super::task_delivery::MAX_UNDELIVERED {break;}
+        let oldest:Option<String>=db.query_row("SELECT delivery_id FROM delivery_inbox WHERE migrated=0 AND state IN ('pending_delivery','partial','deferred') ORDER BY CASE WHEN private_scope=1 OR tell_me=0 THEN 0 WHEN state='deferred' THEN 1 WHEN state='partial' THEN 2 ELSE 3 END, created_at_ms, delivery_id LIMIT 1",[],|r|r.get(0)).optional().map_err(db_error)?;
+        let Some(oldest)=oldest else {break;};
+        db.execute("DELETE FROM delivery_inbox WHERE delivery_id=?1",[oldest]).map_err(db_error)?;
+    }
+    for _ in 0..64 {
+        let count:i64=db.query_row("SELECT count(*) FROM delivery_inbox",[],|r|r.get(0)).map_err(db_error)?;
+        if count<super::task_delivery::MAX_INBOX_ROWS {break;}
+        let oldest:Option<String>=db.query_row("SELECT delivery_id FROM delivery_inbox WHERE state!='offered' ORDER BY CASE state WHEN 'delivered' THEN 0 WHEN 'invalidated' THEN 1 WHEN 'deferred' THEN 2 WHEN 'partial' THEN 3 ELSE 4 END, CASE WHEN migrated=1 OR private_scope=1 OR tell_me=0 THEN 0 ELSE 1 END, created_at_ms, delivery_id LIMIT 1",[],|r|r.get(0)).optional().map_err(db_error)?;
+        let Some(oldest)=oldest else {break;};
+        db.execute("DELETE FROM delivery_inbox WHERE delivery_id=?1",[oldest]).map_err(db_error)?;
+    }
+    db.execute("DELETE FROM result_outbox WHERE delivery_id NOT IN (SELECT delivery_id FROM delivery_inbox)",[]).map_err(db_error)?;
+    db.execute("DELETE FROM result_outbox WHERE id NOT IN (SELECT id FROM result_outbox ORDER BY id DESC LIMIT ?1)",[super::task_delivery::MAX_OUTBOX]).map_err(db_error)?;
+    Ok(())
 }
 fn store_terminal_inbox(db:&Connection,task:&TaskRecord,state:TaskState,result:&Value)->Result<i64,String>{
     if !deliverable(state){return Ok(task.result_revision as i64);}
@@ -922,15 +1039,16 @@ fn store_terminal_inbox(db:&Connection,task:&TaskRecord,state:TaskState,result:&
     let (scope,private)=recipient_scope(&task.input);
     let tell=task.input["tell_when_done"].as_bool().unwrap_or(false)||super::task_delivery::asks_to_be_told(task.input["prompt"].as_str().unwrap_or(""));
     let invalidated=source_invalidated(db,&task.conversation_turn_id)?;
-    let same:Option<i64>=db.query_row("SELECT result_revision FROM delivery_inbox WHERE task_id=?1 AND kind=?2 AND result_ref=?3 AND recipient_scope=?4 ORDER BY result_revision DESC LIMIT 1",params![task.task_id,kind,body,scope],|r|r.get(0)).optional().map_err(db_error)?;
+    let same:Option<i64>=db.query_row("SELECT result_revision FROM delivery_inbox WHERE task_id=?1 AND kind=?2 AND result_ref=?3 AND recipient_scope=?4 AND state NOT IN ('invalidated') ORDER BY result_revision DESC LIMIT 1",params![task.task_id,kind,body,scope],|r|r.get(0)).optional().map_err(db_error)?;
     if let Some(revision)=same{return Ok(revision);}
-    ensure_inbox_room(db)?;
+    prune_inbox(db)?;
     let revision=(task.result_revision as i64).saturating_add(1).max(1);
     let delivery_id=format!("delivery_{}",uuid::Uuid::new_v4().simple());
     let inbox_state=if invalidated{"invalidated"}else{"pending_delivery"};
     let promise=if promise_full{"full"}else{"summary"};
-    db.execute("INSERT INTO delivery_inbox(delivery_id,delivery_revision,task_id,result_revision,kind,recipient_scope,result_ref,summary_ref,source_refs,promise,state,receipt_refs,confirmed_prefix,created_at_ms,tell_me,private_scope,migrated) VALUES(?1,1,?2,?3,?4,?5,?6,?7,'[]',?8,?9,'[]','',?10,?11,?12,0)",
-        params![delivery_id,task.task_id,revision,kind,scope,body,spoken,promise,inbox_state,now(),if tell {1i64} else {0},private]).map_err(db_error)?;
+    let expires=now()+super::task_delivery::RETENTION_MS;
+    db.execute("INSERT INTO delivery_inbox(delivery_id,delivery_revision,task_id,result_revision,kind,recipient_scope,result_ref,summary_ref,source_refs,promise,state,receipt_refs,confirmed_prefix,created_at_ms,expires_at_ms,tell_me,private_scope,migrated) VALUES(?1,1,?2,?3,?4,?5,?6,?7,'[]',?8,?9,'[]','',?10,?11,?12,?13,0)",
+        params![delivery_id,task.task_id,revision,kind,scope,body,spoken,promise,inbox_state,now(),expires,if tell {1i64} else {0},private]).map_err(db_error)?;
     if inbox_state=="pending_delivery"{db.execute("INSERT INTO result_outbox(delivery_id,delivery_revision,created_at_ms) VALUES(?1,1,?2)",params![delivery_id,now()]).map_err(db_error)?;}
     Ok(revision)
 }
@@ -947,8 +1065,15 @@ fn migrate_delivery(db:&Connection)->Result<(),String>{
         UNIQUE(task_id,result_revision,recipient_scope,kind));
       CREATE TABLE IF NOT EXISTS result_outbox(id INTEGER PRIMARY KEY AUTOINCREMENT,delivery_id TEXT NOT NULL,delivery_revision INTEGER NOT NULL,created_at_ms INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS foreground_responses(turn_id TEXT PRIMARY KEY,generation INTEGER NOT NULL,producer_closed INTEGER NOT NULL,outcome TEXT,task_id TEXT,updated_at_ms INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS inbox_migration(id INTEGER PRIMARY KEY CHECK(id=1));
       CREATE INDEX IF NOT EXISTS inbox_ready ON delivery_inbox(state,created_at_ms);").map_err(db_error)?;
-    backfill_inbox(db)
+    ensure_column(db,"delivery_inbox","offer_not_before_ms","INTEGER")?;
+    let done:i64=db.query_row("SELECT count(*) FROM inbox_migration",[],|r|r.get(0)).map_err(db_error)?;
+    if done==0 {
+        backfill_inbox(db)?;
+        db.execute("INSERT INTO inbox_migration(id) VALUES(1)",[]).map_err(db_error)?;
+    }
+    Ok(())
 }
 fn ensure_column(db:&Connection,table:&str,column:&str,decl:&str)->Result<(),String>{
     let mut statement=db.prepare(&format!("PRAGMA table_info({table})")).map_err(db_error)?;
@@ -985,6 +1110,31 @@ fn fence_invalid_inbox(db:&Connection)->Result<(),String>{
 fn invalidate_inbox_turns(db:&Connection,turns:&[String])->Result<(),String>{
     for turn in turns{
         db.execute("UPDATE delivery_inbox SET state='invalidated',delivery_revision=delivery_revision+1 WHERE state!='invalidated' AND task_id IN (SELECT id FROM tasks WHERE turn_id=?1)",[turn]).map_err(db_error)?;
+    }
+    Ok(())
+}
+fn view_of(row:&InboxRow)->InboxView{
+    InboxView{delivery_id:row.delivery_id.clone(),revision:row.revision,state:row.state.clone(),kind:row.kind.clone(),promise_full:row.promise=="full",summary:row.summary.clone(),result_text:row.result_text.clone(),tell_me:row.tell_me,private_scope:row.private_scope,receipts:row.receipts.clone()}
+}
+fn storage_retryable(error:&str)->bool{error.contains("task_store")||error.contains("database is locked")||error.contains("disk")}
+fn release_offered_rows(db:&Connection)->Result<usize,String>{
+    db.execute("UPDATE delivery_inbox SET state='pending_delivery',attempted_lease_id=NULL,playback_id=NULL,hold_activation=NULL,delivery_revision=delivery_revision+1 WHERE state='offered'",[]).map_err(db_error)
+}
+fn settle_interrupted(db:&Connection,stage:&str)->Result<(),String>{
+    let mut statement=db.prepare("SELECT id,state,capability FROM tasks WHERE state IN ('running','cancel_requested')").map_err(db_error)?;
+    let rows=statement.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))).map_err(db_error)?;
+    let found=rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
+    drop(statement);
+    for (id,state,capability) in found {
+        let task=query_task(db,&id)?;
+        let media=capability=="media.prepare"||capability=="presentation.render";
+        let next=if state=="cancel_requested" && media {TaskState::Cancelled} else if media {TaskState::Queued} else {TaskState::Unknown};
+        let mut result=task.result.clone();
+        if !result.is_object(){result=json!({});}
+        if result["summary"].as_str().is_none_or(|text|text.trim().is_empty()){result["summary"]=json!(result_body(next,&result));}
+        let revision=if deliverable(next) {store_terminal_inbox(db,&task,next,&result)?} else {task.result_revision as i64};
+        db.execute("UPDATE tasks SET state=?2,stage=?3,result_json=?4,updated_at_ms=?5,result_revision=?6,task_revision=task_revision+1 WHERE id=?1",
+            params![id,next.as_str(),stage,serde_json::to_string(&result).map_err(|e|e.to_string())?,now(),revision]).map_err(db_error)?;
     }
     Ok(())
 }
@@ -1196,11 +1346,11 @@ mod tests {
                 intent_key: format!("intent-{index}"),
             }, false).unwrap();
         }
-        let denied = service.submit(NewTask {
+        let extra = service.submit(NewTask {
             household_id: "house".into(), daily_conversation_id: "day".into(), conversation_turn_id: "turn".into(),
             capability: "agent.work".into(), input: json!({"prompt": "再来一件"}), intent_key: "intent-overflow".into(),
-        }, false).unwrap_err();
-        assert_eq!(denied, "task_result_capacity");
+        }, false).unwrap();
+        assert!(extra.task_id.starts_with("task_"), "a full result cap evicts; it does not refuse the task");
         let again = service.submit(NewTask {
             household_id: "house".into(), daily_conversation_id: "day".into(), conversation_turn_id: "turn".into(),
             capability: "agent.work".into(), input: json!({"prompt": "排队"}), intent_key: "intent-0".into(),
@@ -1255,6 +1405,180 @@ mod tests {
         assert_eq!(service.get(&task.task_id).unwrap().task_id, task.task_id);
         assert_eq!(service.inbox_state(&task.task_id).unwrap().as_deref(), Some("invalidated"));
         assert!(service.next_for_delivery("house", "session-b", None).unwrap().is_none());
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn three_hundred_completions_leave_a_bounded_inbox() {
+        let dir = std::env::temp_dir().join(format!("xiaodai-inbox-retain-{}", uuid::Uuid::new_v4()));
+        let service = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        for index in 0..320 {
+            let task = service.submit(NewTask {
+                household_id: "house".into(), daily_conversation_id: "day".into(), conversation_turn_id: "turn".into(),
+                capability: "agent.work".into(), input: json!({"prompt": "排队"}),
+                intent_key: format!("intent-{index}"),
+            }, false).unwrap();
+            service.set_state(&task.task_id, TaskState::Succeeded, "done", Some(json!({"summary": format!("结果{index}")}))).unwrap();
+        }
+        let inbox = service.inbox_count().unwrap();
+        let outbox = service.outbox_count().unwrap();
+        assert!(inbox <= crate::brain::task_delivery::MAX_INBOX_ROWS, "inbox {inbox}");
+        assert!(inbox <= crate::brain::task_delivery::MAX_UNDELIVERED, "undelivered rows were not evicted: {inbox}");
+        assert!(outbox <= crate::brain::task_delivery::MAX_OUTBOX, "outbox {outbox}");
+        assert!(service.next_for_delivery("house", "session-b", None).unwrap().is_some());
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_offered_row_returns_to_pending_on_release_and_restart() {
+        let dir = std::env::temp_dir().join(format!("xiaodai-inbox-release-{}", uuid::Uuid::new_v4()));
+        let service = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        let task = sample(&service, "intent-offer", "查资料");
+        service.set_state(&task.task_id, TaskState::Succeeded, "done", Some(json!({"summary": "短结果。"}))).unwrap();
+        let row = service.inbox_row(&task.task_id).unwrap().unwrap();
+        service.claim_delivery(&row.delivery_id, row.revision, "lease-a", "playback-a").unwrap();
+        assert_eq!(service.release_offered().unwrap(), 1);
+        assert_eq!(service.inbox_state(&task.task_id).unwrap().as_deref(), Some("pending_delivery"));
+        let again = service.inbox_row(&task.task_id).unwrap().unwrap();
+        service.claim_delivery(&again.delivery_id, again.revision, "lease-b", "playback-b").unwrap();
+        drop(service);
+        let reopened = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        assert_eq!(reopened.inbox_state(&task.task_id).unwrap().as_deref(), Some("pending_delivery"));
+        assert!(reopened.next_for_delivery("house", "session-b", None).unwrap().is_some());
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_summary_can_be_finished_declined_or_aged_out() {
+        let dir = std::env::temp_dir().join(format!("xiaodai-inbox-expand-{}", uuid::Uuid::new_v4()));
+        let service = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        let long = "资".repeat(120);
+        let task = sample(&service, "intent-expand", "查资料");
+        service.set_state(&task.task_id, TaskState::Succeeded, "done", Some(json!({"summary": long}))).unwrap();
+        let row = service.inbox_row(&task.task_id).unwrap().unwrap();
+        let offered = service.claim_delivery(&row.delivery_id, row.revision, "lease-sum", "playback-sum").unwrap();
+        assert_eq!(service.apply_playback(&row.delivery_id, offered, "lease-sum", true, &row.summary, false).unwrap(), "partial");
+        let full = service.expansion_target("house", None).unwrap().unwrap();
+        assert_eq!(full.result_text.chars().count(), 120);
+        service.settle_partials("house").unwrap();
+        assert_eq!(service.inbox_state(&task.task_id).unwrap().as_deref(), Some("delivered"));
+        assert!(service.expansion_target("house", None).unwrap().is_none());
+        let second = sample(&service, "intent-age", "另一件");
+        service.set_state(&second.task_id, TaskState::Succeeded, "done", Some(json!({"summary": "资".repeat(90)}))).unwrap();
+        let aged = service.inbox_row(&second.task_id).unwrap().unwrap();
+        let offered = service.claim_delivery(&aged.delivery_id, aged.revision, "lease-age", "playback-age").unwrap();
+        service.apply_playback(&aged.delivery_id, offered, "lease-age", true, &aged.summary, false).unwrap();
+        service.age_row(&aged.delivery_id, crate::time::now_ms() as i64 - crate::brain::task_delivery::PARTIAL_WAIT_MS - 1).unwrap();
+        service.retain().unwrap();
+        assert_eq!(service.inbox_state(&second.task_id).unwrap().as_deref(), Some("delivered"));
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_private_result_expires_when_nobody_can_hear_it() {
+        let dir = std::env::temp_dir().join(format!("xiaodai-inbox-private-age-{}", uuid::Uuid::new_v4()));
+        let service = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        let private = service.submit(NewTask {
+            household_id: "house".into(), daily_conversation_id: "day".into(), conversation_turn_id: "turn-p".into(),
+            capability: "agent.work".into(), input: json!({"prompt": "私人", "private_profile_id": "person-a"}),
+            intent_key: "intent-private-age".into(),
+        }, false).unwrap();
+        service.set_state(&private.task_id, TaskState::Succeeded, "done", Some(json!({"summary": "只给甲。"}))).unwrap();
+        let row = service.inbox_row(&private.task_id).unwrap().unwrap();
+        service.age_row(&row.delivery_id, crate::time::now_ms() as i64 - crate::brain::task_delivery::RETENTION_MS - 1).unwrap();
+        service.retain().unwrap();
+        assert!(service.inbox_row(&private.task_id).unwrap().is_none());
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_resumed_task_with_the_same_text_gets_a_new_row() {
+        let dir = std::env::temp_dir().join(format!("xiaodai-inbox-resume-{}", uuid::Uuid::new_v4()));
+        let service = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        let task = sample(&service, "intent-resume", "查资料");
+        service.set_state(&task.task_id, TaskState::AwaitingInput, "needs_input", Some(json!({"summary": "还缺年份"}))).unwrap();
+        let first = service.inbox_row(&task.task_id).unwrap().unwrap();
+        service.resume(&task.task_id, json!({"year": "2024"}), false).unwrap();
+        service.set_state(&task.task_id, TaskState::AwaitingInput, "needs_input", Some(json!({"summary": "还缺年份"}))).unwrap();
+        let second = service.inbox_row(&task.task_id).unwrap().unwrap();
+        assert_ne!(first.delivery_id, second.delivery_id);
+        assert_eq!(service.inbox_by_id(&first.delivery_id).unwrap().unwrap().state, "invalidated");
+        assert_eq!(second.state, "pending_delivery");
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn shutdown_and_crash_recovery_write_a_speakable_row_once() {
+        let dir = std::env::temp_dir().join(format!("xiaodai-inbox-recover-{}", uuid::Uuid::new_v4()));
+        let service = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        let task = sample(&service, "intent-crash", "查资料");
+        service.set_state(&task.task_id, TaskState::Running, "working", None).unwrap();
+        drop(service);
+        let recovered = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        assert_eq!(recovered.get(&task.task_id).unwrap().state, TaskState::Unknown);
+        let row = recovered.inbox_row(&task.task_id).unwrap().unwrap();
+        assert_eq!(row.state, "pending_delivery");
+        assert!(recovered.next_for_delivery("house", "session-b", None).unwrap().is_some());
+        drop(recovered);
+        let again = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        assert_eq!(again.inbox_count().unwrap(), 1, "backfill does not add another row");
+        assert_eq!(again.inbox_state(&task.task_id).unwrap().as_deref(), Some("pending_delivery"));
+        drop(again);
+        let stopped = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        let running = sample(&stopped, "intent-stop", "另一件");
+        stopped.set_state(&running.task_id, TaskState::Running, "working", None).unwrap();
+        // stop is async; the crash path above is the one that used to skip the inbox.
+        drop(stopped);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn stopping_the_service_files_the_running_task() {
+        let dir = std::env::temp_dir().join(format!("xiaodai-inbox-stop-{}", uuid::Uuid::new_v4()));
+        let service = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        let task = sample(&service, "intent-service-stop", "查资料");
+        service.set_state(&task.task_id, TaskState::Running, "working", None).unwrap();
+        service.stop().await;
+        assert_eq!(service.inbox_state(&task.task_id).unwrap().as_deref(), Some("pending_delivery"));
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_dropped_offer_is_not_planned_again_immediately() {
+        let dir = std::env::temp_dir().join(format!("xiaodai-inbox-backoff-{}", uuid::Uuid::new_v4()));
+        let service = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        let task = service.submit(NewTask {
+            household_id: "house".into(), daily_conversation_id: "day".into(), conversation_turn_id: "turn".into(),
+            capability: "agent.work".into(), input: json!({"prompt": "查好告诉我", "tell_when_done": true}),
+            intent_key: "intent-backoff".into(),
+        }, false).unwrap();
+        service.set_state(&task.task_id, TaskState::Succeeded, "done", Some(json!({"summary": "明天有雨。"}))).unwrap();
+        let row = service.inbox_row(&task.task_id).unwrap().unwrap();
+        assert!(service.offer_ready(&row.delivery_id));
+        service.note_offer_backoff(&row.delivery_id).unwrap();
+        assert!(!service.offer_ready(&row.delivery_id));
+        assert!(service.next_for_delivery("house", "session-b", None).unwrap().is_some(), "a wake can still speak it");
+        drop(service);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_source_erases_the_inbox_copy() {
+        let dir = std::env::temp_dir().join(format!("xiaodai-inbox-forget-{}", uuid::Uuid::new_v4()));
+        let service = TaskService::open(dir.clone(), TaskConfig::default(), Arc::new(|_| {})).unwrap();
+        let task = sample(&service, "intent-forget", "查资料");
+        service.set_state(&task.task_id, TaskState::Succeeded, "done", Some(json!({"summary": "不该留下的句子。"}))).unwrap();
+        let row = service.inbox_row(&task.task_id).unwrap().unwrap();
+        service.forget_sources(&["turn".into()], false).await.unwrap();
+        assert!(service.inbox_by_id(&row.delivery_id).unwrap().is_none());
+        assert_eq!(service.outbox_count().unwrap(), 0);
         drop(service);
         let _ = std::fs::remove_dir_all(dir);
     }
