@@ -143,7 +143,7 @@ impl Brain {
         let mut chosen = None;
         for id in self.tasks.rescan_inbox(super::task_delivery::RESCAN_BATCH)? {
             let Some(row) = self.tasks.inbox_by_id(&id)? else { continue };
-            if row.kind == "result" && row.tell_me && !row.private_scope && matches!(row.state.as_str(), "pending_delivery" | "deferred") {
+            if row.kind == "result" && row.tell_me && !row.private_scope && matches!(row.state.as_str(), "pending_delivery" | "deferred") && self.tasks.offer_ready(&row.delivery_id) {
                 chosen = Some(row);
                 break;
             }

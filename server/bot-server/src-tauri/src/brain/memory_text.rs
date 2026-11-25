@@ -121,6 +121,10 @@ impl super::Brain {
         ((!note.is_empty()).then_some(note), callable)
     }
 
+    pub(crate) fn named_person(&self, activation: &str) -> Option<String> {
+        self.naming.lock().ok().and_then(|map| map.get(activation).filter(|named| !named.blocked).map(|named| named.person_id.clone()))
+    }
+
     pub(super) fn note_named(&self, activation: &str, speaker: &crate::memory::TurnSpeaker) {
         if let Ok(mut map) = self.naming.lock() {
             if map.len() >= 512 { map.clear(); }

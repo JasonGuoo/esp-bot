@@ -218,6 +218,12 @@ pub(super) struct TaskReady {
     pub delivery_id:String,pub delivery_revision:i64,pub kind_result:bool,pub promise_full:bool,
     pub result:Result<(PresentationPlan,Vec<PreparedSegment>),String>,
 }
+pub(super) async fn prepare_line(brain:Arc<Brain>,task:crate::brain::tasks::TaskRecord,speech:&str)->Result<(PresentationPlan,Vec<PreparedSegment>),String>{
+    let context=crate::brain::presentation::PlanContext{household_id:task.household_id,daily_conversation_id:task.daily_conversation_id,
+        conversation_turn_id:task.conversation_turn_id,task_id:Some(task.task_id)};
+    let (plan,segments,_)=brain.prepare_presentation(context,scene_for(speech,"happy"),None,&[],"",true,&[],None,None).await?;
+    Ok((plan,segments))
+}
 pub(super) async fn prepare_task(brain:Arc<Brain>,task:crate::brain::tasks::TaskRecord)->Result<(PresentationPlan,Vec<PreparedSegment>),String>{
     if matches!(task.state,crate::brain::tasks::TaskState::Succeeded|crate::brain::tasks::TaskState::Partial){
         if let Some((mut plan,segments))=prepare_media_result(&brain,&task)? {

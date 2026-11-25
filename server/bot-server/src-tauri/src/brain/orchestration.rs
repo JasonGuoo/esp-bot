@@ -176,6 +176,7 @@ impl Brain {
             self.emit("turn.understood",Some(&input.turn_id),json!({"preview":text.chars().take(80).collect::<String>(),"conversation_turn_id":journal.conversation_turn_id}));
             text
         }else{self.skip_stage(&input.turn_id,"asr","text_input",&mut timings);source.text.clone()};
+        self.note_understood(&input.turn_id, &transcript);
         if let Some(context)=&work.context {
             if let Ok(mut current)=context.lock() {
                 current.source=journal.conversation_turn_id.clone();
