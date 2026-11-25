@@ -153,6 +153,8 @@ fairness 只要求有资格的控制事件得到调度；RC/GD 的控制活性�
 | --- | --- | --- | --- | --- |
 | RA-ACC-55 / 00,01,02 | Luna 卡住，用户在 THINKING 中再次说“小呆小呆” | 设备发送 cancel/supplement；Mac 先 fence 旧轮再接纳新采集；不返回 `session_busy`；旧轮迟到输出被丢弃 | RC/GD/LG | gateway 回环 + 永不返回的 Luna 替身；S31 必测 |
 | RA-ACC-56 / 01 | Mac 尝试开启采集、延长 token 或授予设备未请求的播放；两端状态不一致 | 全部被拒绝；以设备 RuntimeToken 为准，Mac 收窄到一致 | RC/LG | reducer 单元回归与 `MacNeverWidensDeviceAuthority` |
+| RA-ACC-57 / 04 | 任务在无人互动时完成；分别为默认设置、开启主动说出结果且用户说过“做好告诉我”、安静时段内 | 默认：只出现静默表情提示，不发声不开麦；opt-in：经 `task_result` offer/accept 播报一次、只播不录；安静时段内只保留提示 | TD/LG | gateway/proactive 回环；S31 必测表情与播放 |
+| RA-ACC-58 / 04 | 有待交付结果时用户唤醒并直接问新问题；另一次唤醒后不说话 | 前者结果转 deferred，新问题正常回答；后者先给简短结果并询问是否展开；交付回执与 summary/全文分开记录 | TD/TP | inbox 状态与真实播放回执；S31 必测 |
 
 ## 9. 各步骤的验证交付
 
