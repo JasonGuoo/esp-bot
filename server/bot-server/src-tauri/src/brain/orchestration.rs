@@ -10,30 +10,33 @@ const MEMORY_NOTE_CHARS: usize = 1500;
 /// A task that is waiting for a missing parameter. Ordinary chat does not name it.
 pub(crate) struct PendingTaskRef<'a> {
     pub task_id: &'a str,
+    #[allow(dead_code)]
     pub summary: &'a str,
     /// The turn that created the task. Spoken routing does not match it:
     /// that turn only said the work was accepted.
     #[allow(dead_code)]
     pub conversation_turn_id: &'a str,
+    /// The turn whose playback receipt carried the clarification. Set only
+    /// after that receipt, never from generated text.
+    pub clarification_turn_id: Option<&'a str>,
 }
 
-/// The last spoken clarification before this input. `household_recent_context`
-/// already contains the current turn once it has been journalled as running, and
-/// that row has no assistant text, so it must not hide the question being answered.
+/// The last assistant turn that was actually played. Generated text is not
+/// enough: a line that was prepared and never receipted must not route the
+/// next utterance. The current input is already in the journal as running.
 pub(crate) fn previous_clarification<'a>(recent: &'a [Value], current_turn_id: &str) -> Option<&'a Value> {
     recent.iter().rev().find(|row| {
         row["turn_id"].as_str() != Some(current_turn_id)
-            && row["assistant_delivered"].as_str().or_else(|| row["assistant_generated"].as_str()).is_some_and(|text| !text.trim().is_empty())
+            && row["assistant_delivered"].as_str().is_some_and(|text| !text.trim().is_empty())
     })
 }
 
 /// True only when this utterance points at one waiting task.
 ///
 /// A spoken answer does not carry a task id. The id substring is only how a
-/// typed console reply names one task. Speech matches the clarification that
-/// was actually said: the previous assistant text must contain that question.
-/// The turn that created the task only said the work was accepted, so its
-/// `conversation_turn_id` is not a match.
+/// typed console reply names one task. Speech matches the stored id of the
+/// turn that played the clarification, not the summary text and not the turn
+/// that created the task.
 pub(crate) fn addresses_pending_task(transcript: &str, pending: &[PendingTaskRef<'_>], activation_id: &str, last: Option<&Value>) -> bool {
     let transcript = transcript.trim();
     if transcript.is_empty() || pending.is_empty() { return false; }
@@ -44,8 +47,8 @@ pub(crate) fn addresses_pending_task(transcript: &str, pending: &[PendingTaskRef
     let external = last["turn_id"].as_str().unwrap_or("");
     let same_activation = !activation_id.is_empty() && (external == activation_id || external.starts_with(&format!("{activation_id}-")));
     if !same_activation { return false; }
-    let spoken = last["assistant_delivered"].as_str().or_else(|| last["assistant_generated"].as_str()).unwrap_or("");
-    let matched: Vec<_> = pending.iter().filter(|task| !task.summary.is_empty() && spoken.contains(task.summary)).collect();
+    if last["assistant_delivered"].as_str().is_none_or(|text| text.trim().is_empty()) { return false; }
+    let matched: Vec<_> = pending.iter().filter(|task| task.clarification_turn_id == Some(external)).collect();
     matched.len() == 1
 }
 
@@ -282,6 +285,7 @@ impl Brain {
                 task_id: task.task_id.as_str(),
                 summary: task.result["summary"].as_str().unwrap_or(""),
                 conversation_turn_id: task.conversation_turn_id.as_str(),
+                clarification_turn_id: task.result["clarification_turn_id"].as_str(),
             }).collect();
             let last = previous_clarification(&bounded_recent, &input.turn_id);
             addresses_pending_task(&transcript, &refs, &input.conversation_id, last)
@@ -361,6 +365,9 @@ impl Brain {
             if let Some(id)=&proposal.resume_task_id {
                 match self.tasks.resume(id,proposal.input,explicit_print){Ok(task)=>task_ids.push(task.task_id),Err(error)=>warnings.push(format!("task_not_resumed: {error}"))}
                 continue;
+            }
+            if proposal.input.get("activation_id").and_then(Value::as_str).is_none() {
+                proposal.input["activation_id"]=json!(input.conversation_id);
             }
             let request=tasks::NewTask{household_id:journal.household_id.clone(),daily_conversation_id:journal.daily_conversation_id.clone(),
                 conversation_turn_id:journal.conversation_turn_id.clone(),capability:proposal.capability,input:proposal.input,
@@ -668,13 +675,13 @@ mod tests {
 
     use super::{addresses_pending_task, delegated_reply, previous_clarification, PendingTaskRef};
 
-    fn waiting<'a>(id: &'a str, summary: &'a str, turn: &'a str) -> PendingTaskRef<'a> {
-        PendingTaskRef { task_id: id, summary, conversation_turn_id: turn }
+    fn waiting<'a>(id: &'a str, summary: &'a str, turn: &'a str, clarification: Option<&'a str>) -> PendingTaskRef<'a> {
+        PendingTaskRef { task_id: id, summary, conversation_turn_id: turn, clarification_turn_id: clarification }
     }
 
     #[test]
     fn ordinary_chat_does_not_fill_a_waiting_task() {
-        let pending = [waiting("task-search", "还缺资料的年份", "turn-ask")];
+        let pending = [waiting("task-search", "还缺资料的年份", "turn-ask", Some("device-1-4"))];
         assert!(!addresses_pending_task("今天好冷", &pending, "device-1", None));
         assert!(!addresses_pending_task("你今天开心吗", &pending, "device-1", None));
         let other = json!({"turn_id":"device-2-3","conversation_turn_id":"turn-ask","assistant_delivered":"还缺资料的年份"});
@@ -683,12 +690,14 @@ mod tests {
 
     #[test]
     fn a_named_handle_or_the_immediate_clarification_does_fill() {
-        let pending = [waiting("task-search", "还缺资料的年份", "turn-ask"), waiting("task-print", "还缺打印页数", "turn-print")];
+        let pending = [waiting("task-search", "还缺资料的年份", "turn-created", Some("device-1-4")), waiting("task-print", "还缺打印页数", "turn-print", None)];
         assert!(addresses_pending_task("用 task-print 补上", &pending, "device-1", None));
         assert!(!addresses_pending_task("task-search 和 task-print 都改一下", &pending, "device-1", None), "two handles stay ordinary chat");
-        let asked = json!({"turn_id":"device-1-4","conversation_turn_id":"turn-ask","assistant_delivered":"还缺资料的年份"});
+        let asked = json!({"turn_id":"device-1-4","conversation_turn_id":"turn-heard","assistant_delivered":"还缺资料的年份"});
         assert!(addresses_pending_task("二零二四年", &pending, "device-1", Some(&asked)));
-        let accepted = json!({"turn_id":"device-1-2","conversation_turn_id":"turn-ask","assistant_delivered":"好的，我接到这件事了，正在处理，有结果就告诉你。"});
+        let generated_only = json!({"turn_id":"device-1-4","assistant_generated":"还缺资料的年份"});
+        assert!(!addresses_pending_task("二零二四年", &pending, "device-1", Some(&generated_only)), "unplayed text is not the clarification");
+        let accepted = json!({"turn_id":"device-1-2","conversation_turn_id":"turn-created","assistant_delivered":"好的，我接到这件事了，正在处理，有结果就告诉你。"});
         assert!(!addresses_pending_task("树叶为什么是绿的", &pending, "device-1", Some(&accepted)), "the turn that created the task did not ask the question");
         assert!(!addresses_pending_task("今天好冷", &pending, "device-1", Some(&accepted)));
         let current = json!({"turn_id":"device-1-5","conversation_turn_id":"turn-now","user":"二零二四年","assistant_generated":""});
@@ -696,8 +705,9 @@ mod tests {
         let previous = previous_clarification(&recent, "device-1-5");
         assert!(addresses_pending_task("二零二四年", &pending, "device-1", previous), "the journalled current input is not the clarification");
         assert!(!addresses_pending_task("二零二四年", &pending, "device-1", recent.last()));
-        let both = json!({"turn_id":"device-1-4","conversation_turn_id":"other","assistant_delivered":"还缺资料的年份，还缺打印页数"});
-        assert!(!addresses_pending_task("三点", &pending, "device-1", Some(&both)), "two clarifications are not one answer");
+        let both_pending = [waiting("task-search", "还缺资料的年份", "turn-created", Some("device-1-4")), waiting("task-print", "还缺打印页数", "turn-print", Some("device-1-4"))];
+        let both = json!({"turn_id":"device-1-4","assistant_delivered":"还缺资料的年份，还缺打印页数"});
+        assert!(!addresses_pending_task("三点", &both_pending, "device-1", Some(&both)), "two clarifications are not one answer");
     }
 
     #[test]
@@ -733,18 +743,24 @@ mod tests {
         let task_id = record.task_id.clone();
         let summary = record.result["summary"].as_str().unwrap().to_owned();
         let source_turn = record.conversation_turn_id.clone();
-        let pending = [PendingTaskRef { task_id: &task_id, summary: &summary, conversation_turn_id: &source_turn }];
+        let pending = [PendingTaskRef { task_id: &task_id, summary: &summary, conversation_turn_id: &source_turn, clarification_turn_id: None }];
         let recent = context_rows(&brain, &created.daily_conversation_id);
         let cold = addresses_pending_task("今天好冷", &pending, activation, previous_clarification(&recent, &format!("{activation}-2")));
         assert!(!cold, "chat after the acceptance line stays on the fast core");
         assert_eq!(brain.fast.route("今天好冷", false, cold), Ok(()));
 
-        journal_spoken(&brain, &format!("{activation}-3"), activation, "嗯", "还缺资料的年份", now + 2);
+        let heard = format!("{activation}-3");
+        journal_played(&brain, &heard, activation, "还缺资料的年份", now + 2);
+        brain.tasks.set_state(&task.task_id, super::tasks::TaskState::AwaitingInput, "needs_input",
+            Some(json!({"summary": "还缺资料的年份", "clarification_turn_id": heard}))).unwrap();
+        let record = brain.tasks.get(&task.task_id).unwrap();
+        let clarification = record.result["clarification_turn_id"].as_str().unwrap().to_owned();
+        let pending = [PendingTaskRef { task_id: &task_id, summary: &summary, conversation_turn_id: &source_turn, clarification_turn_id: Some(clarification.as_str()) }];
         journal_spoken(&brain, &format!("{activation}-4"), activation, "二零二四年", "", now + 3);
         brain.memory.journal_finish(&format!("{activation}-4"), "running", None, json!({})).unwrap();
         let recent = context_rows(&brain, &created.daily_conversation_id);
         let answered = addresses_pending_task("二零二四年", &pending, activation, previous_clarification(&recent, &format!("{activation}-4")));
-        assert!(answered, "the year answers the clarification that was spoken, not the turn that created the task");
+        assert!(answered, "the year answers the played clarification turn, not the turn that created the task");
         assert_eq!(brain.fast.route("二零二四年", false, answered), Err("pending_task_input"));
         drop(brain);
         let _ = std::fs::remove_dir_all(dir);
@@ -760,6 +776,16 @@ mod tests {
             brain.memory.journal_finish(turn, "completed", Some(assistant), json!({})).unwrap();
         }
         receipt
+    }
+
+    fn journal_played(brain: &super::Brain, turn: &str, activation: &str, speech: &str, at: i64) {
+        brain.memory.journal_input(&crate::memory::JournalInput {
+            turn_id: turn.into(), activation_id: activation.into(), utterance_id: None, text: String::new(),
+            occurred_at_ms: at, input_kind: "text".into(), speaker_person_id: None, private_profile_id: None,
+            allow_cloud: true, metadata: json!({}),
+        }).unwrap();
+        brain.memory.journal_finish(turn, "completed", Some(speech), json!({"spoken_device": true})).unwrap();
+        brain.memory.journal_receipt(turn, "audio", json!({"status": "finished", "rendered_text": speech}), &format!("played-{turn}")).unwrap();
     }
 
     fn context_rows(brain: &super::Brain, daily: &str) -> Vec<serde_json::Value> {

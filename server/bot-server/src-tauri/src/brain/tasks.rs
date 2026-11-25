@@ -242,6 +242,22 @@ impl TaskService{
         let rows=statement.query_map(params![household_id,state,limit.clamp(1,200) as i64],|r|r.get::<_,String>(0)).map_err(db_error)?;
         let ids=rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;ids.iter().map(|id|query_task(&db,id)).collect()
     }
+    /// One ready result for this household and device activation. The activation
+    /// is stored on the task input when the turn submits it, so this does not
+    /// scan another household's newest tasks.
+    pub fn ready_for_activation(&self,household_id:&str,activation_id:&str)->Result<Option<TaskRecord>,String>{
+        valid_id(household_id)?;valid_id(activation_id)?;
+        let db=self.db.lock().map_err(|_|"task_database_lock")?;
+        let mut statement=db.prepare("SELECT id FROM tasks WHERE household_id=?1 AND json_extract(input_json,'$.activation_id')=?2 AND state IN ('succeeded','partial','failed','cancelled','unknown','awaiting_input') ORDER BY updated_at_ms,id LIMIT 4").map_err(db_error)?;
+        let rows=statement.query_map(params![household_id,activation_id],|r|r.get::<_,String>(0)).map_err(db_error)?;
+        let ids=rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
+        drop(statement);
+        for id in ids {
+            let task=query_task(&db,&id)?;
+            if !source_invalidated(&db,&task.conversation_turn_id)? { return Ok(Some(task)); }
+        }
+        Ok(None)
+    }
     pub fn events(&self,id:&str,after:u64,limit:usize)->Result<Vec<Value>,String>{
         valid_id(id)?;if after>i64::MAX as u64{return Err("task_event_sequence_invalid".into());}let db=self.db.lock().map_err(|_|"task_database_lock")?;
         let mut statement=db.prepare("SELECT sequence,event_id,kind,payload_json,created_at_ms FROM task_events WHERE task_id=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3").map_err(db_error)?;
