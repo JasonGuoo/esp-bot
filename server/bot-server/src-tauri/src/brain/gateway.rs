@@ -526,6 +526,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
     let (task_ready_tx,mut task_ready_rx)=mpsc::channel::<segments::TaskReady>(4);
     let mut fence_gen: u64 = 1;
     let mut pending_commit: Option<PendingCommit> = None;
+    let mut pending_preps: Vec<InFlightPrep> = Vec::new();
     let (prep_tx, mut prep_rx) = mpsc::channel::<BackgroundPrep>(4);
     let (cleanup_tx, mut cleanup_rx) = mpsc::channel::<TurnTask>(4);
     let cleanup_worker = tokio::spawn(async move {
@@ -662,6 +663,9 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                 }
             },
             Some(event)=prep_rx.recv()=>{
+                if let BackgroundPrep::Failure { turn_id, fence, .. } | BackgroundPrep::Proactive { turn_id, fence, .. } = &event {
+                    pending_preps.retain(|prep| !(prep.fence == *fence && prep.turn_id == *turn_id));
+                }
                 if !apply_background_prep(&brain,&mut socket,&device_id,fence_gen,&mut engagement,&mut delivery,&mut pending_reminder,event).await {break;}
             },
             _=async {
@@ -685,6 +689,14 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                 };
                 let conversation=engagement.as_ref().map(|session|session.conversation_id.as_str());
                 let close_session=cancellation.closes_session(conversation);
+                if brain.config.responsive.quick_decouple {
+                    let commit_turn=pending_commit.as_ref().and_then(|commit| conversation.map(|id| format!("{id}-{}", commit.token.turn_id)));
+                    if retire_deferred(&pending_preps, commit_turn.as_deref(), &cancellation, conversation) {
+                        fence_gen = fence_gen.saturating_add(1);
+                        pending_commit = None;
+                        pending_preps.clear();
+                    }
+                }
                 let cancel_delivery=delivery.as_ref().is_some_and(|d|cancellation.matches_turn(&d.turn_id,conversation));
                 let cancelled_token=audio.as_ref().map(|(_,token)|*token)
                     .or_else(||active.as_ref().map(|turn|turn.token))
@@ -985,6 +997,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                 let tx=prep_tx.clone();let brain2=Arc::clone(&brain);let turn_id=completed.turn_id.clone();
                                 let token=completed.token;let request_id=completed.id.clone();let error_text=error.clone();
                                 let index=u32::from(turn.acknowledgement_sent)+1;let fence=fence_gen;
+                                pending_preps.push(InFlightPrep{fence,turn_id:turn_id.clone()});
                                 tokio::spawn(async move {
                                     let result=segments::prepare_failure(&brain2,&turn_id,&error_text).await;
                                     let _=tx.send(BackgroundPrep::Failure{fence,token,turn_id,request_id,index,activation_id,error:error_text,result}).await;
@@ -1149,6 +1162,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         // task still aborts it if the bounded cleanup queue is full.
                                         fence_gen = fence_gen.saturating_add(1);
                                         pending_commit = None;
+                                        pending_preps.clear();
                                         let turn_id = turn.turn_id.clone();
                                         let response = cancelled_response(&turn);
                                         if brain.config.responsive.quick_decouple {
@@ -1162,6 +1176,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                     } else if brain.config.responsive.quick_decouple {
                                         fence_gen = fence_gen.saturating_add(1);
                                         pending_commit = None;
+                                        pending_preps.clear();
                                     }
                                     if let Some(session)=&engagement{brain.tasks.revoke_outputs(Some(&session.conversation_id))?;}
                                     pending_reminder=None;
@@ -1208,6 +1223,7 @@ async fn serve_peer(stream:TcpStream,acceptor:TlsAcceptor,brain:Arc<Brain>,mut s
                                         pending_reminder=Some(reminder);
                                         let tx=prep_tx.clone();let brain2=Arc::clone(&brain);let line=offer.line.clone();let local_date=offer.local_date.clone();
                                         let request_id=frame.id.clone();let fence=fence_gen;
+                                        pending_preps.push(InFlightPrep{fence,turn_id:turn_id.clone()});
                                         tokio::spawn(async move {
                                             let result=segments::prepare_proactive(&brain2,&turn_id,&line,&local_date).await;
                                             let _=tx.send(BackgroundPrep::Proactive{fence,token,turn_id,request_id,conversation_id:conversation,offer,result}).await;
@@ -1472,6 +1488,17 @@ struct PendingCommit {
     vad_end_ms: Option<u64>,
 }
 
+/// Speech or a plain-audio commit still running after its foreground owner was cleared.
+struct InFlightPrep { fence: u64, turn_id: String }
+
+/// A matching cancel retires every deferred result spawned at this fence.
+/// An unrelated turn leaves the fence alone.
+fn retire_deferred(preps: &[InFlightPrep], commit_turn: Option<&str>, cancellation: &super::Cancellation, conversation: Option<&str>) -> bool {
+    cancellation.closes_session(conversation)
+        || preps.iter().any(|prep| cancellation.matches_turn(&prep.turn_id, conversation))
+        || commit_turn.is_some_and(|turn| cancellation.matches_turn(turn, conversation))
+}
+
 enum BackgroundPrep {
     Failure {
         fence: u64,
@@ -1706,6 +1733,21 @@ async fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_turn_cancel_retires_an_inflight_failure_prep() {
+        let prep = [InFlightPrep { fence: 1, turn_id: "device-1-4".into() }];
+        let turn = super::super::Cancellation { scope: super::super::CancelScope::Turn("device-1-4".into()), reason: "parent_stop" };
+        let other = super::super::Cancellation { scope: super::super::CancelScope::Turn("device-1-9".into()), reason: "parent_stop" };
+        let session = super::super::Cancellation { scope: super::super::CancelScope::DeviceSession("device-1".into()), reason: "parent_stop" };
+        assert!(retire_deferred(&prep, None, &turn, Some("device-1")), "the console stop targets the prep whose foreground owner is already gone");
+        assert!(!retire_deferred(&prep, None, &other, Some("device-1")));
+        assert!(retire_deferred(&prep, None, &session, Some("device-1")));
+        assert!(retire_deferred(&[], Some("device-1-3"), &super::super::Cancellation {
+            scope: super::super::CancelScope::Turn("device-1-3".into()), reason: "parent_stop",
+        }, Some("device-1")), "a late plain-audio commit is the same kind of deferred work");
+        assert!(!retire_deferred(&[], Some("device-1-3"), &other, Some("device-1")));
+    }
 
     #[test]
     fn slow_ack_respects_wake_and_recent_speech() {

@@ -14,6 +14,16 @@ pub(crate) struct PendingTaskRef<'a> {
     pub conversation_turn_id: &'a str,
 }
 
+/// The last spoken clarification before this input. `household_recent_context`
+/// already contains the current turn once it has been journalled as running, and
+/// that row has no assistant text, so it must not hide the question being answered.
+pub(crate) fn previous_clarification<'a>(recent: &'a [Value], current_turn_id: &str) -> Option<&'a Value> {
+    recent.iter().rev().find(|row| {
+        row["turn_id"].as_str() != Some(current_turn_id)
+            && row["assistant_delivered"].as_str().or_else(|| row["assistant_generated"].as_str()).is_some_and(|text| !text.trim().is_empty())
+    })
+}
+
 /// True only when this utterance points at one waiting task: it names that task's
 /// handle, or it is the next line in the same activation after that task's
 /// clarification was the last thing spoken. Two matches stay ordinary chat.
@@ -269,7 +279,7 @@ impl Brain {
                 summary: task.result["summary"].as_str().unwrap_or(""),
                 conversation_turn_id: task.conversation_turn_id.as_str(),
             }).collect();
-            let last = bounded_recent.last();
+            let last = previous_clarification(&bounded_recent, &input.turn_id);
             addresses_pending_task(&transcript, &refs, &input.conversation_id, last)
         } else { !pending_tasks.is_empty() };
         let route=self.fast.route(&transcript,input.profile_id.is_some(),pending_fill);
@@ -652,7 +662,7 @@ mod tests {
         }
     }
 
-    use super::{addresses_pending_task, delegated_reply, PendingTaskRef};
+    use super::{addresses_pending_task, delegated_reply, previous_clarification, PendingTaskRef};
 
     fn waiting<'a>(id: &'a str, summary: &'a str, turn: &'a str) -> PendingTaskRef<'a> {
         PendingTaskRef { task_id: id, summary, conversation_turn_id: turn }
@@ -674,6 +684,11 @@ mod tests {
         assert!(!addresses_pending_task("task-search 和 task-print 都改一下", &pending, "device-1", None), "two handles stay ordinary chat");
         let asked = json!({"turn_id":"device-1-4","conversation_turn_id":"turn-ask","assistant_delivered":"还缺资料的年份"});
         assert!(addresses_pending_task("二零二四年", &pending, "device-1", Some(&asked)));
+        let current = json!({"turn_id":"device-1-5","conversation_turn_id":"turn-now","user":"二零二四年","assistant_generated":""});
+        let recent = vec![asked.clone(), current];
+        let previous = previous_clarification(&recent, "device-1-5");
+        assert!(addresses_pending_task("二零二四年", &pending, "device-1", previous), "the journalled current input is not the clarification");
+        assert!(!addresses_pending_task("二零二四年", &pending, "device-1", recent.last()));
         let both = json!({"turn_id":"device-1-4","conversation_turn_id":"other","assistant_delivered":"还缺资料的年份，还缺打印页数"});
         assert!(!addresses_pending_task("三点", &pending, "device-1", Some(&both)), "two clarifications are not one answer");
     }
