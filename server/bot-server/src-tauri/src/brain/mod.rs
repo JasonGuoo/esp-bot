@@ -15,6 +15,7 @@ mod rpc;
 mod timing;
 pub mod contracts;
 pub mod tasks;
+pub mod task_delivery;
 pub mod presentation;
 pub mod artifacts;
 mod capabilities;
