@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 const ROOT: &str = "/tmp/xiaodai-fake-root";
 
@@ -26,6 +26,13 @@ struct FakeLog {
     thread_params: Mutex<Vec<Value>>,
     /// Luna's health for every turn: 0 = normal, 1 = every turn fails, 2 = every turn is slow (3 s).
     luna: AtomicUsize,
+    /// The user text of the turn that is allowed to steer. Race scripts read it.
+    live_text: Mutex<String>,
+    /// 0 = ack immediately. 1 = early events, then wait. 2 = early events, then reject.
+    /// 3 = early events, no ack (client timeout). 4 = early events and ack with no wait.
+    steer_kind: AtomicUsize,
+    /// Released by a test after it has observed the notification consumer buffering early events.
+    release_ack: Notify,
 }
 
 #[derive(Clone, Copy)]
@@ -111,13 +118,56 @@ async fn fake_server(io: tokio::io::DuplexStream, opts: FakeOpts, log: Arc<FakeL
                 let tid = v["params"]["threadId"].as_str().unwrap_or("").to_owned();
                 let want = v["params"]["expectedTurnId"].as_str().unwrap_or("").to_owned();
                 let cur = running.lock().unwrap().get(&tid).cloned();
-                if cur.as_deref() == Some(want.as_str()) {
-                    let text = v["params"]["input"][0]["text"].as_str().unwrap_or("").to_owned();
+                if cur.as_deref() != Some(want.as_str()) {
+                    out_tx.send(json!({ "id": id, "error": { "code": -32600, "message": "expectedTurnId does not match the active turn" } })).ok();
+                    continue;
+                }
+                let text = v["params"]["input"][0]["text"].as_str().unwrap_or("").to_owned();
+                let kind = log.steer_kind.load(Ordering::SeqCst);
+                if kind == 0 {
                     log.order.lock().unwrap().push(format!("steer:{want}"));
                     steers.lock().unwrap().entry(want.clone()).or_default().push(text);
                     out_tx.send(reply(json!({ "turnId": want }))).ok();
-                } else {
-                    out_tx.send(json!({ "id": id, "error": { "code": -32600, "message": "expectedTurnId does not match the active turn" } })).ok();
+                    continue;
+                }
+                let live = log.live_text.lock().unwrap().clone();
+                let nth = steers.lock().unwrap().get(&want).map(|s| s.len()).unwrap_or(0) + 1;
+                let answer = if live == "race-two" && nth >= 2 { "只回答第二次。".to_string() }
+                    else if live == "race-two" { "第一泄漏。".to_string() }
+                    else if live == "race" || live == "race-immediate" { format!("收到：{text}。") }
+                    else { "泄漏答案。".to_string() };
+                let note = |method: &str, mut params: Value| {
+                    params["threadId"] = json!(tid);
+                    params["turnId"] = json!(want);
+                    json!({"method": method, "params": params})
+                };
+                let item = format!("m-steer-{nth}");
+                // Queue the steer output before the ACK, then wait until the test has seen the
+                // client buffer it. That is the explicit consumer-before-ACK barrier.
+                out_tx.send(note("item/started", json!({"item":{"type":"userMessage","id":format!("u-steer-{nth}")}}))).ok();
+                out_tx.send(note("item/started", json!({"item":{"type":"agentMessage","id":item,"text":""}}))).ok();
+                out_tx.send(note("item/agentMessage/delta", json!({"itemId":item,"delta":answer}))).ok();
+                let finish_answer = live != "race-two" || nth >= 2;
+                if finish_answer && kind != 2 && kind != 3 {
+                    out_tx.send(note("item/completed", json!({"item":{"type":"agentMessage","id":item.clone(),"text":answer.clone()}}))).ok();
+                }
+                log.order.lock().unwrap().push(format!("steer:{want}"));
+                steers.lock().unwrap().entry(want.clone()).or_default().push(text);
+                if kind == 1 || kind == 2 { log.release_ack.notified().await; }
+                if kind == 3 { continue; }
+                if kind == 2 {
+                    out_tx.send(json!({ "id": id, "error": { "code": -32600, "message": "steer rejected" } })).ok();
+                    continue;
+                }
+                out_tx.send(reply(json!({ "turnId": want }))).ok();
+                if finish_answer {
+                    log.order.lock().unwrap().push(format!("completed:{want}:completed"));
+                    if running.lock().unwrap().get(&tid).map(String::as_str) == Some(want.as_str()) {
+                        running.lock().unwrap().remove(&tid);
+                    }
+                    let mut event = note("turn/completed", json!({"turn":{"id":want,"status":"completed","items":[]}}));
+                    event["params"].as_object_mut().unwrap().remove("turnId");
+                    out_tx.send(event).ok();
                 }
             }
             "turn/interrupt" => {
@@ -130,6 +180,15 @@ async fn fake_server(io: tokio::io::DuplexStream, opts: FakeOpts, log: Arc<FakeL
                 let tid = v["params"]["threadId"].as_str().unwrap().to_owned();
                 let turn = format!("tu-{turns}");
                 let text = v["params"]["input"][0]["text"].as_str().unwrap_or("").to_owned();
+                let kind = match text.as_str() {
+                    "race" | "race-two" => 1,
+                    "race-reject" => 2,
+                    "race-timeout" => 3,
+                    "race-immediate" => 4,
+                    _ => 0,
+                };
+                log.steer_kind.store(kind, Ordering::SeqCst);
+                *log.live_text.lock().unwrap() = text.clone();
                 let earlier = history.entry(tid.clone()).or_default().clone();
                 history.get_mut(&tid).unwrap().push(text.clone());
                 log.order.lock().unwrap().push(format!("start:{turn}"));
@@ -261,6 +320,33 @@ async fn fake_server(io: tokio::io::DuplexStream, opts: FakeOpts, log: Arc<FakeL
                             }
                             out.send(delta("太慢了。")).ok();
                             out.send(done("completed")).ok();
+                        }
+                        "race" | "race-immediate" | "race-two" => {
+                            // A hard stop at the end of the buffer is held for a possible closer.
+                            // The extra character releases "旧答案。" as a sentence the test can see.
+                            out.send(delta("旧答案。好")).ok();
+                            loop {
+                                if ints.lock().unwrap().contains(&turn) { out.send(done("interrupted")).ok(); return; }
+                                if !steers.lock().unwrap().get(&turn).map(|s| s.is_empty()).unwrap_or(true) {
+                                    while running.lock().unwrap().get(&tid) == Some(&turn) && !ints.lock().unwrap().contains(&turn) {
+                                        tokio::time::sleep(Duration::from_millis(5)).await;
+                                    }
+                                    if ints.lock().unwrap().contains(&turn) { out.send(done("interrupted")).ok(); }
+                                    return;
+                                }
+                                tokio::time::sleep(Duration::from_millis(5)).await;
+                            }
+                        }
+                        "race-reject" | "race-timeout" => {
+                            out.send(delta("旧答案。好")).ok();
+                            loop {
+                                if ints.lock().unwrap().contains(&turn) { out.send(done("interrupted")).ok(); return; }
+                                if !steers.lock().unwrap().get(&turn).map(|s| s.is_empty()).unwrap_or(true) {
+                                    out.send(done("completed")).ok();
+                                    return;
+                                }
+                                tokio::time::sleep(Duration::from_millis(5)).await;
+                            }
                         }
                         "crash" => {
                             tokio::time::sleep(Duration::from_millis(30)).await;
@@ -722,6 +808,112 @@ async fn steer_rejected_falls_back_to_a_new_turn() {
     assert_eq!(text, "你好！我是Codex。");
     assert!(c.codex().wait_idle(Duration::from_secs(2)).await);
     assert_eq!(count(&log, "thread/start"), 1);
+}
+
+async fn spoken(turn: &mut Turn) -> String {
+    let mut text = String::new();
+    loop {
+        match turn.next().await {
+            Some(Event::Sentence { text: sentence, .. }) => text.push_str(&sentence),
+            Some(Event::Done { text: full, .. }) => return full,
+            Some(Event::Cancelled { .. }) => return text,
+            Some(Event::Error { message, .. }) => panic!("{message}"),
+            Some(_) => {}
+            None => return text,
+        }
+    }
+}
+
+#[tokio::test]
+async fn steer_notification_is_buffered_before_ack() {
+    let (c, log) = core(EngineMode::CodexOnly, OK, None, 1000);
+    c.warmup_codex().await;
+    let mut previous = c.respond("race", CancellationToken::new());
+    until_sentence(&mut previous).await;
+    let mut steered = c.respond("改成讲狗", CancellationToken::new());
+    assert!(wait_for(|| c.codex().steer_hold_buffered() >= 2, 2000).await, "notification consumer must run before the ACK is released");
+    log.release_ack.notify_one();
+    let old = spoken(&mut previous).await;
+    let Event::Done { text, .. } = finish(&mut steered).await else { panic!("steered turn should finish") };
+    assert_eq!(text, "收到：改成讲狗。");
+    assert!(!old.contains("收到"), "old owner keeps only its own prefix, got {old}");
+    assert_eq!(count(&log, "turn/start"), 2, "prime + one user turn; no extra supplement turn");
+    assert_eq!(count(&log, "turn/interrupt"), 0);
+    let again = collect(&c, "stream").await;
+    assert!(matches!(again.last(), Some(Event::Done { text, .. }) if text == "你好！我是Codex。"), "cleanup must leave the next subscription intact: {again:?}");
+}
+
+#[tokio::test]
+async fn steer_ack_and_notification_with_no_gap_still_handoff_once() {
+    let (c, log) = core(EngineMode::CodexOnly, OK, None, 1000);
+    c.warmup_codex().await;
+    let mut previous = c.respond("race-immediate", CancellationToken::new());
+    until_sentence(&mut previous).await;
+    let mut steered = c.respond("马上说", CancellationToken::new());
+    let Event::Done { text, .. } = finish(&mut steered).await else { panic!("immediate steer should finish") };
+    assert_eq!(text, "收到：马上说。");
+    assert!(matches!(finish(&mut previous).await, Event::Cancelled { .. }));
+    assert_eq!(count(&log, "turn/start"), 2);
+    assert_eq!(count(&log, "turn/steer"), 1);
+}
+
+#[tokio::test]
+async fn steer_rejected_after_early_output_does_not_leak_into_the_fresh_turn() {
+    let (c, log) = core(EngineMode::CodexOnly, OK, None, 1000);
+    c.warmup_codex().await;
+    let mut previous = c.respond("race-reject", CancellationToken::new());
+    until_sentence(&mut previous).await;
+    let mut fresh = c.respond("后续问题", CancellationToken::new());
+    assert!(wait_for(|| c.codex().steer_hold_buffered() >= 2, 2000).await, "early steer output is buffered before the rejection");
+    log.release_ack.notify_one();
+    let Event::Done { text, .. } = finish(&mut fresh).await else { panic!("fresh turn should answer") };
+    assert_eq!(text, "嗨。");
+    assert!(!text.contains("泄漏"), "{text}");
+    let old = spoken(&mut previous).await;
+    assert!(!old.contains("泄漏"), "rejected steer output must not reach the old owner either: {old}");
+    assert!(count(&log, "turn/start") >= 3, "rejection falls back to a new turn");
+}
+
+#[tokio::test]
+async fn steer_timeout_with_the_original_turn_ending_uses_the_fresh_fallback() {
+    let (c, log) = core_with(EngineMode::CodexOnly, OK, None, 1000, |cfg| cfg.request_timeout_ms = 400);
+    c.warmup_codex().await;
+    let mut previous = c.respond("race-timeout", CancellationToken::new());
+    until_sentence(&mut previous).await;
+    let mut fresh = c.respond("超时之后", CancellationToken::new());
+    assert!(wait_for(|| c.codex().steer_hold_buffered() >= 2, 2000).await, "early output arrives while the ACK is still outstanding");
+    let Event::Done { text, .. } = finish(&mut fresh).await else { panic!("timeout should still answer") };
+    assert_eq!(text, "嗨。");
+    assert!(!text.contains("泄漏"), "{text}");
+    let _ = spoken(&mut previous).await;
+    assert!(count(&log, "turn/start") >= 3, "timeout starts a fresh turn on the same thread");
+    assert_eq!(count(&log, "thread/start"), 1);
+}
+
+#[tokio::test]
+async fn an_older_steer_notification_cannot_clear_the_newer_pending() {
+    let (c, log) = core(EngineMode::CodexOnly, OK, None, 1000);
+    c.warmup_codex().await;
+    c.codex().pause_before_steer_apply(true);
+    let mut original = c.respond("race-two", CancellationToken::new());
+    until_sentence(&mut original).await;
+    let mut first = c.respond("第一次补充", CancellationToken::new());
+    assert!(wait_for(|| c.codex().steer_hold_buffered() >= 2, 2000).await);
+    log.release_ack.notify_one();
+    assert!(wait_for(|| c.codex().steer_apply_waiting() >= 2, 2000).await, "first userMessage is drained and not yet applied");
+    let mut second = c.respond("第二次补充", CancellationToken::new());
+    assert!(wait_for(|| c.codex().steer_hold_buffered() >= 2, 2000).await, "second notification is buffered before its ACK");
+    log.release_ack.notify_one();
+    // The second ACK commits while the first userMessage is still queued.
+    assert!(wait_for(|| count(&log, "turn/steer") == 2 && c.codex().steer_hold_buffered() == 0, 2000).await);
+    c.codex().release_steer_apply();
+    let Event::Done { text, .. } = finish(&mut second).await else { panic!("second steer should own the answer") };
+    assert_eq!(text, "只回答第二次。");
+    assert!(!text.contains("第一泄漏"), "{text}");
+    assert!(matches!(finish(&mut first).await, Event::Cancelled { .. }));
+    assert!(matches!(finish(&mut original).await, Event::Cancelled { .. }));
+    assert_eq!(count(&log, "turn/start"), 2, "two steers still use the one running turn");
+    assert_eq!(count(&log, "turn/steer"), 2);
 }
 
 /// Tests never write the real latency log.
