@@ -8,35 +8,44 @@
 
 ```mermaid
 flowchart TD
-    A["RA-01 控制契约"] --> B["RA-02 网关 I/O"]
+    Z["RA-00 Mac 快速解耦"] --> D["RA-04 任务交付"]
+    Z --> A["RA-01 控制契约"]
+    A --> B["RA-02 网关 I/O"]
     B --> C["RA-03 Luna 隔离"]
-    B --> D["RA-04 任务交付"]
-    C --> E["RA-05 能力目录"]
+    A --> E["RA-05 能力目录"]
+    E --> H["RA-08 助理适配器"]
     D --> F["RA-06 上下文与任务控制"]
     E --> F
-    F --> G["RA-07 身份连续性"]
-    F --> H["RA-08 助理适配器"]
-    G --> I["RA-09 恢复与迁移"]
+    E --> G["RA-07a 称呼与当前声音"]
+    H --> G
+    F --> I["RA-09 恢复与迁移"]
+    G --> I
     H --> I
+    F --> K["RA-07b 历史关联"]
+    G --> K
     I --> J["RA-10 联合验收"]
+    C --> J
+    K --> J
 ```
 
 图示为主依赖；下表列出完整直接依赖。可以提前按冻结接口并行开发，集成验收必须满足对应依赖。
 
 | 步骤 | 直接依赖 | 用户可见交付 | 建议代码范围 | 合并边界 |
 | --- | --- | --- | --- | --- |
-| [RA-01](steps/ra-01-control-contracts.md) | 无 | 输入、停止、后台操作和输出的归属明确 | 控制状态/事件契约、既有 runtime 映射 | 可测试的 reducer 与有界接纳；保持旧协议适配 |
+| [RA-00](steps/ra-00-quick-decoupling.md) | 无 | 后台任务不再占住下一轮；待补参任务不再把闲聊推给 OpenCode | `gateway/segments.rs`、`gateway.rs`、`fast_core.rs::route`、orchestration | 仅 Mac；使用既有 final 段契约；无协议/固件变更；一个开关可回滚。#35 steer 修复并行单独提交 |
+| [RA-01](steps/ra-01-control-contracts.md) | RA-00 | 输入、停止、后台操作和输出的归属明确 | 控制状态/事件契约、既有 runtime 映射 | 可测试的 reducer 与有界接纳；保持旧协议适配 |
 | [RA-02](steps/ra-02-gateway-io.md) | RA-01 | TTS、PCM 尾包、DB 或网络慢时仍可控制 | `brain/gateway.rs`、gateway 子模块、存储/媒体适配 | 分批迁出分支，旧路径受开关控制；不同时重写全部网关 |
 | [RA-03](steps/ra-03-luna-worker.md) | RA-01、RA-02 | Luna 慢或卡住时仍可停止、补充和发起新输入 | `brain/fast_core.rs`、orchestration、worker、`server/xiaodai-core` 适配 | 模型请求/会话所有权与控制循环分开；不粗暴删除顺序锁 |
-| [RA-04](steps/ra-04-task-delivery.md) | RA-01、RA-02 | 交给小呆长任务后仍能普通聊天 | `gateway/segments.rs`、TaskService、持久结果收件箱 | 当前回答完成与任务完成分开；不能只删 busy 条件 |
-| [RA-05](steps/ra-05-capability-registry.md) | RA-01、RA-03 | 助理知道哪些能力当前可用，动作有真实操作 ID | 拟议 capability registry/dispatch、快核心结构化提案 | 先 typed registry 与测试适配器，再逐项开放真实动作 |
+| [RA-04](steps/ra-04-task-delivery.md) | RA-00 | 交给小呆长任务后仍能普通聊天 | `gateway/segments.rs`、TaskService、持久结果收件箱 | 当前回答完成与任务完成分开；不能只删 busy 条件 |
+| [RA-05](steps/ra-05-capability-registry.md) | RA-01 | 助理知道哪些能力当前可用，动作有真实操作 ID | 拟议 capability registry/dispatch、快核心结构化提案 | 先 typed registry 与测试适配器，再逐项开放真实动作 |
 | [RA-06](steps/ra-06-context-and-task-control.md) | RA-04、RA-05 | 记得相关任务，能问进度、取消、补参与改要求 | 上下文快照、TaskService、模型提示/动作绑定 | 只读查询先行；运行中改要求按适配器支持的版本语义开放 |
-| [RA-07](steps/ra-07-identity-continuity.md) | RA-05、RA-06 | 很晚才说“我是 Jason”也能建立可靠连续性 | identity adapter/workflow、voice_album、来源修订 | 称呼提交、声音确认、历史关联各有回执；不默认开启留存 |
-| [RA-08](steps/ra-08-assistant-adapters.md) | RA-05、RA-06 | 记住/纠错/遗忘、提醒和设备控制自然可达 | memory/reminder/device 等 typed adapters | 分能力小 PR，每项必须完成自然入口到实际结果的路径 |
-| [RA-09](steps/ra-09-recovery-and-migration.md) | RA-04、RA-06、RA-07、RA-08 | 重连、跨天、重启以后状态仍可解释和继续 | inbox/operation 恢复、schema 迁移、来源清理与核对 | 不假定所有 running 任务能重跑；未知外部效果先核对 |
-| [RA-10](steps/ra-10-validation-and-rollout.md) | RA-01～RA-09 | 在用户 Mac/S31 上逐项开放已验证体验 | 本地回归、TLA+、验收记录与启用策略 | 分别记录源码、模型检查、本机执行和实板结果；无 CI |
+| [RA-07a](steps/ra-07-identity-continuity.md#ra-07a称呼与当前声音) | RA-05、RA-08（名字校验） | 很晚才说“我是 Jason”：称呼立即保存、可靠的当前声音绑定、查询/更正/遗忘 | identity adapter、bot-server 名字校验器、voice_album | 复用既有晚命名与 11-18 声音匹配称呼；不做历史回认 |
+| [RA-07b](steps/ra-07-identity-continuity.md#ra-07b历史关联) | RA-07a、RA-06 | 有证据时把以前的匿名对话关联到此人 | 历史回查 workflow、来源修订、Graphiti 传播 | 单独验收；不阻塞 M2；不默认开启留存 |
+| [RA-08](steps/ra-08-assistant-adapters.md) | RA-05（记忆的上下文部分另依赖 RA-06） | 记住/纠错/遗忘、提醒和设备控制自然可达 | memory/reminder/device 等 typed adapters | 分能力小 PR，每项必须完成自然入口到实际结果的路径 |
+| [RA-09](steps/ra-09-recovery-and-migration.md) | RA-04、RA-06、RA-07a、RA-08 | 重连、跨天、重启以后状态仍可解释和继续 | inbox/operation 恢复、schema 迁移、来源清理与核对 | 不假定所有 running 任务能重跑；未知外部效果先核对 |
+| [RA-10](steps/ra-10-validation-and-rollout.md) | RA-00～RA-09、RA-07b | 在用户 Mac/S31 上逐项开放已验证体验 | 本地回归、TLA+、验收记录与启用策略 | 分别记录源码、模型检查、本机执行和实板结果；无 CI |
 
-RA-03 与 RA-04 在 RA-02 接口明确后可并行；RA-07 与 RA-08 在 RA-06 合同明确后可并行。RA-09 汇总恢复验证，**每步自身的数据结构、迁移和故障恢复不能延后到 RA-09 才实现**。RA-10 是联合场景验收，每步的实现回归与形式化更新仍随对应行为 PR 交付。
+**建议顺序（按 PR #37 review 调整）：** RA-00（及并行的 #35 修复）→ RA-04 持久收件箱与结果交付策略 → RA-01/RA-02 以 strangler 方式在 RA-00 接缝后抽出 → RA-03；RA-05 只依赖 RA-01，提醒与记忆适配器（RA-08）先于身份；RA-07a 进入 M2，RA-07b 之后单独验收。RA-04 与 RA-01 可在 RA-00 后并行；RA-08 的提醒部分只需 RA-05 与 `memory/proactive.rs`，不必等待 RA-06 的完整快照投影器。RA-04 早期的存储调用经受限 blocking 执行域运行，RA-02 再统一迁入存储 worker。RA-09 汇总恢复验证，**每步自身的数据结构、迁移和故障恢复不能延后到 RA-09 才实现**。RA-10 是联合场景验收，每步的实现回归与形式化更新仍随对应行为 PR 交付。
 
 ## 2. 每个步骤的详细规格必须回答
 
@@ -49,15 +58,19 @@ RA-03 与 RA-04 在 RA-02 接口明确后可并行；RA-07 与 RA-08 在 RA-06 �
 7. TLA+ 的状态、有限边界、不变量和有条件进展性质，以及触发真实实现的回归入口。
 8. 本步骤实际执行过哪些检查、未执行什么；未运行的验收记录保持 `not_run`。
 
-## 3. 三个集成里程碑
+## 3. 四个集成里程碑
 
-### M1：交互可用性（RA-01～RA-04）
+### M0：快速解耦（RA-00、#35）
 
-必须演示 Luna 永不返回、TTS 慢、网络背压、PCM 不齐、数据库锁等待等条件下的控制路径。触摸停止立即使旧输出失效；不以取消清理完成作为用户看见停止的前提。任务 ACK 或本轮内容播完且所需回执齐全后，经两端协商的前台完成边界释放本轮，允许新一轮按设备许可进入，原任务不丢失；ACK 单独完成不能擅自开启追问。
+仅 Mac、无协议与固件变更：委派回复以真实 final 段结束本轮，后台任务不再使普通输入返回 session_busy；待补参任务不再强制闲聊走 OpenCode；三处分支内等待先 fence 后迁出。用既有分阶段计时对比前后；#35 steer 竞争单独修复。
+
+### M1：交互可用性（RA-04、RA-01～RA-03）
+
+必须演示 Luna 永不返回、TTS 慢、网络背压、PCM 不齐、数据库锁等待等条件下的控制路径。触摸停止立即使旧输出失效；不以取消清理完成作为用户看见停止的前提。任务 ACK 或本轮内容播完且所需回执齐全后，以既有 `purpose=final` 内容段的真实硬件回执释放本轮（`turn.response_closed` 推迟为可选的后续细化，见 RA-04 §2），允许新一轮按设备许可进入，原任务不丢失；ACK 单独完成不能擅自开启追问。
 
 本里程碑不依赖语音声学打断完成；使用当前可靠的触摸/本地控制入口和半双工基线。真正的首音、停止到 DAC 静音时间另做实板测量。
 
-### M2：可通过对话使用的助理（RA-05～RA-08）
+### M2：可通过对话使用的助理（RA-05、RA-08、RA-06、RA-07a）
 
 至少完成以下自然表达的适配回执闭环：
 
@@ -69,7 +82,7 @@ RA-03 与 RA-04 在 RA-02 接口明确后可并行；RA-07 与 RA-08 在 RA-06 �
 
 固定本地命令继续走低延迟路径。模型提案只能请求已注册且适用的能力；底层存在但不可用的模块不得出现在“现在能完成”的清单中。
 
-### M3：可持续、可恢复（RA-09～RA-10）
+### M3：可持续、可恢复（RA-09、RA-07b、RA-10）
 
 断线完成的任务进入持久收件箱；重启恢复先核对真实状态；跨午夜保留任务关联。人物更正/遗忘传播到上下文与派生索引；重试不能带回被撤回的数据。真实终态、结果已保存和已交付分别可查。
 
@@ -94,13 +107,13 @@ RA-03 与 RA-04 在 RA-02 接口明确后可并行；RA-07 与 RA-08 在 RA-06 �
 
 ## 6. 进度与 issue 管理
 
-本期以 [#36](https://github.com/JasonGuoo/esp-bot/issues/36) 为单一总跟踪，十步规格提供可直接拆出的实现 PR 边界。本次不额外创建十个重复子 issue；后续需要分工时，可按 RA 编号建单并链接对应规格。
+本期以 [#36](https://github.com/JasonGuoo/esp-bot/issues/36) 为单一总跟踪，RA-00 与十步规格提供可直接拆出的实现 PR 边界。本次不额外创建十个重复子 issue；后续需要分工时，可按 RA 编号建单并链接对应规格。
 
 | 记录对象 | 本次状态 | 何时可改变状态 |
 | --- | --- | --- |
 | 总结、框架选择与代码审查 | 已完成本次文档核查 | 代码基线或上游边界变化时更新 |
-| 本组设计和十步 specs | 已编写，待 PR 审阅 | 文档 PR 合并后标记设计已合并 |
-| RA-01～RA-10 实现 | 待实现 | 对应行为代码与必要模型/回归实际交付 |
+| 本组设计、RA-00 与十步 specs | 已编写，待 PR 审阅 | 文档 PR 合并后标记设计已合并 |
+| RA-00～RA-10 实现 | 待实现 | 对应行为代码与必要模型/回归实际交付 |
 | 运行、延迟、声纹、Mac/S31 联合验收 | `not_run` | 在记录环境中执行并附证据 |
 
 文档 PR 使用 `Refs #36`，不用自动关闭关键词。以后源码完成但实板未验收时继续明确“开发完成，待测试”，不能从勾选文档推导运行通过。旧 issue 的修复和验收状态不被本计划覆盖。

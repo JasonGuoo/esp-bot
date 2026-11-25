@@ -2,7 +2,7 @@
 
 日期：2026-11-25。状态：**待实现**。验证：**not_run**。
 
-依赖：[RA-05 能力目录](ra-05-capability-registry.md)、[RA-06 上下文与任务控制](ra-06-context-and-task-control.md)。总议题：[#36](https://github.com/JasonGuoo/esp-bot/issues/36)。原则：[capabilities.md](../capabilities.md)。基线 `46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`；所有新增 adapter、参数和验证属于后续实现，本次无运行时变更。
+依赖：[RA-05 能力目录](ra-05-capability-registry.md)；记忆召回/纠错的上下文部分另依赖 [RA-06 上下文与任务控制](ra-06-context-and-task-control.md)。`reminder.create/list/cancel` 只需 RA-05 与 `memory/proactive.rs`，可先行交付。总议题：[#36](https://github.com/JasonGuoo/esp-bot/issues/36)。原则：[capabilities.md](../capabilities.md)。基线 `46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`；所有新增 adapter、参数和验证属于后续实现，本次无运行时变更。
 
 ## 1. 目标与首批范围
 

@@ -4,7 +4,7 @@
 
 ## 目标与依赖
 
-**依赖：[RA-01](ra-01-control-contracts.md)、[RA-02](ra-02-gateway-io.md)。** 让后台任务继续执行时，前台轮次能以明确的回答/委派结果结束，用户能再提问题；任务结果可靠保留，在适当的当前输出许可下交付。此步骤不依赖 RA-03 才能定义生命周期；现有 OpenCode/任务 producer 也使用同一契约。
+**依赖：[RA-00](ra-00-quick-decoupling.md)（按 review 调整；早期存储调用经受限 blocking 执行域，[RA-01](ra-01-control-contracts.md)/[RA-02](ra-02-gateway-io.md) 完成后再迁入统一存储 worker）。** 让后台任务继续执行时，前台轮次能以明确的回答/委派结果结束，用户能再提问题；任务结果可靠保留，在适当的当前输出许可下交付。此步骤不依赖 RA-03 才能定义生命周期；现有 OpenCode/任务 producer 也使用同一契约。
 
 现有 [`TaskService`](../../../../server/bot-server/src-tauri/src/brain/tasks.rs) 已有独立任务、SQLite、并发上限、进度和效果证据。本步扩展它，不建立另一套 job scheduler。用户日记录、activation、turn、task、结果与 lease 的独立性必须真正贯穿 gateway 和设备协议。
 

@@ -2,7 +2,7 @@
 
 日期：2026-11-25。状态：**待实现**。验证：**not_run**。
 
-依赖：[RA-01 控制契约](ra-01-control-contracts.md)、[RA-03 Luna worker](ra-03-luna-worker.md)。总议题：[#36](https://github.com/JasonGuoo/esp-bot/issues/36)。领域原则见 [capabilities.md](../capabilities.md)。审计基线为 `46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`；本次只写规格，不新增运行代码、schema 或形式模型。
+依赖：[RA-01 控制契约](ra-01-control-contracts.md)。不依赖 RA-03：目录、提案校验与操作账本是宿主侧组件，可像 `scene.rs` 校验四种任务提案那样，先对接现有 `fast_core` 输出路径实现与测试；RA-03 完成后再接入其 worker 边界。总议题：[#36](https://github.com/JasonGuoo/esp-bot/issues/36)。领域原则见 [capabilities.md](../capabilities.md)。审计基线为 `46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`；本次只写规格，不新增运行代码、schema 或形式模型。
 
 ## 1. 目标与边界
 

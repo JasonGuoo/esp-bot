@@ -2,7 +2,7 @@
 
 日期：2026-11-25。状态：**待实现**。验证：**not_run**。
 
-依赖：[RA-04](ra-04-task-delivery.md)、[RA-06](ra-06-context-and-task-control.md)、[RA-07](ra-07-identity-continuity.md)、[RA-08](ra-08-assistant-adapters.md)。关联总议题：[同一总议题 #36](https://github.com/JasonGuoo/esp-bot/issues/36)。基线为 `46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`。以下全部是待实现规格；本次没有执行 SQL 迁移、启动模型、改变用户数据或运行 TLC。
+依赖：[RA-04](ra-04-task-delivery.md)、[RA-06](ra-06-context-and-task-control.md)、[RA-07a](ra-07-identity-continuity.md)、[RA-08](ra-08-assistant-adapters.md)。关联总议题：[同一总议题 #36](https://github.com/JasonGuoo/esp-bot/issues/36)。基线为 `46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`。以下全部是待实现规格；本次没有执行 SQL 迁移、启动模型、改变用户数据或运行 TLC。
 
 ## 1. 目标
 

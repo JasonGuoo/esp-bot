@@ -167,7 +167,7 @@ Luna 的会话 gate 留在 worker 内，维护同一 thread 的有序输入；�
 
 ## 10. 迁移与证据
 
-实施按 [RA-01](steps/ra-01-control-contracts.md) → [RA-02](steps/ra-02-gateway-io.md) → [RA-03](steps/ra-03-luna-worker.md) / [RA-04](steps/ra-04-task-delivery.md) 建控制与生命周期，再接统一能力、上下文、身份、适配器和恢复。保留 `brain_core.enabled=false`、既有 OpenCode 路由和旧协议兼容；新调度开关与协议 capability 均需明确版本和默认值，本文未声明它们存在。
+实施先做仅 Mac、无协议变更的 [RA-00](steps/ra-00-quick-decoupling.md) 与 [RA-04](steps/ra-04-task-delivery.md) 持久收件箱，再以 strangler 方式在 RA-00 接缝后完成 [RA-01](steps/ra-01-control-contracts.md) → [RA-02](steps/ra-02-gateway-io.md) → [RA-03](steps/ra-03-luna-worker.md)，然后接统一能力、适配器、上下文、身份和恢复；完整顺序见[实施计划](implementation-plan.md)。保留 `brain_core.enabled=false`、既有 OpenCode 路由和旧协议兼容；新调度开关与协议 capability 均需明确版本和默认值，本文未声明它们存在。
 
 发布回滚必须先 fence、停止新接纳并保存待交付/未知效果证据。新 schema 采用可前向保留的增量迁移；旧版本无法解释的 operation/inbox 不自动重放，不通过删除表“回滚成功”。
 

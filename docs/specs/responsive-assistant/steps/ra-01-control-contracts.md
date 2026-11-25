@@ -4,7 +4,7 @@
 
 ## 目标与依赖
 
-**依赖：无。** 本步骤定义后续 gateway、Luna、任务与能力共同使用的事件、状态和执行契约。交付一个有界的纯 reducer 及其本地 runtime 适配；暂不迁移完整业务，也不新增 Agent runtime。
+**依赖：[RA-00](ra-00-quick-decoupling.md)（按 review 调整的顺序）。** RA-00 已在网关中留下 fence 先行和事件回送的接缝；本步以 strangler 方式在这些接缝后抽出 reducer，不作为任何用户可见改进的前置条件。本步骤定义后续 gateway、Luna、任务与能力共同使用的事件、状态和执行契约。交付一个有界的纯 reducer 及其本地 runtime 适配；暂不迁移完整业务，也不新增 Agent runtime。
 
 验收重点是：模型永久不返回、dispatch 满载或 cleanup 不完成时，控制仍能处理 Stop、撤权、连接变化和本地状态。这里的“能处理”是调度与状态转移性质，不是承诺 OS 级硬实时，也不是承诺无后端时理解任意自然语言。
 

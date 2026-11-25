@@ -2,7 +2,7 @@
 
 日期：2026-11-25。总跟踪：[issue #36](https://github.com/JasonGuoo/esp-bot/issues/36)。核查基线：[`46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`](https://github.com/JasonGuoo/esp-bot/tree/46ecdfbd99eba8e9158f8953b9ca251a45bc1d92)。
 
-**状态：设计与分步规格已编写，待审阅；RA-01～RA-10 运行时改造尚未实现。** 本次仅修改文档，不改变当前固件、模型、数据库、协议或权限；不把已有 HC 的“源码交付”或旧实板记录当作本方案通过。文档 PR 关联本 issue，但不自动关闭后续实施与验收。
+**状态：设计与分步规格已编写，待审阅；RA-00～RA-10 运行时改造尚未实现。** 本次仅修改文档，不改变当前固件、模型、数据库、协议或权限；不把已有 HC 的“源码交付”或旧实板记录当作本方案通过。文档 PR 关联本 issue，但不自动关闭后续实施与验收。
 
 ## 1. 用户希望得到什么
 
@@ -51,7 +51,7 @@
 | [运行架构](architecture.md) | 谁做决策、谁等待、如何停止、队列满怎么办、旧结果如何失效 |
 | [能力体系与成熟度](capabilities.md) | 功能怎样成为能力、模型能提交什么、宿主如何验证、当前哪些入口缺失 |
 | [身份连续性](identity-continuity.md) | 晚自我介绍、证据条件、补样、历史关联、重名、纠错和删除 |
-| [实施计划与依赖](implementation-plan.md) | 十步如何拆 PR、哪些可以并行、每步何时完成、怎样迁移回滚 |
+| [实施计划与依赖](implementation-plan.md) | RA-00 与十步如何拆 PR、哪些可以并行、每步何时完成、怎样迁移回滚 |
 | [验收与形式化映射](acceptance.md) | 真实场景、故障注入、模型边界、测量定义和未运行记录 |
 | [研究与源码证据](research.md) | 上游选择依据、具体版本、当前代码观察与推论的区别 |
 
@@ -59,13 +59,14 @@
 
 | 步骤 | 规格 | 实施状态 |
 | --- | --- | --- |
+| RA-00 | [Mac 侧快速解耦（无协议变更）](steps/ra-00-quick-decoupling.md) | 待实现；建议最先进行 |
 | RA-01 | [控制契约与状态所有权](steps/ra-01-control-contracts.md) | 待实现 |
 | RA-02 | [网关 I/O 解耦](steps/ra-02-gateway-io.md) | 待实现 |
 | RA-03 | [Luna 服务隔离](steps/ra-03-luna-worker.md) | 待实现 |
 | RA-04 | [独立任务交付](steps/ra-04-task-delivery.md) | 待实现 |
 | RA-05 | [能力目录与受控调用](steps/ra-05-capability-registry.md) | 待实现 |
 | RA-06 | [连续上下文与任务控制](steps/ra-06-context-and-task-control.md) | 待实现 |
-| RA-07 | [迟到的身份介绍](steps/ra-07-identity-continuity.md) | 待实现 |
+| RA-07 | [迟到的身份介绍](steps/ra-07-identity-continuity.md)：RA-07a 称呼与当前声音、RA-07b 历史关联 | 待实现 |
 | RA-08 | [首批助理适配器](steps/ra-08-assistant-adapters.md) | 待实现 |
 | RA-09 | [恢复与迁移](steps/ra-09-recovery-and-migration.md) | 待实现 |
 | RA-10 | [联合验收与分阶段启用](steps/ra-10-validation-and-rollout.md) | 待实现 |
