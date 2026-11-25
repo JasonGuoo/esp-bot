@@ -1,6 +1,6 @@
 # RA-04：前台轮次、持久任务与结果交付分离
 
-**状态：待实施；仅规格，未改任务/协议/固件运行代码，未运行本步骤测试。日期：2026-11-25。** [总规格与 issue](../README.md) · [目标架构](../architecture.md)。核对基线：`46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`。
+**状态：implemented, host-tested, pending board acceptance。Mac 侧收件箱与交付已编写并做了主机测试；固件未改，实板未验收。日期：2026-11-25。** [总规格与 issue](../README.md) · [目标架构](../architecture.md)。核对基线：`46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`。
 
 ## 目标与依赖
 

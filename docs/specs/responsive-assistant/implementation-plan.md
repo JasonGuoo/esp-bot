@@ -133,7 +133,8 @@ S31 app 分区在 2026-11-18 各阶段之后只剩约 34 KB 余量（当时额�
 | 总结、框架选择与代码审查 | 已完成本次文档核查 | 代码基线或上游边界变化时更新 |
 | 本组设计、RA-00 与十步 specs | 已编写，待 PR 审阅 | 文档 PR 合并后标记设计已合并 |
 | RA-00 实现与 #35 steer 交接 | implemented, host-tested, pending board acceptance | 主机 `cargo test` / `cargo clippy` 与 `SteerHandoff` TLC 已跑；实板未跑 |
-| RA-01～RA-10 实现 | 待实现 | 对应行为代码与必要模型/回归实际交付 |
+| RA-04 实现 | implemented, host-tested, pending board acceptance | 主机任务库、网关回环与 `TaskDelivery` / `TurnPlayback` TLC 已跑；实板未跑 |
+| RA-01～RA-03、RA-05～RA-10 实现 | 待实现 | 对应行为代码与必要模型/回归实际交付 |
 | 运行、延迟、声纹、Mac/S31 联合验收 | `not_run` | 在记录环境中执行并附证据 |
 
 文档 PR 使用 `Refs #36`，不用自动关闭关键词。以后源码完成但实板未验收时继续明确“开发完成，待测试”，不能从勾选文档推导运行通过。旧 issue 的修复和验收状态不被本计划覆盖。
