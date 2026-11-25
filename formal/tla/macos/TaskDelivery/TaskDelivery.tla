@@ -7,7 +7,7 @@ EXTENDS Naturals, FiniteSets
 
 Tasks == 1..2
 \* status: 0 empty, 1 accepted, 2 terminal, 3 cancelled
-\* inbox:  0 absent, 1 pending, 2 offered, 3 delivered, 4 deferred
+\* inbox:  0 absent, 1 pending, 2 offered, 3 delivered, 4 deferred, 5 partial
 
 VARIABLES status, inbox, heard, effect, device, lease, fg, closed, gotReceipt, outcome, day
 vars == <<status, inbox, heard, effect, device, lease, fg, closed, gotReceipt, outcome, day>>
@@ -34,10 +34,13 @@ Finish(t) ==
     /\ effect' = [effect EXCEPT ![t] = TRUE]
     /\ UNCHANGED <<heard, device, lease, fg, closed, gotReceipt, outcome, day>>
 
+\* Cancel files a pending row. If this task held the lease, that lease ends.
 Cancel(t) ==
     /\ status[t] = 1
     /\ status' = [status EXCEPT ![t] = 3]
-    /\ UNCHANGED <<inbox, heard, effect, device, lease, fg, closed, gotReceipt, outcome, day>>
+    /\ inbox' = [inbox EXCEPT ![t] = 1]
+    /\ lease' = IF lease = t THEN 0 ELSE lease
+    /\ UNCHANGED <<heard, effect, device, fg, closed, gotReceipt, outcome, day>>
 
 NewTurn ==
     /\ fg < 2 /\ device \in {"idle", "committed"}
@@ -67,16 +70,34 @@ Receive(t) ==
     /\ lease' = 0 /\ device' = "idle"
     /\ UNCHANGED <<status, effect, fg, closed, gotReceipt, outcome, day>>
 
+\* Stop and disconnect both put an offered row back to pending. A stopped or
+\* idle device never keeps an offered row.
 Stop ==
     /\ device # "stopped"
     /\ device' = "stopped" /\ lease' = 0
-    /\ inbox' = [t \in Tasks |-> IF inbox[t] = 2 THEN 4 ELSE inbox[t]]
+    /\ inbox' = [t \in Tasks |-> IF inbox[t] = 2 THEN 1 ELSE inbox[t]]
     /\ UNCHANGED <<status, heard, effect, fg, closed, gotReceipt, outcome, day>>
 
 Disconnect ==
     /\ device' = "idle" /\ lease' = 0
     /\ inbox' = [t \in Tasks |-> IF inbox[t] = 2 THEN 1 ELSE inbox[t]]
     /\ UNCHANGED <<status, heard, effect, fg, closed, gotReceipt, outcome, day>>
+
+\* A summary receipt is not the full result. Yes re-offers it; no or a timeout settles it.
+Summarize(t) ==
+    /\ inbox[t] = 2 /\ lease = t
+    /\ inbox' = [inbox EXCEPT ![t] = 5] /\ lease' = 0 /\ device' = "idle"
+    /\ UNCHANGED <<status, heard, effect, fg, closed, gotReceipt, outcome, day>>
+
+Reoffer(t) ==
+    /\ inbox[t] = 5 /\ lease = 0 /\ device = "committed"
+    /\ inbox' = [inbox EXCEPT ![t] = 2] /\ lease' = t
+    /\ UNCHANGED <<status, heard, effect, device, fg, closed, gotReceipt, outcome, day>>
+
+SettlePartial(t) ==
+    /\ inbox[t] = 5
+    /\ inbox' = [inbox EXCEPT ![t] = 3] /\ heard' = [heard EXCEPT ![t] = TRUE]
+    /\ UNCHANGED <<status, effect, device, lease, fg, closed, gotReceipt, outcome, day>>
 
 Midnight ==
     /\ day = 0 /\ day' = 1
@@ -85,20 +106,21 @@ Midnight ==
 Next ==
     \E t \in Tasks : Accept(t) \/ Finish(t) \/ Cancel(t) \/ Claim(t) \/ Receive(t)
     \/ NewTurn \/ CloseForeground \/ HearForeground \/ Stop \/ Disconnect \/ Midnight
+    \/ Summarize(t) \/ Reoffer(t) \/ SettlePartial(t)
     \/ UNCHANGED vars
 
-Spec == Init /\ [][Next]_vars
+Spec == Init /\ [][Next]_vars /\ WF_vars(Stop) /\ WF_vars(Disconnect)
 
 TaskLifetimeIndependent ==
     \A t \in Tasks :
         /\ status[t] = 2 => effect[t]
-        /\ status[t] = 3 => inbox[t] = 0 /\ ~heard[t]
+        /\ status[t] = 3 => inbox[t] # 0
 
 ResultAndInboxAtomic ==
     \A t \in Tasks : status[t] = 2 => inbox[t] # 0
 
 NoDeliveryWithoutCurrentLease ==
-    \A t \in Tasks : inbox[t] = 2 => lease = t
+    \A t \in Tasks : inbox[t] = 2 => lease = t /\ device = "committed"
 
 DeliveredRequiresReceipt ==
     \A t \in Tasks : inbox[t] = 3 => heard[t]
@@ -110,5 +132,8 @@ NoEffectReplayOnRecovery ==
     \A t \in Tasks : effect[t] => status[t] = 2
 
 BoundedDeliveryWork ==
-    Cardinality({t \in Tasks : inbox[t] \in {1, 2, 4}}) <= 2
+    Cardinality({t \in Tasks : inbox[t] \in {1, 2, 4, 5}}) <= 2
+
+\* An offered row does not stay offered: stop, disconnect, or a receipt moves it.
+OfferLeaves == \A t \in Tasks : inbox[t] = 2 ~> inbox[t] # 2
 =============================================================================

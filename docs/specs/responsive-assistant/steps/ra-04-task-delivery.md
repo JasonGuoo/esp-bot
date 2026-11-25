@@ -1,6 +1,6 @@
 # RA-04：前台轮次、持久任务与结果交付分离
 
-**状态：implemented, host-tested, pending board acceptance。Mac 侧收件箱与交付已编写并做了主机测试；固件未改，实板未验收。日期：2026-11-25。** [总规格与 issue](../README.md) · [目标架构](../architecture.md)。核对基线：`46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`。
+**状态：implemented, host-tested, pending board acceptance。** Mac 侧收件箱有保留与腾位（已送达/失效按时间和条数清理，满则腾最老的静默或低优先级行，完成和取消不会因为收件箱满而失败）、已 offer 的行在取消、关闭、失败播报、断线和重启时回到 pending、口头提问在 `assistant.text` / `audio.commit` / live turn 上都会推迟结果、历史回填只做一次且关机/崩溃恢复写入可播的 inbox 行。固件未改，实板未验收。日期：2026-11-25。 [总规格与 issue](../README.md) · [目标架构](../architecture.md)。核对基线：`46ecdfbd99eba8e9158f8953b9ca251a45bc1d92`。
 
 ## 目标与依赖
 
