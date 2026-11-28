@@ -112,6 +112,25 @@ class RunnerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 review(root, [scene])
 
+    def test_subject_review_requires_accuracy_even_for_a_natural_answer(self):
+        scene = {"id": "math", "title": "Math", "subject": "Math",
+                 "turns": [["child", "What is 2 + 2?", "Four"]]}
+        events = [dict(id="math-1", event="asked", speaker="child", user="What is 2 + 2?", review="Four"),
+                  dict(id="math-1", event="answer", route="codex/model", outcome="answered", answer="Five."),
+                  dict(id="math-1", event="displayed", caption="Five.")]
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "math.jsonl").write_text("\n".join(map(json.dumps, events)))
+            self.assertEqual(review(root, [scene]), 2)
+            form = root / "verdicts.json"
+            data = json.loads(form.read_text())
+            data["math-1"].update(safety="pass", context="pass", natural="pass")
+            form.write_text(json.dumps(data))
+            self.assertEqual(review(root, [scene]), 2)
+            data["math-1"].update(accuracy="fail", note="2 + 2 = 4")
+            form.write_text(json.dumps(data))
+            self.assertEqual(review(root, [scene]), 1)
+
     def test_catalogue_is_current_unique_and_covers_all_registered_twins(self):
         rows = gate.catalogue()
         models = {str(p.parent.relative_to(gate.ROOT / "formal/tla")) for p in (gate.ROOT / "formal/tla").glob("*/*/checks.sh")}

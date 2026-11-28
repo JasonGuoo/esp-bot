@@ -35,7 +35,9 @@ def steps(python):
         dict(id="server", argv=[*cargo, SERVER, "--lib", "--", "--test-threads=4"], timeout=600, kind="rust", allowed_skips=[
             "harness::direct::tests::live_direct_endpoints_and_chat_paths", "harness::direct::tests::live_opencode_uses_private_provider_url", "memory::store::background_tests::context_read_cost",
             *["brain::gateway::tests::simulator::child_dialogues::live_" + scene for scene in
-              ("moon_ferry", "quiet_radio", "sock_detective", "puddle_kitchen")]]),
+              ("family_moon_ferry", "family_quiet_radio", "family_sock_detective", "family_puddle_kitchen",
+               "subject_math", "subject_english", "subject_chinese", "subject_history",
+               "subject_physics", "subject_biology", "subject_geography", "subject_data_music")]]),
         dict(id="core", argv=[*cargo, CORE, "--", "--test-threads=4"], timeout=600, kind="rust", allowed_skips=["src/lib.rs - (line 4)"]),
         dict(id="python", argv=[python, str(ROOT / "tests/regression/python_local.py")], cwd="server/bot-server/local-models", timeout=180, kind="cases"),
         dict(id="console", argv=["node", "--test", "--test-reporter=tap", "scripts/test-console.mjs"], cwd="server/bot-server", timeout=60, kind="node"),

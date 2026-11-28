@@ -42,6 +42,7 @@ firmware/idf.sh                 为本项目配置环境并调用 idf.py
 ./tools/sim-bot           # 一次跨端问答，显示每一步的固件快照
 ./tools/sim-bot responsive  # #36 慢回答补话、停止和后台任务期间的连续聊天
 ./tools/sim-bot children    # 调用真实 Luna 玩四场 11 轮的儿童游戏，输出逐轮审阅表
+./tools/sim-bot subjects    # 数学、英语等八场学科追问，输出逐轮审阅表
 ./tools/sim-bot shell     # 手工输入事件，一行一个，Ctrl-D 退出
 ./tools/sim-bot runtime   # 设备端交互回归
 ./tools/sim-bot gateway   # 网关协议、任务交付、取消和断线回归

@@ -1983,5 +1983,110 @@
     "reason": "默认离线回归不调用真实模型；显式运行 ./tools/sim-bot children 后逐轮核对该次实答。",
     "evidence": [],
     "twins": []
+  },
+  {
+    "id": "EDU-01",
+    "area": "学科连续问答",
+    "scenario": "八个学科故事各连续问十一轮。同一场内在追问时更改题目、角色、条件或数据，再回扣前文。",
+    "expected": "88 轮正确关联会话与回复，参考上下文含前一轮，模拟固件显示并开放追问，任务与提醒为空。",
+    "owner": "firmware / macOS gateway",
+    "mode": "automated",
+    "evidence": [
+      [
+        "server",
+        "brain::gateway::tests::simulator::child_dialogues::all_subject_turns_are_answered_and_reach_the_runtime"
+      ]
+    ],
+    "twins": [
+      "protocol/TurnPlayback"
+    ]
+  },
+  {
+    "id": "EDU-02",
+    "area": "学科连续问答",
+    "scenario": "数学 · 蛋糕摊改订单，十一轮连续追问与条件变化",
+    "expected": "按逐轮观察项检查学科正确性、承接、安全和自然度。接受等价推理及措辞。",
+    "owner": "真实 Luna / 语义审阅",
+    "mode": "acceptance",
+    "reason": "用 ./tools/sim-bot subjects 运行真实模型并审阅该次实答。",
+    "evidence": [],
+    "twins": []
+  },
+  {
+    "id": "EDU-03",
+    "area": "学科连续问答",
+    "scenario": "英语 · 给恐龙点下午茶，十一轮连续追问与条件变化",
+    "expected": "按逐轮观察项检查学科正确性、承接、安全和自然度。接受等价推理及措辞。",
+    "owner": "真实 Luna / 语义审阅",
+    "mode": "acceptance",
+    "reason": "用 ./tools/sim-bot subjects 运行真实模型并审阅该次实答。",
+    "evidence": [],
+    "twins": []
+  },
+  {
+    "id": "EDU-04",
+    "area": "学科连续问答",
+    "scenario": "语文 · 图书馆雨伞谜案，十一轮连续追问与条件变化",
+    "expected": "按逐轮观察项检查学科正确性、承接、安全和自然度。接受等价推理及措辞。",
+    "owner": "真实 Luna / 语义审阅",
+    "mode": "acceptance",
+    "reason": "用 ./tools/sim-bot subjects 运行真实模型并审阅该次实答。",
+    "evidence": [],
+    "twins": []
+  },
+  {
+    "id": "EDU-05",
+    "area": "学科连续问答",
+    "scenario": "历史 · 餐桌朝代时间轴，十一轮连续追问与条件变化",
+    "expected": "按逐轮观察项检查学科正确性、承接、安全和自然度。接受等价推理及措辞。",
+    "owner": "真实 Luna / 语义审阅",
+    "mode": "acceptance",
+    "reason": "用 ./tools/sim-bot subjects 运行真实模型并审阅该次实答。",
+    "evidence": [],
+    "twins": []
+  },
+  {
+    "id": "EDU-06",
+    "area": "学科连续问答",
+    "scenario": "自然科学 · 手电筒影子剧场，十一轮连续追问与条件变化",
+    "expected": "按逐轮观察项检查学科正确性、承接、安全和自然度。接受等价推理及措辞。",
+    "owner": "真实 Luna / 语义审阅",
+    "mode": "acceptance",
+    "reason": "用 ./tools/sim-bot subjects 运行真实模型并审阅该次实答。",
+    "evidence": [],
+    "twins": []
+  },
+  {
+    "id": "EDU-07",
+    "area": "学科连续问答",
+    "scenario": "生命科学 · 窗台豆苗观察簿，十一轮连续追问与条件变化",
+    "expected": "按逐轮观察项检查学科正确性、承接、安全和自然度。接受等价推理及措辞。",
+    "owner": "真实 Luna / 语义审阅",
+    "mode": "acceptance",
+    "reason": "用 ./tools/sim-bot subjects 运行真实模型并审阅该次实答。",
+    "evidence": [],
+    "twins": []
+  },
+  {
+    "id": "EDU-08",
+    "area": "学科连续问答",
+    "scenario": "地理 · 给世界地图贴早餐时间，十一轮连续追问与条件变化",
+    "expected": "按逐轮观察项检查学科正确性、承接、安全和自然度。接受等价推理及措辞。",
+    "owner": "真实 Luna / 语义审阅",
+    "mode": "acceptance",
+    "reason": "用 ./tools/sim-bot subjects 运行真实模型并审阅该次实答。",
+    "evidence": [],
+    "twins": []
+  },
+  {
+    "id": "EDU-09",
+    "area": "学科连续问答",
+    "scenario": "音乐与数据 · 谁偷了一拍，十一轮连续追问与条件变化",
+    "expected": "按逐轮观察项检查学科正确性、承接、安全和自然度。接受等价推理及措辞。",
+    "owner": "真实 Luna / 语义审阅",
+    "mode": "acceptance",
+    "reason": "用 ./tools/sim-bot subjects 运行真实模型并审阅该次实答。",
+    "evidence": [],
+    "twins": []
   }
 ]

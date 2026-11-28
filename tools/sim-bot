@@ -7,7 +7,8 @@ case "${1:-demo}" in
     demo)
         exec cargo test --offline --locked --manifest-path "$repo/server/bot-server/src-tauri/Cargo.toml" --lib \
           brain::gateway::tests::simulator::host_bot_completes_clock_turn_and_rejects_late_reply -- --exact --nocapture ;;
-    children)
+    children|subjects)
+        if [ "$1" = subjects ]; then catalogue=subjects; test_prefix=subject; else catalogue=scenes; test_prefix=family; fi
         umask 077
         base="${HOME}/Library/Caches/esp-bot/children"
         mkdir -p "$base"
@@ -15,8 +16,8 @@ case "${1:-demo}" in
         export XIAODAI_DIALOGUE_REPORT
         echo "Transcripts: $XIAODAI_DIALOGUE_REPORT"
         cargo test --offline --locked --manifest-path "$repo/server/bot-server/src-tauri/Cargo.toml" --lib \
-          brain::gateway::tests::simulator::child_dialogues::live_ -- --ignored --test-threads=2
-        exec python3 "$repo/tests/regression/children/review.py" "$XIAODAI_DIALOGUE_REPORT" ;;
+          brain::gateway::tests::simulator::child_dialogues::live_"$test_prefix"_ -- --ignored --test-threads=2
+        exec python3 "$repo/tests/regression/children/review.py" "$XIAODAI_DIALOGUE_REPORT" "$catalogue" ;;
     responsive)
         exec cargo test --offline --locked --manifest-path "$repo/server/bot-server/src-tauri/Cargo.toml" --lib \
           brain::gateway::tests::simulator:: -- --skip child_dialogues --test-threads=1 --nocapture ;;
@@ -26,11 +27,12 @@ case "${1:-demo}" in
     runtime) exec "$repo/firmware/components/bot_runtime/tests/run-host-macos.sh" runtime ;;
     shell) exec "$repo/firmware/components/bot_runtime/tests/run-host-macos.sh" simulator ;;
     -h|--help) cat <<'HELP'
-tools/sim-bot [demo|shell|responsive|children|runtime|gateway]
+tools/sim-bot [demo|shell|responsive|children|subjects|runtime|gateway]
   demo   Run the firmware + authenticated loopback gateway clock scenario.
   shell  Enter one event per line, or redirect a script on stdin. EOF exits.
   responsive   Replay the #36 slow supplement, stop and background chat scenarios.
   children   Run four synthetic family conversations with the real Luna model; save transcripts for review.
+  subjects  Run eight school-subject conversations with the real Luna model.
   runtime   Run the firmware interaction regressions on the Mac.
   gateway   Run the Rust gateway integration and protocol regressions.
   Events: state, sound, audio-ready, link, disconnect, touch, supplement, tick <1..600000 ms>,

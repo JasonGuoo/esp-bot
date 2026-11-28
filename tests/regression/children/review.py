@@ -7,6 +7,7 @@ import sys
 
 AXES = ("safety", "context", "natural")
 CATALOGUE = Path(__file__).with_name("scenes.json")
+SUBJECTS = Path(__file__).with_name("subjects.json")
 
 
 def review(directory, scenes):
@@ -14,6 +15,8 @@ def review(directory, scenes):
     existing = json.loads(form_path.read_text()) if form_path.exists() else None
     form, lines, counts = {}, ["# 小呆儿童对话逐轮实录", ""], Counter()
     for scene in scenes:
+        axes = (*AXES, "accuracy") if scene.get("subject") else AXES
+        criteria = "安全 / 承接 / 自然 / 学科正确性" if scene.get("subject") else "安全 / 承接 / 自然"
         records = [json.loads(line) for line in
                    (directory / (scene["id"] + ".jsonl")).read_text().splitlines()]
         if len(records) != 3 * len(scene["turns"]):
@@ -34,19 +37,19 @@ def review(directory, scenes):
                 raise ValueError(f"{key}: displayed text does not match the answer")
             digest = hashlib.sha256(json.dumps(events, ensure_ascii=False).encode()).hexdigest()
             row = (existing[key] if existing is not None else
-                   dict(evidence=digest, **dict.fromkeys(AXES, "pending"), note=""))
-            if row["evidence"] != digest or any(row[a] not in ("pass", "fail", "pending") for a in AXES):
+                   dict(evidence=digest, **dict.fromkeys(axes, "pending"), note=""))
+            if row["evidence"] != digest or any(row[a] not in ("pass", "fail", "pending") for a in axes):
                 raise ValueError(f"{key}: invalid or stale judgment")
-            if "fail" in [row[a] for a in AXES] and not row["note"].strip():
+            if "fail" in [row[a] for a in axes] and not row["note"].strip():
                 raise ValueError(f"{key}: explain the failed criterion")
             form[key] = row
-            grades = [row[a] for a in AXES]
+            grades = [row[a] for a in axes]
             counts["fail" if "fail" in grades else "pending" if "pending" in grades else "pass"] += 1
             lines += [f"**{i+1}. {speaker}**　{utterance}", "", "小呆　" + shown["caption"], ""]
             if display_text != answer["answer"] and len(answer["answer"].encode()) > 383:
                 lines += ["服务端完整文字　" + answer["answer"], ""]
             lines += [f"观察项　{rubric}", "",
-                      "安全 / 承接 / 自然　" + " / ".join(grades) + "　" + row["note"], ""]
+                      criteria + "　" + " / ".join(grades) + "　" + row["note"], ""]
     if existing is None:
         with form_path.open("x") as stream:
             json.dump(form, stream, ensure_ascii=False, indent=2)
@@ -58,11 +61,12 @@ def review(directory, scenes):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit("usage: python3 tests/regression/children/review.py <transcript-directory>")
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] not in ("scenes", "subjects")):
+        sys.exit("usage: python3 tests/regression/children/review.py <transcript-directory> [scenes|subjects]")
+    catalogue = SUBJECTS if sys.argv[2:] == ["subjects"] else CATALOGUE
     directory = Path(sys.argv[1])
     try:
-        result = review(directory, json.loads(CATALOGUE.read_text()))
+        result = review(directory, json.loads(catalogue.read_text()))
     except (OSError, ValueError, KeyError) as error:
         sys.exit(f"review unavailable: {error}")
     print(directory / "review.md")

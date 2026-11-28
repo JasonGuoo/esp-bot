@@ -18,6 +18,13 @@ fn scenes() -> Vec<FamilyScene> {
     .unwrap()
 }
 
+fn subject_scenes() -> Vec<FamilyScene> {
+    serde_json::from_str(include_str!(
+        "../../../../../../tests/regression/children/subjects.json"
+    ))
+    .unwrap()
+}
+
 async fn play(scene: &FamilyScene, live: bool) {
     let mut rig = Rig::with_model_mode(if live { "codex-only" } else { "http-only" }).await;
     let mut model = if live {
@@ -26,7 +33,8 @@ async fn play(scene: &FamilyScene, live: bool) {
         Some(Model::start(&rig).await)
     };
     let mut transcript = if live {
-        let dir = std::env::var_os("XIAODAI_DIALOGUE_REPORT").expect("use tools/sim-bot children");
+        let dir = std::env::var_os("XIAODAI_DIALOGUE_REPORT")
+            .expect("use tools/sim-bot children or tools/sim-bot subjects");
         Some(
             std::fs::File::create_new(
                 std::path::Path::new(&dir).join(format!("{}.jsonl", scene.id)),
@@ -175,28 +183,40 @@ async fn all_child_turns_are_answered_and_reach_the_runtime() {
     }
 }
 
-async fn live_scene(id: &str) {
-    let scene = scenes().into_iter().find(|s| s.id == id).unwrap();
-    play(&scene, true).await;
+#[tokio::test]
+async fn all_subject_turns_are_answered_and_reach_the_runtime() {
+    for scene in subject_scenes() {
+        play(&scene, false).await;
+    }
 }
 
-#[tokio::test]
-#[ignore = "live model dialogue acceptance"]
-async fn live_moon_ferry() {
-    live_scene("moon_ferry").await;
+macro_rules! live_scenarios {
+    ($catalogue:ident, $($test:ident => $id:literal),+ $(,)?) => {
+        $(
+            #[tokio::test]
+            #[ignore = "live model dialogue acceptance"]
+            async fn $test() {
+                let scene = $catalogue().into_iter().find(|scene| scene.id == $id).unwrap();
+                play(&scene, true).await;
+            }
+        )+
+    };
 }
-#[tokio::test]
-#[ignore = "live model dialogue acceptance"]
-async fn live_quiet_radio() {
-    live_scene("quiet_radio").await;
-}
-#[tokio::test]
-#[ignore = "live model dialogue acceptance"]
-async fn live_sock_detective() {
-    live_scene("sock_detective").await;
-}
-#[tokio::test]
-#[ignore = "live model dialogue acceptance"]
-async fn live_puddle_kitchen() {
-    live_scene("puddle_kitchen").await;
-}
+
+live_scenarios!(scenes,
+    live_family_moon_ferry => "moon_ferry",
+    live_family_quiet_radio => "quiet_radio",
+    live_family_sock_detective => "sock_detective",
+    live_family_puddle_kitchen => "puddle_kitchen",
+);
+
+live_scenarios!(subject_scenes,
+    live_subject_math => "math",
+    live_subject_english => "english",
+    live_subject_chinese => "chinese",
+    live_subject_history => "history",
+    live_subject_physics => "physics",
+    live_subject_biology => "biology",
+    live_subject_geography => "geography",
+    live_subject_data_music => "data_music",
+);
