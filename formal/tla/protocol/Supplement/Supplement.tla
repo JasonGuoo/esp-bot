@@ -32,6 +32,16 @@ Interrupt(kind) == /\ phase = "Original" /\ phase' = "Between" /\ intent' = kind
 Withdraw == /\ phase = "Between" /\ reservation /\ reservation' = FALSE /\ intent' = "Stop"
             /\ UNCHANGED <<phase, generated, finished, consumed, heard, atCut, relation, questionIncluded, quoted>>
 
+\* In the gap before audio.begin, the Mac still has the original token.
+\* The device may close with that token or with the unfocused direct successor.
+CloseTags == {"Current", "Direct", "SkippedTurn", "OtherSession", "OtherEpoch", "OtherFocus"}
+CloseDuringHandover(tag) ==
+    /\ phase = "Between" /\ reservation /\ relation' = tag
+    /\ IF tag \in {"Current", "Direct"}
+          THEN /\ phase' = "Closed" /\ reservation' = FALSE /\ intent' = "Stop"
+          ELSE UNCHANGED <<phase, reservation, intent>>
+    /\ UNCHANGED <<generated, finished, consumed, heard, atCut, questionIncluded, quoted>>
+
 Submit(nextToken) ==
     /\ phase = "Between" /\ phase' = "Next" /\ relation' = nextToken
     /\ questionIncluded' = (reservation /\ nextToken = "Direct")
@@ -45,11 +55,14 @@ LaterTurn == /\ phase = "Next" /\ phase' = "Later" /\ questionIncluded' = FALSE 
 Next == Produce \/ FinishAudio \/ TakeReceipt \/ Withdraw \/ LaterTurn
         \/ (\E kind \in {"Supplement","Replace","Stop"} : Interrupt(kind))
         \/ (\E t \in {"Direct","SkippedTurn","OtherSession","OtherEpoch"} : Submit(t))
-        \/ (phase = "Later" /\ UNCHANGED vars)
+        \/ (\E tag \in CloseTags : CloseDuringHandover(tag))
+        \/ (phase \in {"Later","Closed"} /\ UNCHANGED vars)
 Spec == Init /\ [][Next]_vars
 
 PreviousQuestion == questionIncluded = (phase = "Next" /\ intent = "Supplement" /\ relation = "Direct")
 OnlyConfirmedSpeech == quoted = (IF questionIncluded THEN atCut ELSE 0)
 LateReceiptsStayRetired == (phase # "Original" => heard = atCut)
+CloseAccepted == (phase = "Between" => relation \notin {"Current", "Direct"})
+CloseIsScoped == (phase = "Closed" => relation \in {"Current", "Direct"} /\ ~reservation /\ ~questionIncluded)
 ReservationSpent == (phase \in {"Next","Later"} => ~reservation)
 ===============================================================================

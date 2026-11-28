@@ -106,6 +106,70 @@ async fn collect(core: &Core, text: &str) -> Vec<Event> {
     evs
 }
 
+#[tokio::test]
+async fn stateless_fallback_never_touches_luna_or_widens_route_policy() {
+    let (url,stats)=spawn_mock(Mock {status:200,delay_ms:0,chunks:answer(&["独立回答。"]),chunk_delay_ms:0}).await;
+    let starts=Arc::new(AtomicUsize::new(0));
+    let called=Arc::clone(&starts);
+    let cfg=Config {routes:vec![route("local-http",&url)],order:vec!["local-http".into()],
+        mode:EngineMode::Dual,health:quiet(),..Config::default()};
+    let core=Core::with_codex_connector(cfg.clone(),Arc::new(move|| {
+        called.fetch_add(1,Ordering::SeqCst);Err("Luna is unavailable".into())
+    })).unwrap();
+    let mut turn=core.respond_stateless(vec![fast_responder::Message::user("另一个人的新问题")],CancellationToken::new()).unwrap();
+    let final_text=tokio::time::timeout(Duration::from_secs(2),async {
+        loop {
+            match turn.next().await {
+                Some(Event::Done{text,timings})=>{
+                    assert_eq!(timings.engine.as_deref(),Some("http"));break text;
+                },
+                Some(event)=>assert!(!event.is_terminal(),"unexpected terminal: {event:?}"),
+                None=>panic!("missing terminal"),
+            }
+        }
+    }).await.unwrap();
+    assert_eq!(final_text,"独立回答。");
+    assert_eq!(starts.load(Ordering::SeqCst),0);
+    assert_eq!(stats.requests.load(Ordering::SeqCst),1);
+    let codex_only=Core::new(Config{mode:EngineMode::CodexOnly,..cfg}).unwrap();
+    assert!(codex_only.respond_stateless(vec![],CancellationToken::new()).is_none());
+    let unavailable=core.with_keys([] as [(&str,&str);0]);
+    assert_eq!(unavailable.config().mode,EngineMode::Dual,"fallback does not mutate the configured core");
+}
+
+#[tokio::test]
+async fn a_paused_consumer_retains_a_bounded_prefix_and_an_explicit_failure() {
+    let text="一。".repeat(200);
+    let (url,_)=spawn_mock(Mock {status:200,delay_ms:0,chunks:answer(&[&text]),chunk_delay_ms:0}).await;
+    let core=core(vec![route("flood",&url)],100);
+    let mut turn=core.respond("测试",CancellationToken::new());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut sentences=Vec::new();
+    loop {match turn.next().await {
+        Some(Event::Sentence{index,text,..})=>{assert_eq!(index,sentences.len());sentences.push(text);},
+        Some(Event::Error{message,..})=>{assert!(message.contains("sentence budget"));break;},
+        Some(Event::FirstToken{..})=>{},
+        event=>panic!("missing explicit overflow: {event:?}"),
+    }}
+    assert_eq!(sentences.len(),128);
+    assert!(text.starts_with(&sentences.concat()));
+}
+
+#[tokio::test]
+async fn stalled_turns_cannot_spawn_unbounded_races_even_through_core_clones() {
+    let (url,_)=spawn_mock(Mock {status:200,delay_ms:60_000,chunks:answer(&["迟到。"]),chunk_delay_ms:0}).await;
+    let core=core(vec![route("stalled",&url)],100);
+    let mut turns:Vec<_>=(0..4).map(|_|core.respond("测试",CancellationToken::new())).collect();
+    let mut excess=core.clone().respond("超额",CancellationToken::new());
+    assert!(matches!(excess.next().await,Some(Event::Error{message,..}) if message=="core semantic capacity exceeded"));
+    for turn in &turns {turn.cancel();}
+    tokio::time::timeout(Duration::from_secs(2),async {
+        for turn in &mut turns {while let Some(event)=turn.next().await {if event.is_terminal(){break;}}}
+    }).await.unwrap();
+    // The shared worker budget is released after actual bounded cleanup.
+    assert!(core.respond_stateless(vec![],CancellationToken::new()).is_some());
+}
+
 fn fast(parts: &[&str]) -> Mock {
     Mock { status: 200, delay_ms: 0, chunks: answer(parts), chunk_delay_ms: 5 }
 }
@@ -300,6 +364,29 @@ async fn zero_width_tokens_do_not_win_the_race() {
 /// Tests never write the real latency log.
 fn quiet() -> fast_responder::HealthConfig {
     fast_responder::HealthConfig { log_path: None, ..Default::default() }
+}
+
+#[tokio::test]
+async fn reconfiguration_and_input_limits_are_checked_before_starting_a_provider() {
+    let (url,stats)=spawn_mock(fast(&["不会被调用。"])).await;
+    let c=core(vec![route("a",&url)],1000);
+    let too_many=c.reconfigure(|cfg|cfg.order=vec!["a".into();17]);
+    assert!(matches!(collect(&too_many,"hi").await.last(),Some(Event::Error{message,..}) if message=="core input budget exceeded"));
+    let huge="x".repeat(512*1024+1);
+    assert!(matches!(collect(&c,&huge).await.last(),Some(Event::Error{message,..}) if message=="core input budget exceeded"));
+    let mut turn=c.respond_messages(vec![fast_responder::Message::user("x");129],CancellationToken::new());
+    assert!(matches!(turn.next().await,Some(Event::Error{message,..}) if message=="core input budget exceeded"));
+    assert_eq!(stats.requests.load(Ordering::SeqCst),0);
+}
+
+#[tokio::test]
+async fn flushing_the_last_fragment_cannot_exceed_the_sentence_budget() {
+    let mut chunks=(0..128).map(|_|content("一句话。")).collect::<Vec<_>>();
+    chunks.extend(answer(&["没有句号的尾巴"]));
+    let (url,_)=spawn_mock(Mock{status:200,delay_ms:0,chunks,chunk_delay_ms:0}).await;
+    let events=collect(&core(vec![route("a",&url)],1000),"hi").await;
+    assert_eq!(events.iter().filter(|event|matches!(event,Event::Sentence{..})).count(),128);
+    assert!(matches!(events.last(),Some(Event::Error{message,..}) if message=="core output budget exceeded"));
 }
 
 #[tokio::test]

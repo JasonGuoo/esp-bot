@@ -1,5 +1,7 @@
 # esp-bot
 
+免烧录开发：在 Mac 运行 `./tools/sim-bot`，用当前工作区的固件状态机和本机 Rust 网关完成一次问答。用 `./tools/sim-bot shell` 重放自己的设备事件。[命令和示例](docs/esp-idf-development.md#模拟-bot)
+
 ## 新设计：让小呆随时回应（2026-11-25，待实现）
 
 [总 issue #36](https://github.com/JasonGuoo/esp-bot/issues/36) 与[设计/specs](docs/specs/responsive-assistant/README.md)确定下一阶段：交互控制循环不等待 Luna 或任何后端，独立管理持续任务和结果交付，以统一能力契约接通记忆、提醒、任务与设备操作，并支持多次匿名对话以后才说“我是 Jason”。[十步实施计划](docs/specs/responsive-assistant/implementation-plan.md)提供依赖、详细规格、迁移与验收入口。

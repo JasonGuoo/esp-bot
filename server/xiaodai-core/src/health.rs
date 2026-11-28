@@ -468,7 +468,7 @@ mod tests {
     fn log_round_trips_and_seeds_the_window() {
         // Test writes go only under the agreed test folder.
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-        let dir = home.join("小呆 Server/runtime/tmp/xiaodai-core-test").join(format!("health-unit-{}", std::process::id()));
+        let dir = home.join("Xiaodai_Server/runtime/tmp/xiaodai-core-test").join(format!("health-unit-{}", std::process::id()));
         let p = dir.join("latency.jsonl");
         let _ = std::fs::remove_file(&p);
         let c = HealthConfig { log_path: Some(p.clone()), ..HealthConfig::default() };

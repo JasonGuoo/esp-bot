@@ -1,0 +1,3 @@
+server_tests robot_selection_uses_isolated_python_and_health_without_changing_asr \
+    robot_stop_kills_owned_descendants_and_fences_old_generation \
+    background_tts_yields_an_occupied_lane_without_queueing

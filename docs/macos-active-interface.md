@@ -66,7 +66,7 @@ done
 
 ```sh
 DEVELOPER_DIR=/Library/Developer/CommandLineTools \
-XIAODAI_TEST_OPENCODE="$HOME/小呆 Server/engines/opencode-bin/opencode" \
+XIAODAI_TEST_OPENCODE="$HOME/Xiaodai_Server/engines/opencode-bin/opencode" \
 cargo test --locked --offline --manifest-path server/bot-server/src-tauri/Cargo.toml \
   --lib harness::direct::tests::live_ -- --ignored --nocapture --test-threads=1
 ```

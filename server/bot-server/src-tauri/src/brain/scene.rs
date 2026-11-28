@@ -27,6 +27,7 @@ pub fn schema() -> Value {
             "speech":{"type":"string","description":"面向当前家庭参与者说的话，短句，默认中文；不包含工具调用记录。"},
             "expression":{"type":"string","enum":EXPRESSION_IDS},
             "tasks":task_proposal_schema(),
+            "actions":super::capability_registry::action_schema(),
             "presentation":super::presentation::proposal_schema(),
             "cards":{"type":"array","maxItems":4,"items":{
                 "type":"object","additionalProperties":false,

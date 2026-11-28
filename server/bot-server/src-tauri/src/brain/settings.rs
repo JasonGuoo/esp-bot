@@ -143,8 +143,8 @@ pub fn validate(config: &BrainConfig) -> Result<(), String> {
     config.presentation.validate()?;
     config.brain_core.validate()?;
     if config.models.speaker_python.as_ref().is_some_and(|p|!p.is_absolute()){return Err("speaker_python_path_must_be_absolute".into());}
-    if !matches!(config.models.tts_backend.as_str(),"auto"|"kokoro"|"say"){return Err("tts_backend_must_be_auto_kokoro_or_say".into());}
-    if [&config.models.kokoro_model_dir,&config.models.tts_python].iter().any(|p|p.as_ref().is_some_and(|p|!p.is_absolute())){return Err("kokoro_paths_must_be_absolute".into());}
+    if !matches!(config.models.tts_backend.as_str(),"auto"|"kokoro"|"qwen3_robot"|"say"){return Err("tts_backend_invalid".into());}
+    if [&config.models.kokoro_model_dir,&config.models.qwen3_model_dir,&config.models.tts_python].iter().any(|p|p.as_ref().is_some_and(|p|!p.is_absolute())){return Err("tts_paths_must_be_absolute".into());}
     if !(1..=16).contains(&config.models.kokoro_threads){return Err("kokoro_threads_must_be_1_to_16".into());}
     if config.models.diarization_model.as_ref().is_some_and(|p|!p.is_absolute()){return Err("diarization_path_must_be_absolute".into());}
     if !(100..=4000).contains(&config.conversation.max_reply_characters) { return Err("reply_limit_must_be_100_to_4000".into()); }

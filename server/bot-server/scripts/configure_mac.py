@@ -11,14 +11,14 @@ import shutil
 import sys
 import tempfile
 
-DEFAULT_CONFIG_DIR = Path.home() / "小呆 Server"
+DEFAULT_CONFIG_DIR = Path.home() / "Xiaodai_Server"
 LEGACY_CONFIG_DIR = Path.home() / "Library/Application Support/ai.reasonia.espbot.server"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-dir", type=Path, default=DEFAULT_CONFIG_DIR,
-                        help="Server data root; defaults to ~/小呆 Server")
+                        help="Server data root; defaults to ~/Xiaodai_Server")
     parser.add_argument("--python", type=Path, help="Local model venv python; defaults to local-models/.venv/bin/python")
     parser.add_argument("--model-dir", type=Path)
     parser.add_argument("--opencode", help="Absolute OpenCode executable, or resolve it from PATH")
@@ -33,7 +33,10 @@ def main() -> None:
         parser.error("Data migration is incomplete; recover the migration before configuring this directory")
     if (directory == DEFAULT_CONFIG_DIR.resolve() and not (directory / "brain.json").is_file()
             and (LEGACY_CONFIG_DIR / "brain.json").is_file()):
-        parser.error("Existing Bot data needs migration; run scripts/migrate_data_root.py before configuring ~/小呆 Server")
+        parser.error("Existing Bot data needs migration; run scripts/migrate_data_root.py before configuring ~/Xiaodai_Server")
+    if (directory == DEFAULT_CONFIG_DIR.resolve() and not (directory / "brain.json").is_file()
+            and (Path.home() / "小呆 Server/brain.json").is_file()):
+        parser.error("Existing Chinese data root needs scripts/relocate_data_root.py; refusing an empty installation")
     directory.mkdir(parents=True, exist_ok=True)
     directory.chmod(0o700)
     path = directory / "brain.json"

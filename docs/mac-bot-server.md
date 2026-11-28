@@ -106,7 +106,7 @@ DeepSeek 当前正式 Flash 名称以 [官方 API 文档](https://api-docs.deeps
 
 ### 3.2 本地模型
 
-以下命令用于首次安装，配置默认写入 `~/小呆 Server/brain.json`。如果旧目录
+以下命令用于首次安装，配置默认写入 `~/Xiaodai_Server/brain.json`。如果旧目录
 `~/Library/Application Support/ai.reasonia.espbot.server/` 已有 `brain.json`，
 先按第 8.1 节迁移原有数据，再修改配置。
 
@@ -116,7 +116,7 @@ DeepSeek 当前正式 Flash 名称以 [官方 API 文档](https://api-docs.deeps
 python3.11 -m venv local-models/.venv
 local-models/.venv/bin/python -m pip install -r local-models/requirements.txt
 
-XIAODAI_MODEL_DIR="$HOME/小呆 Server/models/local"
+XIAODAI_MODEL_DIR="$HOME/Xiaodai_Server/models/local"
 local-models/.venv/bin/python local-models/provision_models.py \
   --model-dir "$XIAODAI_MODEL_DIR" --only asr speaker face
 
@@ -236,7 +236,7 @@ Mac 新增独立 **WSS v3** 入口，使用 rustls、每台设备的随机 beare
 
 ## 8. 配置与数据位置
 
-默认 Mac 配置与工作目录：`~/小呆 Server/`。
+默认 Mac 配置与工作目录：`~/Xiaodai_Server/`。
 
 | 路径 | 内容 |
 | --- | --- |
@@ -258,14 +258,14 @@ python3 scripts/migrate_data_root.py
 ```
 
 默认源目录为 `~/Library/Application Support/ai.reasonia.espbot.server/`，目标为
-`~/小呆 Server/`。目标目录必须尚不存在。迁移保留原始文件和钥匙串项目，复制本地数据、
+`~/Xiaodai_Server/`。目标目录必须尚不存在。迁移保留原始文件和钥匙串项目，复制本地数据、
 模型与引擎，并通过 OpenCode 的 export/import 转移本机器人跟踪的会话。
 `inherit_config` 支持 JSON 和含行注释、块注释、末尾逗号的 JSONC；脚本先读取这些
 配置，再创建目标目录。路径调整后的副本写成目标目录中的 JSON，原配置文件保持原样。
 
 迁移完成前，目标目录内保留 `.migration-in-progress`。App 和配置助手会拒绝使用该
 目录，避免把未迁移完整的数据当成新安装。如果旧版迁移已失败并留下目标目录，先退出
-App，将整个未完成目录改名为一个尚未存在的备份名称（例如 `小呆 Server.migration-incomplete`），
+App，将整个未完成目录改名为一个尚未存在的备份名称（例如 `Xiaodai_Server.migration-incomplete`），
 然后用修正后的脚本从原始源目录重新迁移。不要只删除标记来强行启动；保留备份，直到
 确认新目录的成员、记忆、会话和模型路径符合预期。配置预检查失败且尚未创建目标目录时，
 修正提示中的配置后即可直接重试。
@@ -280,3 +280,49 @@ App，将整个未完成目录改名为一个尚未存在的备份名称（例�
 - 后续的 BLE 安全配网、真正流式 TTS、设备网页/动图播放器与电机适配分别开发。
 
 上述条目保留初次交付的后续计划；最近的实际验证以本文开头和本地模型说明为准。没有运行 CI。
+
+
+### 中文目录改为英文目录（2026-11-28）
+
+默认数据根改为 `~/Xiaodai_Server`（下划线，无空格）。先停止并退出 App，再从仓库根目录运行：
+
+```bash
+python3 server/bot-server/scripts/relocate_data_root.py \
+  --backup '/absolute/new-backup-directory' \
+  --app-bundle '/absolute/new/ESP Bot Server.app'
+```
+
+该脚本复制准备新目录，更新配置、venv 启动脚本和 OpenCode 的工作目录元数据，
+检查数据库后才把原目录移到指定备份；不改写历史消息或 instruction blob。
+数据库仍被占用、目标已存在、迁移失败都拒绝启动半成品。旧中文目录未迁移时，
+新 App 会提示迁移，不会悄悄创建空白数据。已有配对、证书、模型和音量设置保留。
+
+回滚前先退出 App，保留英文目录，再把完整备份移回原中文路径并使用备份内的旧 App；
+不要把新旧目录中的数据库或配置混合。迁移不读取/迁移旧模型 Keychain 项。
+
+本次影响安装根目录、模型环境启动脚本和核心的默认工作目录，不改变对话状态迁移、
+跨端协议、取消或队列策略，因此不新增 TLA+ 模型。`OPS-01` 将真实临时 SQLite / venv
+迁移、目录冲突、占用拒绝、失败保留、启动隔离，以及核心默认目录/显式覆盖的实现回归
+纳入完整功能套件；仍复跑全部既有 TLA+ 孪生。
+
+2026-11-28 本机实际迁移已完成：
+
+- 当前目录为 `/Users/jason/Xiaodai_Server`；完整原目录保留在
+  `/Users/jason/Library/Application Support/esp-bot/backups/data-root-20261128-110614`。
+  更新 32 个运行文件和 55 条 OpenCode 项目/会话目录；15 个受保护文件摘要一致，
+  OpenCode 全部 24 张表在归一化工作目录后逐行摘要一致，历史内容与 ID 未改写。
+  三份配置除根路径外完全一致，四个 Python 环境均从新路径启动，Qwen 的 pip 启动脚本可执行。
+- 最终完整回归报告位于
+  `/Users/jason/Library/Caches/esp-bot/regression/20261128-english-root-02/report.md`：
+  71 个自动场景通过，19 个外部验收/暂缓场景仍为 `not_run`；服务端 218、核心 91、
+  Python 29、控制台 6、固件 host 17 个用例/程序通过，全部 17 个 TLA+ 模型通过，
+  本机前端、ESP-IDF 和最终签名 App 构建通过。未运行 GitHub CI，未烧录设备。
+- 新路径真实 Qwen worker 生成两段 16 kHz 单声道 PCM16 音频，返回
+  `qwen3_mlx_robot` 且没有系统声音回退；记录在
+  `/Users/jason/Library/Caches/esp-bot/robot-english-root-acceptance-01/report.json`。
+  实际 App 自动启动成功，显示新配置路径及原有 39 个对话上下文；发送“现在几点？”后
+  返回“现在是11点15分。”，Mac 分段耗时 4.0 秒，界面报告语音已播完，随后显示
+  “小机器人 · Vivian / 模型已加载”。重新验证应用签名有效，旧中文目录没有再生成。
+- ASR/声纹这里只检查环境就绪，未重新做推理验收；人脸所需 `cv2` 在原备份与新环境中
+  都未安装，属于既有缺口。S31 声学/屏幕验收仍未运行。迁移核对收据保存在
+  `/Users/jason/Library/Caches/esp-bot/english-root-acceptance-20261128/after.json`。

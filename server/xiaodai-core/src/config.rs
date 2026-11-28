@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 
 /// The bot-server folder both engines may fully read/write. Override with `XIAODAI_WORKSPACE_ROOT`.
-pub const DEFAULT_WORKSPACE_ROOT: &str = "/Users/jason/小呆 Server";
+pub const DEFAULT_WORKSPACE_ROOT: &str = "/Users/jason/Xiaodai_Server";
 
 pub fn default_workspace_root() -> PathBuf {
     std::env::var_os("XIAODAI_WORKSPACE_ROOT")
@@ -359,6 +359,39 @@ impl Default for Config {
             workspace_root: default_workspace_root(),
             http_network: default_http_network(),
             health: HealthConfig::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_workspace_uses_english_root_and_preserves_overrides() {
+        const CHILD: &str = "ESPBOT_CORE_ROOT_TEST_EXPECTED";
+        if let Some(expected) = std::env::var_os(CHILD) {
+            let expected = PathBuf::from(expected);
+            assert_eq!(Config::default().workspace_root, expected);
+            let from_json: Config = serde_json::from_value(json!({})).unwrap();
+            assert_eq!(from_json.workspace_root, expected);
+            let explicit: Config = serde_json::from_value(json!({"workspace_root": "/tmp/custom-bot"})).unwrap();
+            assert_eq!(explicit.workspace_root, PathBuf::from("/tmp/custom-bot"));
+            return;
+        }
+        // Isolate launch environments instead of mutating the test runner's
+        // process-wide environment while other core tests are running.
+        for (setting, expected) in [
+            (None, "/Users/jason/Xiaodai_Server"),
+            (Some(""), "/Users/jason/Xiaodai_Server"),
+            (Some("/tmp/custom bot"), "/tmp/custom bot"),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args(["--exact", "config::tests::default_workspace_uses_english_root_and_preserves_overrides"])
+                .env(CHILD, expected).env_remove("XIAODAI_WORKSPACE_ROOT");
+            if let Some(value) = setting { child.env("XIAODAI_WORKSPACE_ROOT", value); }
+            let result = child.output().unwrap();
+            assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
         }
     }
 }

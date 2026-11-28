@@ -11,7 +11,7 @@
 `usb-debug.html` 是同一实现的独立开发窗口，不调用对话服务、Keychain 或模型。
 两路图像分别来自：
 
-USB 预览现已集成到 `~/小呆 Server/ESP Bot Server.app`，无需另开另一份应用。一个串口
+USB 预览现已集成到 `~/Xiaodai_Server/ESP Bot Server.app`，无需另开另一份应用。一个串口
 同时只能由一个程序占用，烧录固件前先在控制台断开 USB。
 
 - **Bot 屏幕**：使用 LVGL 的最后一次完整刷新对应的全屏缓冲区，在显示锁下复制并

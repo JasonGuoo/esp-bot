@@ -9,7 +9,10 @@
 use std::{collections::{BTreeMap, HashMap, HashSet}, path::{Path, PathBuf}, sync::{Mutex, RwLock}, time::Duration};
 use fast_responder as xd;
 use std::sync::{Arc, Weak};
-use tokio::sync::OwnedMutexGuard;
+use tokio::sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
+
+const MAX_SEMANTIC_TURNS: usize = 2;
+const LUNA_LANE_WAIT: Duration = Duration::from_millis(200);
 use futures_util::{stream::FuturesOrdered, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -136,6 +139,7 @@ pub struct FastCore {
     core: RwLock<xd::Core>,
     day: tokio::sync::Mutex<Option<String>>,
     generation_lane: Arc<tokio::sync::Mutex<()>>,
+    semantic_slots: Arc<Semaphore>,
     reserved: Mutex<Weak<Mutex<Option<CoreClaim>>>>,
     reservation_changed: tokio::sync::Notify,
     owner: Mutex<Option<(String,Weak<OwnedMutexGuard<()>>)>>,
@@ -151,6 +155,8 @@ struct Seen { thread: Option<String>, keys: HashSet<String> }
 /// The per-turn context: `full` for stateless HTTP routes and a new Luna thread, `delta`
 /// (only what the current Luna thread has not seen) for a thread that already has the rest.
 pub(crate) struct CoreContext { pub full: String, pub delta: String, keys: Vec<String> }
+
+pub(crate) struct LunaInput { thread: Option<String>, delta: bool, chars: usize }
 
 /// Lines that are about this very turn and so are sent every time.
 fn per_turn_line(line: &str) -> bool {
@@ -180,7 +186,8 @@ impl FastCore {
         let config = core_config(cfg, harness, runtime_dir);
         super::settings::private_dir(&config.workspace_root)?;
         let core = xd::Core::new(config).map_err(|e| format!("brain_core_invalid: {e}"))?;
-        Ok(Self { config: cfg.clone(), core: RwLock::new(core), day: Default::default(), generation_lane:Default::default(), reserved:Default::default(), reservation_changed:Default::default(), owner:Default::default(), last: Mutex::new(None), warmup: Mutex::new(None), seen: Default::default() })
+        Ok(Self { config: cfg.clone(), core: RwLock::new(core), day: Default::default(), generation_lane:Default::default(),
+            semantic_slots:Arc::new(Semaphore::new(MAX_SEMANTIC_TURNS)), reserved:Default::default(), reservation_changed:Default::default(), owner:Default::default(), last: Mutex::new(None), warmup: Mutex::new(None), seen: Default::default() })
     }
 
     pub(super) fn reserve_followup(&self, previous:&str) -> Option<Reservation> {
@@ -222,9 +229,34 @@ impl FastCore {
         }
     }
 
+    fn admit(&self) -> Result<OwnedSemaphorePermit,String> {
+        Arc::clone(&self.semantic_slots).try_acquire_owned().map_err(|_|"brain_core_busy".into())
+    }
+
+    /// Only Luna's ordered conversation waits for the lane. A stateless answer
+    /// must not queue behind a previous speaker's hung generation.
+    async fn bounded_lane(&self) -> Option<Arc<OwnedMutexGuard<()>>> {
+        tokio::time::timeout(LUNA_LANE_WAIT,self.acquire_lane()).await.ok().map(Arc::new)
+    }
+
     pub fn enabled(&self) -> bool { self.config.enabled }
 
     pub fn core(&self) -> xd::Core { self.core.read().map(|c| c.clone()).unwrap_or_else(|p| p.into_inner().clone()) }
+
+    // Only the inference endpoint is substituted in local gateway integration tests.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(super) fn use_loopback_model(&self, port: u16) {
+        let next = self.core().reconfigure(|cfg| {
+            let mut route = xd::Route::deepseek_flash();
+            route.id = "sim-model".into();
+            route.direct = false;
+            route.api_key_env.clear();
+            route.base_url = format!("http://127.0.0.1:{port}");
+            cfg.order = vec![route.id.clone()];
+            cfg.routes = vec![route];
+        });
+        *self.core.write().unwrap() = next;
+    }
 
     /// Session keys entered in the App override the launch environment, as for OpenCode.
     pub fn refresh_keys(&self, lookup: impl Fn(&str) -> Option<zeroize::Zeroizing<String>>) {
@@ -281,21 +313,19 @@ impl FastCore {
         split_context(now, memory, recent, limit, |key| thread.is_some() && seen.as_ref().is_some_and(|s| s.thread == thread && s.keys.contains(key)))
     }
 
-    /// The submitted-input count before a turn, to tell afterwards whether Luna received it.
-    pub(crate) fn luna_inputs(&self) -> u64 { self.core().codex().input_stats().submitted }
-
     /// After a turn: remember what Luna's thread now holds. `answered` is this turn's own
-    /// record when Luna's reply won (the thread has both sides of it). Returns what was sent.
-    pub(crate) fn mark_seen(&self, before: u64, context: CoreContext, answered: Option<&str>) -> Value {
+    /// record when Luna's reply won. The observation is captured before releasing
+    /// the lane, not from a global counter after another turn may have started.
+    pub(crate) fn mark_seen(&self, input: Option<&LunaInput>, context: CoreContext, answered: Option<&str>) -> Value {
         let core = self.core();
         let codex = core.codex();
-        let stats = codex.input_stats();
-        let sent = if stats.submitted == before { "none" } else if stats.last_delta { "delta" } else { "full" };
+        let sent = match input {None=>"none",Some(input) if input.delta=>"delta",Some(_)=>"full"};
         let measure = json!({"sent":sent,"full_chars":context.full.chars().count(),"delta_chars":context.delta.chars().count(),
-            "luna_input_chars":(sent != "none").then_some(stats.last_chars)});
-        if sent == "none" { return measure; }
+            "luna_input_chars":input.map(|input|input.chars)});
+        let Some(input)=input else{return measure};
+        if input.thread.is_none() || codex.thread_id()!=input.thread {return measure;}
         if let Ok(mut seen) = self.seen.lock() {
-            let thread = codex.thread_id();
+            let thread = input.thread.clone();
             if seen.thread != thread || seen.keys.len() > 4096 { seen.thread = thread; seen.keys.clear(); }
             seen.keys.extend(context.keys);
             if let Some(id) = answered { seen.keys.insert(format!("t:{id}")); }
@@ -422,6 +452,7 @@ pub(super) struct LiveSpeech<'a> {
     /// Late evening (21:00–06:00 household time): a softer acknowledgement.
     pub evening:bool,
     pub supplement:bool,
+    pub luna_input:Option<LunaInput>,
     reservation:Option<Reservation>,
     /// The turn's start, for content-free milestones (first sentence, first TTS audio).
     pub origin: std::time::Instant,
@@ -431,7 +462,7 @@ pub(super) struct LiveSpeech<'a> {
 impl<'a> LiveSpeech<'a> {
     pub fn new(output: Option<tokio::sync::mpsc::Sender<super::gateway::TurnUpdate>>,
                context: super::presentation::PlanContext, sources: &'a [String], reservation:Option<Reservation>) -> Self {
-        Self { output, context, sources, sent:0, spoken:Vec::new(), acknowledge:false, evening:false, supplement:false, reservation,
+        Self { output, context, sources, sent:0, spoken:Vec::new(), acknowledge:false, evening:false, supplement:false, luna_input:None, reservation,
             origin:std::time::Instant::now(), marks:BTreeMap::new() }
     }
 
@@ -509,28 +540,38 @@ impl Brain {
     /// One core turn. Cancelling (dropping) this future drops the core `Turn`, which
     /// interrupts Luna (`turn/interrupt`) and aborts HTTP streams at once.
     pub(super) async fn fast_turn(&self, turn_id: &str, transcript: &str, context: String, delta: Option<String>, speak: bool, live: &mut LiveSpeech<'_>) -> Result<FastResult, String> {
+        let quick=self.config.responsive.quick_decouple;
+        let _admission=if quick {Some(self.fast.admit()?)}else{None};
         let claim=live.reservation.take().and_then(|r|r.0.lock().ok()?.take());
         let lane=if self.fast.config.mode=="http-only" {None} else {
-            Some(match &claim {
-                Some(c)=>Arc::clone(&c.lane),
-                None=>Arc::new(self.fast.acquire_lane().await),
-            })
+            match &claim {
+                Some(c)=>Some(Arc::clone(&c.lane)),
+                None if quick=>self.fast.bounded_lane().await,
+                None=>Some(Arc::new(self.fast.acquire_lane().await)),
+            }
         };
-        self.fast.note_day(&live.context.daily_conversation_id).await;
+        if lane.is_some() || !quick {self.fast.note_day(&live.context.daily_conversation_id).await;}
         let core = self.fast.core();
         let steer_key=||core.codex().last_steer().map(|s|(s.turn_id,s.ack_ms.to_bits(),s.ok));
         let prior_steer=if claim.is_some(){steer_key()}else{None};
         let retained=claim.is_some();
+        let luna_before=core.codex().input_stats().submitted;
+        let stateless=quick && lane.is_none() && self.fast.config.mode!="http-only";
         let mut messages = vec![xd::Message { role: "system".into(), content: context }];
         // Luna's thread already holds earlier context; a new thread still gets `context`.
         if let Some(delta) = delta { messages.push(xd::Message { role: "delta".into(), content: delta }); }
         messages.push(xd::Message::user(transcript));
         let mut turn = {
-            let mut owner=self.fast.owner.lock().map_err(|_|"brain_core_owner_lock")?;
             let cancel=xd::CancellationToken::new();
-            let turn=if claim.is_some() {core.respond_messages(messages,cancel)} else {core.respond_fresh(messages,cancel)};
-            *owner=lane.as_ref().map(|l|(turn_id.to_owned(),Arc::downgrade(l)));
-            turn
+            if stateless {
+                self.emit("brain.core_lane",Some(turn_id),json!({"outcome":"stateless_fallback","wait_limit_ms":LUNA_LANE_WAIT.as_millis()}));
+                core.respond_stateless(messages,cancel).ok_or("brain_core_busy")?
+            } else {
+                let mut owner=self.fast.owner.lock().map_err(|_|"brain_core_owner_lock")?;
+                let turn=if claim.is_some() {core.respond_messages(messages,cancel)} else {core.respond_fresh(messages,cancel)};
+                *owner=lane.as_ref().map(|l|(turn_id.to_owned(),Arc::downgrade(l)));
+                turn
+            }
         };
         drop(claim); // respond_messages synchronously takes over the claim.
         let mut active_lane=lane;
@@ -581,6 +622,10 @@ impl Brain {
                         expressions.push(expression);
                     }
                     Some(xd::Event::Done { text, timings }) => {
+                        let stats=core.codex().input_stats();
+                        if active_lane.is_some() && stats.submitted>luna_before {
+                            live.luna_input=Some(LunaInput {thread:core.codex().thread_id(),delta:stats.last_delta,chars:stats.last_chars});
+                        }
                         if live.supplement {
                             let landed=retained && timings.engine.as_deref()==Some("codex") && steer_key().is_some_and(|s|s.2 && Some(s)!=prior_steer);
                             self.emit("turn.supplement_route",Some(turn_id),json!({"reason":if landed{"luna_steered"}else{"context_continuation"}}));
@@ -591,6 +636,7 @@ impl Brain {
                     },
                     Some(xd::Event::Cancelled { .. }) => return Err("cancelled".into()),
                     Some(xd::Event::Error { message, timings }) => {
+                        if message=="core semantic capacity exceeded" {return Err("brain_core_busy".into());}
                         let mut s = summary(&timings, "failed"); s["error"] = json!(message.chars().take(160).collect::<String>());
                         self.emit("brain.escalated", Some(turn_id), json!({"reason":"core_failed"}));
                         self.fast.record(s);
@@ -624,16 +670,25 @@ impl Brain {
         }
         let (segments,limited) = bounded_tagged_segments(&sentences, &expressions, &text,
             self.config.presentation.max_segments, self.config.presentation.max_segment_chars, live.sent);
-        let text=if limited {segments.iter().map(|s|s.0.as_str()).collect::<String>()} else {text};
+        let mut text=if limited {segments.iter().map(|s|s.0.as_str()).collect::<String>()} else {text};
         let outcome=if limited {"partial"} else {"answered"};
         let mut summary = summary(&timings, outcome);
         summary["sentences"] = json!(sentences.len());
         summary["tts_prefetched"] = json!(audio.len());
+        summary["stateless_fallback"] = json!(stateless);
         if limited {summary["reason"]=json!("presentation_limit");}
         self.fast.record(summary.clone());
         let expression = segments.first().map(|s| s.1).unwrap_or_else(|| super::emotion::from_keywords(&text));
-        let structured = json!({"speech":text,"expression":expression,"cards":[],"outcome":outcome,"effect":"none",
+        let mut structured = json!({"speech":text,"expression":expression,"cards":[],"outcome":outcome,"effect":"none",
             "presentation":{"segments":segments.iter().map(|(s,e)| json!({"speech":s,"expression":e,"visual":{"kind":"none"},"visual_required":false})).collect::<Vec<_>>()}});
+        if !limited {
+            if let Some(speech)=super::teaching_visuals::append(&mut structured,transcript,&self.config.presentation.media_preference,self.config.presentation.max_segments) {
+                // Append only: already frozen/live sentences keep their exact content
+                // and order. This segment's speech waits for its real image receipt.
+                text.push_str(&speech);
+                structured["speech"]=json!(text);
+            }
+        }
         let reply = HarnessReply { text, provider_id: PROVIDER_ID.into(), model_id: timings.route.clone().unwrap_or_default(),
             session_id: core.codex().thread_id().filter(|_| timings.engine.as_deref() == Some("codex")).unwrap_or_default(),
             structured: Some(structured), evidence: Vec::new() };
@@ -769,6 +824,26 @@ mod tests {
         fast.refresh_keys(|_| None);
         assert!(fast.core().available_routes().is_empty(), "cleared session key falls back to the (empty) environment");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_busy_luna_lane_has_a_deadline_and_semantic_admission_is_bounded() {
+        let dir=std::env::temp_dir().join(format!("xiaodai-core-admission-{}",uuid::Uuid::new_v4()));
+        let fast=FastCore::new(&FastCoreConfig::default(),&HarnessConfig::default(),&dir).unwrap();
+        let first=fast.admit().unwrap();
+        let blocked=fast.generation_lane.clone().lock_owned().await;
+        let second=fast.admit().unwrap();
+        assert_eq!(fast.admit().err().as_deref(),Some("brain_core_busy"));
+        assert!(tokio::time::timeout(Duration::from_secs(1),fast.bounded_lane()).await.unwrap().is_none(),
+            "an uncooperative previous generation cannot hold up stateless fallback");
+        drop(second);
+        let replacement=fast.admit().unwrap();
+        assert!(fast.admit().is_err(),"repeated requests do not build an invisible pending queue");
+        drop(blocked);
+        assert!(fast.bounded_lane().await.is_some());
+        drop((first,replacement));
+        assert_eq!(fast.semantic_slots.available_permits(),MAX_SEMANTIC_TURNS);
+        let _=std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -99,12 +99,20 @@ async fn run(
     let resp = req.send().await.map_err(|e| format!("transport: {}", e.without_url()))?;
     let status = resp.status();
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
+        let mut stream=resp.bytes_stream();let mut bytes=Vec::new();
+        while bytes.len()<1024 {match stream.next().await {
+            Some(Ok(chunk))=>bytes.extend_from_slice(&chunk[..chunk.len().min(1024-bytes.len())]),
+            _=>break,
+        }}
+        let text=String::from_utf8_lossy(&bytes);
         return Err(format!("http {}: {}", status.as_u16(), truncate(text.trim(), 200)));
     }
     let mut parser = SseParser::default();
     let mut stream = resp.bytes_stream();
-    let handle = |data: String| -> Option<Result<(), String>> {
+    let mut events=0usize;
+    let mut handle = |data: String| -> Option<Result<(), String>> {
+        events+=1;
+        if events>2048 {return Some(Err("provider event budget exceeded".into()));}
         match parse_chunk(&data) {
             Chunk::Content(s) => {
                 if tx.send((idx, AttemptMsg::Token(s))).is_err() {
@@ -125,8 +133,11 @@ async fn run(
         }
         None
     };
+    let mut received=0usize;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("stream: {}", e.without_url()))?;
+        received=received.saturating_add(chunk.len());
+        if received>2*1024*1024 {return Err("provider stream byte budget exceeded".into());}
         for data in parser.feed(&chunk) {
             if let Some(r) = handle(data) {
                 return r;

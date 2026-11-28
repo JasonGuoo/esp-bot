@@ -5,6 +5,9 @@ use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
 use tokio::sync::{watch,Semaphore};
 use super::{EventSink,artifacts::{ArtifactStore,valid_id},presentation::{PresentationPlan,OutputLease,PlaybackReceipt}};
+#[path="assistant_operations.rs"]
+mod assistant_operations;
+pub use assistant_operations::AssistantOperation;
 
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(default,deny_unknown_fields)]
@@ -106,6 +109,7 @@ impl TaskService{
           UPDATE output_leases SET revoked=1;
           UPDATE task_attempts SET state='interrupted',ended_at_ms=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE ended_at_ms IS NULL;").map_err(db_error)?;
         migrate_delivery(&db)?;
+        assistant_operations::migrate(&db)?;
         settle_interrupted(&db,"recovery_required")?;
         release_offered_rows(&db)?;
         let hint=inbox_hint_due(&db)?;
@@ -956,6 +960,10 @@ impl TaskService{
         db.execute("INSERT INTO output_leases(id,lease_json,expires_at_ms) VALUES(?1,?2,?3)",params![lease.output_lease_id,text,lease.expires_at_ms]).map_err(db_error)?;Ok(())
     }
     pub fn output_active(&self,id:&str)->Result<bool,String>{valid_id(id)?;let db=self.db.lock().map_err(|_|"task_database_lock")?;Ok(require_lease(&db,id).is_ok())}
+    pub fn revoke_output(&self,id:&str)->Result<(),String>{
+        valid_id(id)?;let db=self.db.lock().map_err(|_|"task_database_lock")?;
+        db.execute("UPDATE output_leases SET revoked=1 WHERE id=?1",[id]).map_err(db_error)?;Ok(())
+    }
     fn revoke_task_outputs(&self,task_id:&str)->Result<(),String>{
         let db=self.db.lock().map_err(|_|"task_database_lock")?;
         let plans={let mut statement=db.prepare("SELECT id,plan_json FROM presentations").map_err(db_error)?;let rows=statement.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?};

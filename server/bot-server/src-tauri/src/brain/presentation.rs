@@ -6,9 +6,10 @@ use super::scene::Scene;
 
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(default,deny_unknown_fields)]
-pub struct PresentationConfig {pub max_segments:usize,pub max_segment_chars:usize,pub reading_dwell_ms:u64}
-impl Default for PresentationConfig{fn default()->Self{Self{max_segments:16,max_segment_chars:200,reading_dwell_ms:2500}}}
+pub struct PresentationConfig {pub max_segments:usize,pub max_segment_chars:usize,pub reading_dwell_ms:u64,pub media_preference:String}
+impl Default for PresentationConfig{fn default()->Self{Self{max_segments:16,max_segment_chars:200,reading_dwell_ms:2500,media_preference:"prefer".into()}}}
 impl PresentationConfig{pub fn validate(&self)->Result<(),String>{
+    if !matches!(self.media_preference.as_str(),"prefer"|"auto"|"off"){return Err("presentation_media_preference_invalid".into());}
     if !(1..=32).contains(&self.max_segments)||!(40..=500).contains(&self.max_segment_chars)||!(500..=30_000).contains(&self.reading_dwell_ms){return Err("presentation_limits_invalid".into());}Ok(())}}
 
 #[derive(Clone,Debug,Serialize,Deserialize)]

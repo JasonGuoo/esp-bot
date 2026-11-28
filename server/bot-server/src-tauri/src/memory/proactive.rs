@@ -140,7 +140,15 @@ impl Store {
                 WHERE trigger_source=?1 AND status='offered'", [format!("reminder:{id}")]).map_err(db_error)?;
         }
         tx.commit().map_err(db_error)?;
+        if changed == 1 { self.revoke_reminder_playback(Some(id)); }
         Ok(changed == 1)
+    }
+
+    pub fn reminder_revocations(&self) -> tokio::sync::broadcast::Receiver<Option<String>> {
+        self.reminder_revocations.subscribe()
+    }
+    pub(super) fn revoke_reminder_playback(&self, id: Option<&str>) {
+        let _=self.reminder_revocations.send(id.map(str::to_owned));
     }
 
     pub fn reminders(&self, limit: usize) -> Result<Vec<Reminder>, String> {

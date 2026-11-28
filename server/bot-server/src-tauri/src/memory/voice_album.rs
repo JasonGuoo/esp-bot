@@ -359,14 +359,11 @@ impl Store {
             None
         } else if let Some(id) = p["person_id"].as_str() {
             super::profile_merge::active_profile(&tx, id)?;
+            let name:String=tx.query_row("SELECT display_name FROM profiles WHERE id=?1",[id],|r|r.get(0)).map_err(db_error)?;
+            super::names::validate(&name)?;
             Some(id.to_owned())
         } else {
-            let name = super::store::clean_text(
-                p["name"].as_str().ok_or("voice_name_required")?,
-                80,
-                false,
-                "display_name",
-            )?;
+            let name = super::names::validate(p["name"].as_str().ok_or("voice_name_required")?)?;
             // The picker uses an ID for existing people; typed new names must be unambiguous.
             let exists: bool = tx
                 .query_row(
@@ -507,6 +504,31 @@ mod tests {
     }
     fn group_ref(g: &Value) -> Value {
         json!({"group_id":g["id"],"revision":g["revision"]})
+    }
+
+    #[test]
+    fn voice_group_names_share_the_profile_policy_and_legacy_names_are_not_spoken() {
+        let home=Home::fresh();let store=home.open();let now=now_ms();
+        store.voice_review_settings(&json!({"enabled":true})).unwrap();
+        let rev=input(&store,"name-policy",now,None);
+        observation(&store,"name-policy",rev,&[("SPEAKER_00",0,false)]);
+        let original=groups(&store);
+        for invalid in ["妈妈","傻 B"] {
+            let mut payload=group_ref(&original[0]);payload["name"]=json!(invalid);
+            assert!(store.edit_voice_group("household.voice.name",&payload).is_err());
+            assert!(store.list_profiles().unwrap().is_empty());
+            assert_eq!(groups(&store),original,"a rejected name does not revise or bind the group");
+        }
+        let mut payload=group_ref(&original[0]);payload["name"]=json!("Jason");
+        let named=store.edit_voice_group("household.voice.name",&payload).unwrap();
+        let person=named["person_id"].as_str().unwrap();
+        assert!(store.household_turn_speaker("name-policy").unwrap().unwrap().nameable);
+        // Simulate an old profile without rewriting or deleting user data on migration.
+        store.connection().unwrap().execute("UPDATE profiles SET display_name='妈妈' WHERE id=?1",[person]).unwrap();
+        assert!(!store.household_turn_speaker("name-policy").unwrap().unwrap().nameable);
+        let mut existing=group_ref(&groups(&store)[0]);existing["person_id"]=json!(person);
+        assert_eq!(store.edit_voice_group("household.voice.name",&existing).unwrap_err(),"name_is_role_word");
+        assert_eq!(store.list_profiles().unwrap()[0].display_name,"妈妈","legacy names remain available for owner correction");
     }
 
     #[test]

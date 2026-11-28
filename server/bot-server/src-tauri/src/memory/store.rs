@@ -20,6 +20,9 @@ pub struct Store {
     pub(super) config: MemoryConfig,
     db: Mutex<Connection>,
     path: PathBuf,
+    // Bounded, process-local playback fences. Lagging consumers fail closed;
+    // the database remains authoritative after a reconnect or process restart.
+    pub(super) reminder_revocations: tokio::sync::broadcast::Sender<Option<String>>,
 }
 
 #[derive(Clone, Debug)]
@@ -29,7 +32,7 @@ pub struct MemoryJob { pub id: String, pub transcript: String }
 pub struct ExtractedFact { pub content: String, pub category: String, pub scope: String, pub quote: String }
 
 pub(super) fn insert_profile(db:&Connection,input:NewProfile,max_profiles:usize)->Result<Profile,String> {
-    let name=clean_text(&input.display_name,80,false,"display_name")?;
+    let name=super::names::validate(&input.display_name)?;
     let count: i64 = db.query_row("SELECT count(*) FROM profiles", [], |r| r.get(0)).map_err(db_error)?;
     if count >= max_profiles as i64 {
         return Err("profile capacity reached; remove an unused profile first".into());
@@ -49,8 +52,14 @@ pub(super) fn insert_profile(db:&Connection,input:NewProfile,max_profiles:usize)
         "INSERT INTO profiles(id, display_name, is_child, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![profile.id, profile.display_name, profile.is_child, now, now],
     ).map_err(db_error)?;
+    record_name_validation(db,&profile.id)?;
     set_age_band(db, &profile.id, age_band.as_deref())?;
     Ok(profile)
+}
+
+fn record_name_validation(db:&Connection,id:&str)->Result<(),String>{
+    db.execute("INSERT INTO profile_name_validation(profile_id,policy_version,validated_at_ms) VALUES(?1,?2,?3) ON CONFLICT(profile_id) DO UPDATE SET policy_version=excluded.policy_version,validated_at_ms=excluded.validated_at_ms",
+        params![id,super::names::POLICY_VERSION,now_ms()]).map_err(db_error)?;Ok(())
 }
 
 /// Guardian-entered age bands; never inferred.
@@ -154,7 +163,8 @@ impl Store {
         // Additive tables that older builds simply ignore, so user_version stays 6 and a
         // rollback to an older App still opens this database.
         db.execute_batch(include_str!("additive_schema.sql")).map_err(db_error)?;
-        let store = Arc::new(Self { config, db: Mutex::new(db), path });
+        let store = Arc::new(Self { config, db: Mutex::new(db), path,
+            reminder_revocations: tokio::sync::broadcast::channel(64).0 });
         store.initialize_household()?;
         store.purge_expired()?;
         Ok(store)
@@ -175,7 +185,7 @@ impl Store {
 
     pub fn update_profile(&self, id: &str, input: NewProfile) -> Result<Profile, String> {
         validate_id(id)?;
-        let name = clean_text(&input.display_name, 80, false, "display_name")?;
+        let name = super::names::validate(&input.display_name)?;
         // Absent keeps the current band; "" clears it.
         let band = input.age_band.as_deref().map(|raw| age_band(Some(raw))).transpose()?;
         let mut db = self.connection()?;
@@ -186,6 +196,7 @@ impl Store {
             "UPDATE profiles SET display_name = ?1, is_child = ?2, updated_at_ms = ?3 WHERE id = ?4",
             params![name, input.is_child, now_ms(), id],
         ).map_err(db_error)?;
+        record_name_validation(&tx,id)?;
         let result = tx.query_row(
             "SELECT p.id, p.display_name, p.is_child, p.created_at_ms, p.updated_at_ms, NULL, d.age_band FROM profiles p LEFT JOIN profile_details d ON d.profile_id=p.id WHERE p.id = ?1",
             [id], profile_row,
@@ -215,7 +226,7 @@ impl Store {
         super::household::forget_profile_data(&tx,id)?;
         tx.execute("DELETE FROM profiles WHERE id = ?1", [id]).map_err(db_error)?;
         bump_revision(&tx)?;
-        tx.commit().map_err(db_error)
+        tx.commit().map_err(db_error)?;self.revoke_reminder_playback(None);Ok(())
     }
 
     /// An explicit parent-console save. An assistant suggestion can be stored
@@ -598,7 +609,7 @@ impl Store {
         tx.execute("DELETE FROM unattributed_observations WHERE conversation_id = ?1",[conversation_id]).map_err(db_error)?;
         tx.execute("DELETE FROM conversations WHERE id = ?1", [conversation_id]).map_err(db_error)?;
         bump_revision(&tx)?;
-        tx.commit().map_err(db_error)
+        tx.commit().map_err(db_error)?;self.revoke_reminder_playback(None);Ok(())
     }
 
     pub fn forget_all_conversations(&self, delete_observations: bool) -> Result<usize, String> {
@@ -984,6 +995,26 @@ mod background_tests {
         assert_eq!(reopened.household_dated_items(&receipt.daily_conversation_id,7,true).unwrap().len(), 2);
         drop(reopened);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn profile_names_are_validated_before_any_write_and_keep_a_policy_receipt() {
+        let dir=std::env::temp_dir().join(format!("xiaodai-names-{}",Uuid::new_v4()));
+        let store=Store::open(dir.clone(),MemoryConfig::default()).unwrap();
+        let profile=|name:&str|NewProfile{display_name:name.into(),is_child:false,age_band:None};
+        for bad in ["妈妈","Ｍｏｍ","s h a b i"] {assert!(store.create_profile(profile(bad)).is_err());}
+        assert!(store.list_profiles().unwrap().is_empty());
+        let saved=store.create_profile(profile("Jason")).unwrap();
+        assert_eq!(store.update_profile(&saved.id,profile("爸爸")).unwrap_err(),"name_is_role_word");
+        assert_eq!(store.list_profiles().unwrap()[0].display_name,"Jason");
+        let db=store.connection().unwrap();
+        let checks:Vec<String>=db.prepare("SELECT policy_version FROM profile_name_validation").unwrap()
+            .query_map([],|row|row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(checks,vec![super::super::names::POLICY_VERSION.to_owned()]);
+        drop(db);drop(store);
+        let reopened=Store::open(dir.clone(),MemoryConfig::default()).unwrap();
+        assert_eq!(reopened.list_profiles().unwrap()[0].display_name,"Jason");
+        drop(reopened);let _=fs::remove_dir_all(dir);
     }
 
     #[test]

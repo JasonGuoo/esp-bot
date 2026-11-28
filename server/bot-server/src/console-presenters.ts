@@ -174,13 +174,20 @@ export function renderTurnTimings(value: unknown): HTMLElement | null {
   return details;
 }
 
+export function ttsVoiceText(value: unknown): string {
+  const model = object(value);
+  if (model.fallback_reason) return `已回退到系统声音：${text(model.default_voice, "系统默认")}`;
+  if (model.backend === "qwen3_mlx_robot") return "小机器人 · Vivian";
+  return `声音：${text(model.default_voice, "系统默认")}`;
+}
+
 export function renderCapabilities(root: HTMLElement, value?: unknown): void {
   const report = object(value);
   const models = object(object(report.models).models);
   const host = find(root, "#cc-model-capabilities"); host.replaceChildren();
   for (const [kind, label, description] of [
     ["asr", "语音转文字", "本地识别主动发送的录音"],
-    ["tts", "语音朗读", "使用已安装的 macOS 声音"],
+    ["tts", "语音朗读", "使用所选本地语音引擎，实际听感需试听"],
     ["face", "人脸识别", "本机登记与寻找成员候选"],
     ["speaker", "声纹识别", "本机提取声音特征"],
   ]) {
@@ -196,7 +203,7 @@ export function renderCapabilities(root: HTMLElement, value?: unknown): void {
     if (kind === "asr" && model.backend === "rma_qwen3_asr_decode_only") card.append(node("p", "", "Qwen3-ASR · RMA 优化引擎"));
     if (model.loaded === true) card.append(node("p", "", "模型已加载"));
     if (list(model.missing_dependencies).length) card.append(node("p", "", `待安装：${list(model.missing_dependencies).map(item => text(item)).join("、")}`));
-    if (kind === "tts" && model.available === true) card.append(node("p", "", `声音：${text(model.default_voice, "系统默认")}，尚未试听`));
+    if (kind === "tts" && model.available === true) card.append(node("p", "", ttsVoiceText(model)));
     host.append(card);
   }
 }

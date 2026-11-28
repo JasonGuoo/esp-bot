@@ -2,7 +2,7 @@
 
 **2026-11-16 目标边界：** 下一阶段将[家庭日记录、设备激活、Mac 任务和输出许可分开](specs/household-companion/README.md#3-必须分开的生命周期)，并在 Mac 并行 ASR 与声纹。下文描述当前可用 v3 入口；新增 ID/能力/状态尚未作为线协议实现，必须先完成 HC-01 的版本协商和旧端兼容。日会话存续不延长录音权限，后台任务完成不自动重新取得设备输出许可。详见 [设备与音频](specs/household-companion/device-and-audio.md)及[呈现与任务](specs/household-companion/presentation-and-tasks.md)。
 
-数据目录为 `~/小呆 Server`；Mac 和 ESP32-S31 固件均已接入 v3。设备联网、
+数据目录为 `~/Xiaodai_Server`；Mac 和 ESP32-S31 固件均已接入 v3。设备联网、
 无线握手及完整语音对话的实际验证状态以 [最近验收记录](review-acceptance-2026-11-15.md)
 为准。字段、帧布局和错误规则详见 [mac-brain-v3.md](../shared/mac-brain-v3.md)。
 
@@ -60,7 +60,7 @@ Espressif mDNS 查询同一局域网中与配对 CA 匹配的记录，再把解�
 Mac 配置位于：
 
 ```text
-~/小呆 Server/brain.json
+~/Xiaodai_Server/brain.json
 ```
 
 首次默认 `gateway.enabled=false`，最大连接数为 4。USB 配对后监听 `0.0.0.0:7443`，
@@ -73,8 +73,8 @@ models、memory 等其他配置；不要把这个片段当作替换全部配置�
   "gateway": {
     "enabled": true,
     "bind": "0.0.0.0:7443",
-    "certificate_pem": "/Users/YOUR_ACCOUNT/小呆 Server/tls/gateway-cert.pem",
-    "private_key_pem": "/Users/YOUR_ACCOUNT/小呆 Server/tls/gateway-key.pem",
+    "certificate_pem": "/Users/YOUR_ACCOUNT/Xiaodai_Server/tls/gateway-cert.pem",
+    "private_key_pem": "/Users/YOUR_ACCOUNT/Xiaodai_Server/tls/gateway-key.pem",
     "max_connections": 4
   }
 }
@@ -175,7 +175,7 @@ HTTPS URL 和解释文字，不是可执行 HTML；只有家长批准的 `conver
 | 操作 | 实际影响 | 不代表什么 |
 | --- | --- | --- |
 | 设备 `assistant.cancel` | 取消本连接采集、当前回合及音频下行，保留会话 | 不删除保存的文字/记忆 |
-| 设备 `session.close` | 同时结束激活会话，下次需明确唤醒/触摸 | 不删除 harness 会话或长期记忆 |
+| 设备 `session.close` | 结束激活会话，下次需明确唤醒/触摸。带 runtime 的请求须匹配当前轮；刚接纳补话、尚未接纳新输入时，也允许固件用同会话、epoch 和 turn_id 各加一且 focus_generation 为零的后继 token 关闭 | 不删除 harness 会话或长期记忆 |
 | 家长 `assistant.cancel` | 可按字符串 turn_id 取消；未指定时全局取消并清除设备激活会话 | 不自动撤销设备凭据 |
 | `service.stop` | 停止接收新回合、取消活动流程并关闭服务 | 不把配置恢复为默认值 |
 | `device.credentials.revoke` | 阻止设备继续访问，并使现有连接断开 | 不删除档案、声纹、人脸或对话 |

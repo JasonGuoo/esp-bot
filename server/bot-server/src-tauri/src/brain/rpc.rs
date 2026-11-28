@@ -72,11 +72,13 @@ impl BrainHost {
         }
         if method.starts_with("proactive.") {
             // Owner settings, reminders and the journal of unprompted lines (§12.2).
+            if matches!(method,"proactive.settings.set"|"proactive.reminder.add"|"proactive.reminder.cancel") {brain.assistant.invalidate();}
             return brain.memory.proactive_rpc(method,&payload)?.ok_or_else(||"unsupported_proactive_method".into());
         }
         if method.starts_with("household.") {
             let mutation=matches!(method,"household.settings.set"|"household.voice.name"|"household.voice.separate"|"household.annotate"|"household.correct"|"household.forget"|"household.memory.confirm"|"household.memory.forget");
             if mutation {
+                brain.assistant.invalidate();
                 brain.cancel_scoped(CancelScope::All,"memory_changed").await?;
                 let _gate=brain.turn_gate.write().await;
                 let sources=brain.memory.household_mutation_sources(method,&payload)?;
@@ -101,6 +103,7 @@ impl BrainHost {
             return brain.memory.household_rpc(method,&payload)?.ok_or_else(||"unsupported_household_method".into());
         }
         match method {
+            "assistant.capabilities"=>Ok(brain.assistant.catalog(brain.memory.household_policy_revision()?)),
             "contracts.get" => Ok(contracts::capabilities()),
             "tasks.status" => Ok(brain.tasks.status()),
             "tasks.list" => value(brain.tasks.list(payload["household_id"].as_str(),payload["state"].as_str(),payload["limit"].as_u64().unwrap_or(100) as usize)?),
@@ -231,6 +234,7 @@ impl BrainHost {
             // Editing/revoking a note removes its old injected copies without
             // deleting local history, conversation ownership or extraction jobs.
             "memory.save" | "memory.delete" | "profile.delete" | "profile.update" | "memory.purge" => {
+                brain.assistant.invalidate();
                 brain.cancel_scoped(CancelScope::All,"memory_changed").await?;
                 let _gate = brain.turn_gate.write().await;
                 brain.invalidate_contexts_locked().await?;

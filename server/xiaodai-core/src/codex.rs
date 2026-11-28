@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
@@ -233,15 +233,28 @@ fn collect_strings(v: &Value, out: &mut Vec<String>) {
 // ---------------------------------------------------------------------------------------------
 
 type PendingMap = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
-type SubMap = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>>;
+type SubMap = Arc<Mutex<HashMap<String, mpsc::Sender<Value>>>>;
+const MAX_RPC_LINE: usize = 512 * 1024;
+const MAX_RPC_PENDING: usize = 32;
+const MAX_RPC_OUTGOING: usize = 32;
+const MAX_RPC_SUBSCRIPTIONS: usize = 4;
+const MAX_RPC_NOTIFICATIONS: usize = 64;
+
+/// Dropping a cancelled request removes its waiter even if the server never
+/// answers. Capacity cannot be held forever by abandoned timeout futures.
+struct PendingRequest { pending: PendingMap, id: i64 }
+impl Drop for PendingRequest {
+    fn drop(&mut self) { self.pending.lock().unwrap().remove(&self.id); }
+}
 
 pub struct RpcConn {
-    out: mpsc::UnboundedSender<String>,
+    out: mpsc::Sender<String>,
     next_id: AtomicI64,
     pending: PendingMap,
     subs: SubMap,
     alive: Arc<AtomicBool>,
     closed: CancellationToken,
+    failure: Arc<Mutex<Option<&'static str>>>,
     /// Audit trail of server-request decisions (method + decision only).
     pub audit: Arc<Mutex<Vec<String>>>,
     _child: Mutex<Option<tokio::process::Child>>,
@@ -250,15 +263,16 @@ pub struct RpcConn {
 impl RpcConn {
     /// Wrap an app-server's stdout (`reader`) and stdin (`writer`).
     pub fn from_io(reader: BoxRead, writer: BoxWrite, policy: WorkspacePolicy) -> Self {
-        let (out, out_rx) = mpsc::unbounded_channel::<String>();
+        let (out, out_rx) = mpsc::channel::<String>(MAX_RPC_OUTGOING);
         let pending: PendingMap = Default::default();
         let subs: SubMap = Default::default();
         let alive = Arc::new(AtomicBool::new(true));
         let closed = CancellationToken::new();
+        let failure=Arc::new(Mutex::new(None));
         let audit: Arc<Mutex<Vec<String>>> = Default::default();
-        tokio::spawn(writer_loop(writer, out_rx));
-        tokio::spawn(reader_loop(reader, pending.clone(), subs.clone(), out.clone(), policy, alive.clone(), closed.clone(), audit.clone()));
-        Self { out, next_id: AtomicI64::new(1), pending, subs, alive, closed, audit, _child: Mutex::new(None) }
+        tokio::spawn(writer_loop(writer,out_rx,closed.clone(),failure.clone()));
+        tokio::spawn(reader_loop(reader, pending.clone(), subs.clone(), out.clone(), policy, alive.clone(), closed.clone(), audit.clone(),failure.clone()));
+        Self { out, next_id: AtomicI64::new(1), pending, subs, alive, closed, failure, audit, _child: Mutex::new(None) }
     }
 
     pub fn spawn(bin: &Path, args: &[String], policy: WorkspacePolicy) -> Result<Self, String> {
@@ -277,7 +291,11 @@ impl RpcConn {
     }
 
     pub fn is_alive(&self) -> bool {
-        self.alive.load(Ordering::SeqCst)
+        self.alive.load(Ordering::SeqCst) && !self.closed.is_cancelled()
+    }
+
+    fn failure_text(&self) -> &'static str {
+        self.failure.lock().unwrap().unwrap_or("codex app-server exited")
     }
 
     /// Fires when the app-server's stdout closes (child exited / crashed).
@@ -291,16 +309,19 @@ impl RpcConn {
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
         let line = json!({ "id": id, "method": method, "params": params }).to_string();
-        if self.out.send(line).is_err() {
-            self.pending.lock().unwrap().remove(&id);
-            return Err("codex app-server is not running".into());
+        if line.len()>MAX_RPC_LINE {return Err("codex request exceeds byte budget".into());}
+        {
+            let mut pending=self.pending.lock().unwrap();
+            if pending.len()>=MAX_RPC_PENDING {return Err("codex request queue is full".into());}
+            pending.insert(id,tx);
         }
+        let _pending=PendingRequest{pending:self.pending.clone(),id};
+        self.out.try_send(line).map_err(|_|"codex write queue is full or closed")?;
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(v))) => Ok(v),
             Ok(Ok(Err(e))) => Err(format!("{method}: {e}")),
-            Ok(Err(_)) => Err(format!("{method}: codex app-server exited")),
+            Ok(Err(_)) => Err(format!("{method}: {}",self.failure_text())),
             Err(_) => {
                 self.pending.lock().unwrap().remove(&id);
                 Err(format!("{method}: timed out after {} ms", timeout.as_millis()))
@@ -309,14 +330,24 @@ impl RpcConn {
     }
 
     pub fn notify(&self, method: &str, params: Value) {
-        let _ = self.out.send(json!({ "method": method, "params": params }).to_string());
+        let line=json!({ "method": method, "params": params }).to_string();
+        if line.len()>MAX_RPC_LINE || self.out.try_send(line).is_err() {
+            *self.failure.lock().unwrap()=Some("codex notification queue overflow");
+            self.closed.cancel();
+        }
     }
 
     /// Route notifications carrying `params.threadId == thread_id` to the returned receiver.
-    pub fn subscribe(&self, thread_id: &str) -> mpsc::UnboundedReceiver<Value> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    pub fn subscribe(&self, thread_id: &str) -> mpsc::Receiver<Value> {
+        let (tx, rx) = mpsc::channel(MAX_RPC_NOTIFICATIONS);
         if self.is_alive() {
-            self.subs.lock().unwrap().insert(thread_id.to_owned(), tx);
+            let mut subs=self.subs.lock().unwrap();
+            if subs.len()<MAX_RPC_SUBSCRIPTIONS && !subs.contains_key(thread_id) {
+                subs.insert(thread_id.to_owned(), tx);
+            } else {
+                *self.failure.lock().unwrap()=Some("codex subscription capacity or ownership conflict");
+                self.closed.cancel();
+            }
         }
         rx
     }
@@ -326,13 +357,19 @@ impl RpcConn {
     }
 }
 
-async fn writer_loop(mut w: BoxWrite, mut rx: mpsc::UnboundedReceiver<String>) {
-    while let Some(mut line) = rx.recv().await {
+async fn writer_loop(mut w: BoxWrite, mut rx: mpsc::Receiver<String>,closed:CancellationToken,failure:Arc<Mutex<Option<&'static str>>>) {
+    loop {
+        let message=tokio::select!{biased;_ = closed.cancelled()=>break,message=rx.recv()=>message};
+        let Some(mut line)=message else{break};
         line.push('\n');
-        if w.write_all(line.as_bytes()).await.is_err() || w.flush().await.is_err() {
+        let write=async {w.write_all(line.as_bytes()).await?;w.flush().await};
+        let result=tokio::select!{biased;_ = closed.cancelled()=>break,result=tokio::time::timeout(Duration::from_secs(3),write)=>result};
+        if !matches!(result,Ok(Ok(()))) {
+            *failure.lock().unwrap()=Some("codex write failed or timed out");
             break;
         }
     }
+    closed.cancel();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -340,16 +377,25 @@ async fn reader_loop(
     r: BoxRead,
     pending: PendingMap,
     subs: SubMap,
-    out: mpsc::UnboundedSender<String>,
+    out: mpsc::Sender<String>,
     policy: WorkspacePolicy,
     alive: Arc<AtomicBool>,
     closed: CancellationToken,
     audit: Arc<Mutex<Vec<String>>>,
+    failure: Arc<Mutex<Option<&'static str>>>,
 ) {
-    let mut lines = BufReader::new(r).lines();
+    let mut reader = BufReader::new(r);
     // fileChange item id -> paths, learned from item/started so approvals can be checked.
     let mut file_items: HashMap<String, Vec<String>> = HashMap::new();
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        let mut bytes=Vec::new();
+        let mut limited=(&mut reader).take(MAX_RPC_LINE as u64+1);
+        let read=tokio::select!{biased;_ = closed.cancelled()=>break,read=limited.read_until(b'\n',&mut bytes)=>read};
+        if !matches!(read,Ok(n) if n>0) {break;}
+        if bytes.len()>MAX_RPC_LINE {
+            *failure.lock().unwrap()=Some("codex input line exceeds byte budget");break;
+        }
+        let Ok(line)=std::str::from_utf8(&bytes) else{continue};
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -360,12 +406,15 @@ async fn reader_loop(
         match (method, id) {
             (Some(m), Some(id)) => {
                 let (res, note) = policy.handle(m, &v["params"], &file_items);
-                audit.lock().unwrap().push(note);
+                {let mut entries=audit.lock().unwrap();if entries.len()==128{entries.remove(0);}entries.push(note);}
                 let msg = match res {
                     Ok(r) => json!({ "id": id, "result": r }),
                     Err((code, message)) => json!({ "id": id, "error": { "code": code, "message": message } }),
                 };
-                let _ = out.send(msg.to_string());
+                let reply=msg.to_string();
+                if reply.len()>MAX_RPC_LINE || out.try_send(reply).is_err() {
+                    *failure.lock().unwrap()=Some("codex response queue overflow");break;
+                }
             }
             (Some(m), None) => {
                 if m == "item/started" || m == "item/completed" {
@@ -373,6 +422,9 @@ async fn reader_loop(
                     if item["type"] == "fileChange" {
                         let paths = item["changes"].as_array().map(|a| a.iter().filter_map(|c| c["path"].as_str().map(str::to_owned)).collect()).unwrap_or_default();
                         if let Some(iid) = item["id"].as_str() {
+                            if file_items.len()>=256 && !file_items.contains_key(iid) {
+                                *failure.lock().unwrap()=Some("codex file item budget exceeded");break;
+                            }
                             file_items.insert(iid.to_owned(), paths);
                         }
                     }
@@ -380,7 +432,9 @@ async fn reader_loop(
                 if let Some(tid) = v["params"]["threadId"].as_str() {
                     let tx = subs.lock().unwrap().get(tid).cloned();
                     if let Some(tx) = tx {
-                        let _ = tx.send(v);
+                        if tx.try_send(v).is_err() {
+                            *failure.lock().unwrap()=Some("codex notification queue overflow");break;
+                        }
                     }
                 }
             }
@@ -464,10 +518,24 @@ struct Sink {
     idx: usize,
     tx: mpsc::UnboundedSender<(usize, AttemptMsg)>,
     cancel: CancellationToken,
+    budget: Arc<Mutex<(usize,usize,bool)>>,
 }
 
 impl Sink {
+    fn new(idx:usize,tx:mpsc::UnboundedSender<(usize,AttemptMsg)>,cancel:CancellationToken)->Self {
+        Self{idx,tx,cancel,budget:Default::default()}
+    }
     fn send(&self, m: AttemptMsg) {
+        let bytes=match &m {AttemptMsg::Token(text)|AttemptMsg::Failed(text)|AttemptMsg::Network(text)=>text.len(),_=>0};
+        let mut budget=self.budget.lock().unwrap();
+        if budget.2 {return;}
+        if budget.0>=2048 || budget.1.saturating_add(bytes)>256*1024 {
+            budget.2=true;
+            let _=self.tx.send((self.idx,AttemptMsg::Failed("codex semantic stream exceeded its budget".into())));
+            self.cancel.cancel();
+            return;
+        }
+        budget.0+=1;budget.1+=bytes;
         let _ = self.tx.send((self.idx, m));
     }
 }
@@ -1038,7 +1106,7 @@ impl CodexEngine {
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
-        let act = Active::new(0, Sink { idx: 0, tx, cancel: cancel.clone() });
+        let act = Active::new(0, Sink::new(0,tx,cancel.clone()));
         let params = self.turn_params(&tid, PROBE_TEXT, &model, &effort);
         let t = Instant::now();
         let h = tokio::spawn(run_turn(conn, tid, params, act, timeout, None, None));
@@ -1277,7 +1345,7 @@ impl CodexEngine {
         if prime {
             let t = Instant::now();
             let (tx, mut rx) = mpsc::unbounded_channel();
-            let act = Active::new(0, Sink { idx: 0, tx, cancel: CancellationToken::new() });
+            let act = Active::new(0, Sink::new(0,tx,CancellationToken::new()));
             let params = self.turn_params(&tid, "你好", model, effort);
             run_turn(conn.clone(), tid.clone(), params, act, Duration::from_millis(cfg.turn_timeout_ms), None, None).await;
             while let Ok((_, m)) = rx.try_recv() {
@@ -1400,7 +1468,7 @@ impl CodexEngine {
                     a.steer_pending.store(true, Ordering::SeqCst);
                     a.steer_suppress.store(false, Ordering::SeqCst);
                     *slot = Some(SteerHold::Ready { id, buffered, overflow });
-                    let old = std::mem::replace(&mut *sink, Sink { idx, tx: tx.clone(), cancel: cancel.clone() });
+                    let old = std::mem::replace(&mut *sink, Sink::new(idx,tx.clone(),cancel.clone()));
                     *a.claim.lock().unwrap() = None;
                     drop(slot);
                     drop(sink);
@@ -1483,7 +1551,7 @@ impl CodexEngine {
             }
         };
         let id = self.inner.next_active.fetch_add(1, Ordering::SeqCst);
-        let act = Active::new(id, Sink { idx, tx, cancel });
+        let act = Active::new(id, Sink::new(idx,tx,cancel));
         *self.inner.active.lock().unwrap() = Some(act.clone());
         let text = match &input.delta {
             Some(delta) if !fresh => delta,
@@ -1538,7 +1606,18 @@ async fn run_turn(
                     return;
                 }
             },
-            Some(n) = rx.recv() => buffered.push(n),
+            Some(n) = rx.recv() => {
+                if buffered.len()>=MAX_RPC_NOTIFICATIONS {
+                    let error="codex start notification budget exceeded".to_string();
+                    *conn.failure.lock().unwrap()=Some("codex start notification budget exceeded");
+                    conn.closed.cancel();
+                    act.sink.lock().unwrap().send(AttemptMsg::Failed(error.clone()));
+                    finish(&act);
+                    if let Some(s)=started {let _=s.send(Err(error));}
+                    return;
+                }
+                buffered.push(n);
+            },
         }
     };
     act.turn_id = Some(turn_id.clone());
@@ -1631,7 +1710,7 @@ async fn run_turn(
                         if let Err(v) = push_buffered(&act, n) { pending.push_back((0, v)); }
                     } else {
                         let sink = act.sink.lock().unwrap();
-                        if cancelled_at.is_none() { sink.send(AttemptMsg::Failed("codex app-server exited mid-turn".into())); }
+                        if cancelled_at.is_none() { sink.send(AttemptMsg::Failed(conn.failure_text().into())); }
                         act.finishing.store(true, Ordering::SeqCst);
                         break;
                     }
@@ -1669,7 +1748,7 @@ async fn run_turn(
                     }
                     None => {
                         let sink = act.sink.lock().unwrap();
-                        if cancelled_at.is_none() { sink.send(AttemptMsg::Failed("codex app-server exited mid-turn".into())); }
+                        if cancelled_at.is_none() { sink.send(AttemptMsg::Failed(conn.failure_text().into())); }
                         act.finishing.store(true, Ordering::SeqCst);
                         break;
                     }
@@ -1694,7 +1773,7 @@ async fn run_turn(
                     Some(n) => Some((0, n)),
                     None => {
                         let sink = act.sink.lock().unwrap();
-                        if cancelled_at.is_none() { sink.send(AttemptMsg::Failed("codex app-server exited mid-turn".into())); }
+                        if cancelled_at.is_none() { sink.send(AttemptMsg::Failed(conn.failure_text().into())); }
                         act.finishing.store(true, Ordering::SeqCst);
                         break;
                     }
@@ -1987,6 +2066,72 @@ mod tests {
         assert_eq!(norm_model("GPT-6 Luna"), "gpt-6-luna");
         assert_eq!(norm_model("gpt-6-luna"), "gpt-6-luna");
         assert_ne!(norm_model("gpt-5.6-luna"), norm_model("gpt-6 luna"));
+    }
+
+    /// Framing: split writes, CRLF, blank lines, string ids from the server, and EOF handling.
+    #[tokio::test]
+    async fn cancelled_requests_release_their_pending_capacity() {
+        let (client,server)=tokio::io::duplex(1024);
+        let (cr,cw)=tokio::io::split(client);
+        let conn=Arc::new(RpcConn::from_io(Box::pin(cr),Box::pin(cw),pol()));
+        let (sr,_sw)=tokio::io::split(server);
+        let mut lines=BufReader::new(sr).lines();
+        for _ in 0..MAX_RPC_PENDING*2 {
+            let rpc=Arc::clone(&conn);
+            let task=tokio::spawn(async move {rpc.request("never/answer",json!({}),Duration::from_secs(60)).await});
+            lines.next_line().await.unwrap().unwrap();
+            assert_eq!(conn.pending.lock().unwrap().len(),1);
+            task.abort();let _=task.await;
+            assert!(conn.pending.lock().unwrap().is_empty());
+        }
+        assert!(conn.is_alive());
+    }
+
+    #[tokio::test]
+    async fn notification_overflow_closes_the_stream_without_skipping_its_prefix() {
+        let (client,server)=tokio::io::duplex(4096);
+        let (cr,cw)=tokio::io::split(client);
+        let conn=RpcConn::from_io(Box::pin(cr),Box::pin(cw),pol());
+        let (_sr,mut sw)=tokio::io::split(server);
+        let mut sub=conn.subscribe("flood");
+        for index in 0..=MAX_RPC_NOTIFICATIONS {
+            let line=json!({"method":"item/agentMessage/delta","params":{"threadId":"flood","delta":index.to_string()}}).to_string()+"\n";
+            sw.write_all(line.as_bytes()).await.unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(1),conn.closed().cancelled()).await.unwrap();
+        for index in 0..MAX_RPC_NOTIFICATIONS {assert_eq!(sub.recv().await.unwrap()["params"]["delta"],index.to_string());}
+        assert!(sub.recv().await.is_none());
+        assert_eq!(conn.failure_text(),"codex notification queue overflow");
+        assert!(!conn.is_alive());
+    }
+
+    #[tokio::test]
+    async fn rpc_line_and_outgoing_queues_have_finite_budgets() {
+        let (client,mut server)=tokio::io::duplex(MAX_RPC_LINE+1);
+        let (cr,cw)=tokio::io::split(client);
+        let conn=RpcConn::from_io(Box::pin(cr),Box::pin(cw),pol());
+        server.write_all(&vec![b'x';MAX_RPC_LINE+1]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1),conn.closed().cancelled()).await.unwrap();
+        assert_eq!(conn.failure_text(),"codex input line exceeds byte budget");
+
+        let (client,_server)=tokio::io::duplex(64);
+        let (cr,cw)=tokio::io::split(client);
+        let conn=RpcConn::from_io(Box::pin(cr),Box::pin(cw),pol());
+        for _ in 0..MAX_RPC_OUTGOING+2 {conn.notify("test",json!({"text":"x".repeat(128)}));}
+        assert!(!conn.is_alive());
+        assert_eq!(conn.failure_text(),"codex notification queue overflow");
+    }
+
+    #[test]
+    fn a_stalled_semantic_consumer_gets_one_explicit_overflow_after_its_prefix() {
+        let (tx,mut rx)=mpsc::unbounded_channel();
+        let cancel=CancellationToken::new();
+        let sink=Sink::new(0,tx,cancel.clone());
+        for _ in 0..2200 {sink.send(AttemptMsg::Token("字".into()));}
+        for _ in 0..2048 {assert!(matches!(rx.try_recv(),Ok((0,AttemptMsg::Token(_)))));}
+        assert!(matches!(rx.try_recv(),Ok((0,AttemptMsg::Failed(error))) if error.contains("budget")));
+        assert!(rx.try_recv().is_err());
+        assert!(cancel.is_cancelled());
     }
 
     /// Framing: split writes, CRLF, blank lines, string ids from the server, and EOF handling.

@@ -112,7 +112,7 @@ def send_usb(port: str, payload: bytes) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=Path.home() / "小呆 Server")
+    parser.add_argument("--root", type=Path, default=Path.home() / "Xiaodai_Server")
     parser.add_argument("--port", required=True)
     parser.add_argument("--device-id", required=True)
     parser.add_argument("--hostname", help="Optional TLS identity (defaults to the certificate or this Server's stable Bonjour name)")
@@ -181,7 +181,7 @@ def main() -> None:
                          "certificate_pem":str(certificate), "private_key_pem":str(key)}
     config["auto_start"] = True
     atomic_json(config_path, config)
-    print("USB provisioning acknowledged; gateway enabled. Reopen 小呆 Server to load the new credential.")
+    print("USB provisioning acknowledged; gateway enabled. Reopen ESP Bot Server to load the new credential.")
 
 
 if __name__ == "__main__":

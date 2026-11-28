@@ -27,11 +27,13 @@ pub struct ModelWorkerConfig {
     /// Optional isolated Python with pyannote and SpeechBrain for the voice lane.
     pub speaker_python: Option<PathBuf>,
     /// "auto" (Kokoro when its model and Python are installed, else macOS say),
-    /// "kokoro" or "say". Any Kokoro failure falls back to say inside the worker.
+    /// "kokoro", "qwen3_robot" or "say". Neural synthesis failures fall back to say.
     pub tts_backend: String,
     /// Kokoro (sherpa-onnx) model directory; auto: `<data>/engines/kokoro-multi-lang-v1_1`.
     pub kokoro_model_dir: Option<PathBuf>,
-    /// Python with sherpa-onnx for the TTS lanes; auto: `<data>/engines/kokoro-python/bin/python`.
+    /// Pinned, local Qwen3 CustomVoice MLX 1.7B 8bit snapshot (never downloaded at startup).
+    pub qwen3_model_dir: Option<PathBuf>,
+    /// Isolated Python for TTS; leaves the ASR/identity environment unchanged.
     pub tts_python: Option<PathBuf>,
     pub kokoro_threads: u8,
 }
@@ -40,7 +42,7 @@ impl Default for ModelWorkerConfig {
     fn default() -> Self {
         Self { python: "python3".into(), script: None, model_dir: None, request_timeout_seconds: 120, voice: None,
             asr_backend: "whisper".into(), rma_qwen_python: None, rma_qwen_worker: None, rma_qwen_model: None, diarization_model: None, speaker_python: None,
-            tts_backend: "auto".into(), kokoro_model_dir: None, tts_python: None, kokoro_threads: 4 }
+            tts_backend: "auto".into(), kokoro_model_dir: None, qwen3_model_dir: None, tts_python: None, kokoro_threads: 4 }
     }
 }
 
@@ -83,11 +85,11 @@ impl ModelWorker {
     fn lane(&self, op: &str) -> &Mutex<Option<Process>> {
         &self.lanes[match op {
             "transcribe" => 0, "speaker_embed" | "diarize" | "voice_health" => 1, "face_embed" => 5,
-            "tts" => 2, "tts_first" => 6, "display_image" | "prepare_image" | "render_chart" => 3, _ => 4,
+            "tts" | "tts_health" => 2, "tts_first" => 6, "display_image" | "prepare_image" | "render_chart" => 3, _ => 4,
         }]
     }
 
-    fn spawn(&self, op:&str) -> Result<Process, String> {
+    fn command(&self, op:&str) -> Result<Command, String> {
         let script = self.config.script.as_ref().filter(|p| p.is_file())
             .ok_or("local_worker_not_configured: set models.script to local-models/worker.py")?;
         let model_dir = self.config.model_dir.as_ref().ok_or("local_worker_model_dir_missing")?;
@@ -96,9 +98,12 @@ impl ModelWorker {
         super::settings::private_dir(&temp_dir)?;
         super::settings::private_dir(&cache_dir)?;
         let kokoro=self.kokoro();
+        let tts=matches!(op,"tts"|"tts_first"|"tts_health");
         let python=if matches!(op,"diarize"|"speaker_embed"|"voice_health") {
             self.config.speaker_python.as_deref().unwrap_or_else(||std::path::Path::new(&self.config.python))
-        } else if let (true,Some((_,python)))=(matches!(op,"tts"|"tts_first"),&kokoro) {python.as_path()}
+        } else if tts && self.config.tts_backend=="qwen3_robot" {
+            self.config.tts_python.as_deref().unwrap_or_else(||std::path::Path::new(&self.config.python))
+        } else if let (true,Some((_,python)))=(tts,&kokoro) {python.as_path()}
         else {std::path::Path::new(&self.config.python)};
         let mut command = Command::new(python);
         // The worker may live inside the signed app bundle. Python must not
@@ -116,13 +121,21 @@ impl ModelWorker {
             ("--diarization-model", &self.config.diarization_model)] {
             if let Some(path) = path { command.arg(flag).arg(path); }
         }
-        if let Some((dir,_))=&kokoro {
+        if tts && self.config.tts_backend=="qwen3_robot" {
+            command.arg("--tts-backend").arg("qwen3_robot");
+            if let Some(dir)=&self.config.qwen3_model_dir {command.arg("--qwen3-model-dir").arg(dir);}
+        } else if let (true,Some((dir,_)))=(tts,&kokoro) {
             command.arg("--tts-backend").arg("kokoro").arg("--kokoro-model-dir").arg(dir)
                 .arg("--kokoro-threads").arg(self.config.kokoro_threads.clamp(1,16).to_string());
         }
         // Cancellation kills say/ffmpeg descendants too, never a shell command.
         #[cfg(unix)]
         command.process_group(0);
+        Ok(command)
+    }
+
+    fn spawn(&self, op:&str) -> Result<Process, String> {
+        let mut command=self.command(op)?;
         let mut child = command.spawn().map_err(|e| format!("local_worker_start_failed: {e}"))?;
         crate::diagnostics::capture_stderr(child.stderr.take(), "local_models");
         let input = child.stdin.take().ok_or("local_worker_stdin_missing")?;
@@ -132,7 +145,7 @@ impl ModelWorker {
 
     /// The Kokoro model directory and TTS Python, when Kokoro is selected and installed.
     fn kokoro(&self) -> Option<(PathBuf,PathBuf)> {
-        if self.config.tts_backend=="say" {return None;}
+        if !matches!(self.config.tts_backend.as_str(),"auto"|"kokoro") {return None;}
         let engines=self.data_root.join("engines");
         let dir=self.config.kokoro_model_dir.clone().unwrap_or_else(||engines.join("kokoro-multi-lang-v1_1"));
         if !(dir.join("model.onnx").is_file()||dir.join("model.int8.onnx").is_file()) {return None;}
@@ -173,7 +186,7 @@ impl ModelWorker {
         if self.generation() != generation { return Err("cancelled".into()); }
         if slot.is_none() { *slot = Some(self.spawn(op)?); }
         let request_id = uuid::Uuid::new_v4().to_string();
-        let worker_op=match op {"voice_health"=>"health","tts_first"=>"tts",_=>op};
+        let worker_op=match op {"voice_health"|"tts_health"=>"health","tts_first"=>"tts",_=>op};
         let mut bytes = serde_json::to_vec(&json!({"id":request_id,"op":worker_op,"payload":payload})).map_err(|e| e.to_string())?;
         if bytes.len() + 1 > MAX_LINE { return Err("local_worker_request_too_large".into()); }
         bytes.push(b'\n');
@@ -222,6 +235,12 @@ impl ModelWorker {
         if !self.configured() { return json!({"configured":false,"ready":false,"error":"local_worker_not_configured"}); }
         match self.call("health", json!({})).await {
             Ok(mut result) => {
+                // Probe the actual TTS environment, without loading weights or
+                // occupying the first-sentence lane. The ASR Python may lack MLX Audio.
+                match self.call("tts_health",json!({})).await {
+                    Ok(tts) => result["models"]["tts"]=tts["models"]["tts"].clone(),
+                    Err(error) => result["models"]["tts"]=json!({"available":false,"error":error}),
+                }
                 if self.config.speaker_python.is_some() {
                     match self.call("voice_health",json!({})).await {
                         Ok(voice) => for kind in ["speaker","diarization"] {result["models"][kind]=voice["models"][kind].clone();},
@@ -310,6 +329,69 @@ mod tests {
         assert_eq!(say.kokoro(),None);
         assert!(!std::ptr::eq(auto.lane("tts"),auto.lane("tts_first")));
         assert!(std::ptr::eq(auto.lane("tts"),auto.lane("tts")));
+        let _=std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn robot_selection_uses_isolated_python_and_health_without_changing_asr() {
+        let root=std::env::temp_dir().join(format!("xiaodai-robot-config-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let script=root.join("worker.py");std::fs::write(&script,b"").unwrap();
+        let config=ModelWorkerConfig{python:"asr-python".into(),script:Some(script),model_dir:Some(root.clone()),
+            tts_backend:"qwen3_robot".into(),tts_python:Some(root.join("tts-python")),qwen3_model_dir:Some(root.join("qwen")),..Default::default()};
+        let worker=ModelWorker::new(config.clone(),root.clone());
+        for op in ["tts","tts_first","tts_health"] {
+            let command=worker.command(op).unwrap();
+            assert_eq!(command.as_std().get_program(),root.join("tts-python"));
+            let args:Vec<_>=command.as_std().get_args().map(|v|v.to_string_lossy()).collect();
+            assert!(args.windows(2).any(|v|v==["--tts-backend","qwen3_robot"]));
+            assert!(args.iter().any(|v|v=="--qwen3-model-dir"));
+        }
+        assert_eq!(worker.command("transcribe").unwrap().as_std().get_program(),"asr-python");
+        assert!(worker.kokoro().is_none());
+        assert!(std::ptr::eq(worker.lane("tts"),worker.lane("tts_health")));
+        assert!(!std::ptr::eq(worker.lane("tts"),worker.lane("tts_first")));
+        let mut brain=super::super::settings::BrainConfig::default();brain.models=config;
+        super::super::settings::validate(&brain).unwrap();
+        brain.models.qwen3_model_dir=Some(PathBuf::from("relative"));
+        assert_eq!(super::super::settings::validate(&brain).unwrap_err(),"tts_paths_must_be_absolute");
+        let _=std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn robot_stop_kills_owned_descendants_and_fences_old_generation() {
+        let root=std::env::temp_dir().join(format!("xiaodai-robot-stop-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let script=root.join("worker.py");
+        // Controlled dependency at the inference boundary: exercise the real
+        // supervisor's JSONL, lane ownership, cancellation and OS process group.
+        std::fs::write(&script,r#"
+import json,sys,time,subprocess
+from pathlib import Path
+root=Path(sys.argv[sys.argv.index('--model-dir')+1])
+for line in sys.stdin:
+ r=json.loads(line)
+ if r.get('payload',{}).get('text')=='slow':
+  child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])
+  (root/'child.pid').write_text(str(child.pid))
+  time.sleep(30)
+ print(json.dumps({'id':r['id'],'ok':True,'result':{'text':r.get('payload',{}).get('text'),'models':{'tts':{'backend':'fixture'}}}}),flush=True)
+"#).unwrap();
+        let worker=ModelWorker::new(ModelWorkerConfig{script:Some(script),model_dir:Some(root.clone()),
+            tts_backend:"qwen3_robot".into(),..Default::default()},root.clone());
+        let generation=worker.generation();
+        let background={let worker=worker.clone();tokio::spawn(async move{worker.call("tts",json!({"text":"slow"})).await})};
+        timeout(Duration::from_secs(5),async{while !root.join("child.pid").is_file(){tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
+        let child:i32=std::fs::read_to_string(root.join("child.pid")).unwrap().parse().unwrap();
+        let first=timeout(Duration::from_secs(2),worker.call("tts_first",json!({"text":"first"}))).await.unwrap().unwrap();
+        assert_eq!(first["text"],"first","priority speech must not queue behind ordinary TTS");
+        worker.stop().await;
+        assert_eq!(background.await.unwrap().unwrap_err(),"cancelled");
+        timeout(Duration::from_secs(3),async{while unsafe{libc::kill(child,0)}==0{tokio::time::sleep(Duration::from_millis(10)).await;}}).await.expect("owned effect child survived Stop");
+        assert_eq!(worker.call_at_generation("tts",json!({"text":"stale"}),generation).await.unwrap_err(),"cancelled");
+        let new=worker.call("tts_first",json!({"text":"new"})).await.unwrap();
+        assert_eq!(new["text"],"new","new request must not receive the stopped request's result");
+        worker.stop().await;
         let _=std::fs::remove_dir_all(root);
     }
 }

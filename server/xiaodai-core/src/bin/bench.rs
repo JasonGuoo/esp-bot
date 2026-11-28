@@ -111,9 +111,9 @@ async fn main() {
     }
 }
 
-/// Every bench/test write goes under `~/小呆 Server/runtime/tmp/xiaodai-core-test`.
+/// Every bench/test write goes under `~/Xiaodai_Server/runtime/tmp/xiaodai-core-test`.
 fn test_dir() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("小呆 Server/runtime/tmp/xiaodai-core-test")
+    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("Xiaodai_Server/runtime/tmp/xiaodai-core-test")
 }
 
 struct Run {

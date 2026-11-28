@@ -4,6 +4,7 @@ import { LocalCamera, PcmRecorder, base64ToBuffer, readImageFile, readWavFile, t
 import { CONSOLE_PANELS, consoleTemplate, type ConsolePanel } from "./console-layout";
 import { mountLiveFace } from "./live-face";
 import { mountVoiceAlbum } from "./voice-album";
+import { namePolicyError } from "./name-policy";
 import { mountHousehold, readArtifactContent } from "./household";
 import { mountProactive } from "./proactive";
 import { deviceDeliveryText, deviceReplyMetrics, needsModelSetup, renderActivity, renderBrainCore, renderCapabilities, renderDeviceStatus, renderRuntimeMetrics, renderTurnTimings, turnStageMetric, harnessTimingMetric, type DeviceDisplayReport } from "./console-presenters";
@@ -61,6 +62,8 @@ function newId(prefix: string): string {
   return `${prefix}_${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 function errorText(error: unknown): string {
+  const nameError = namePolicyError(error);
+  if (nameError) return nameError;
   const text = String(error);
   if (text.includes("capture_cancelled")) return "已取消采集。";
   for (const [code, message] of [
@@ -70,6 +73,7 @@ function errorText(error: unknown): string {
     ["no_speech", "这段录音没有识别出文字。等小呆提示“请说”后再说一次。"],
     ["audio_too_quiet", "小呆收到的声音太轻。请靠近麦克风，等“请说”后再试。"],
     ["brain_busy", "还有一个任务正在进行，可以先停止当前任务再重试。"],
+    ["brain_core_busy", "前面的回答还在处理中，请稍等后再试。"],
     ["device_volume_unavailable", "设备未连接或暂不支持远程音量控制。"],
     ["device_settings_open", "请先关闭小呆上的设置页面。"],
     ["device_volume_busy", "上一次音量调整还在等待设备确认。"],
@@ -1160,7 +1164,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     inputValue("#cc-local-model-dir", models.model_dir); inputValue("#cc-local-voice", models.voice); inputValue("#cc-local-timeout", models.request_timeout_seconds);
     inputValue("#cc-asr-backend", string(models.asr_backend, "whisper"));
     inputValue("#cc-tts-backend", string(models.tts_backend, "auto")); inputValue("#cc-kokoro-threads", models.kokoro_threads ?? 4);
-    inputValue("#cc-kokoro-model-dir", models.kokoro_model_dir); inputValue("#cc-tts-python", models.tts_python);
+    inputValue("#cc-qwen3-model-dir", models.qwen3_model_dir); inputValue("#cc-kokoro-model-dir", models.kokoro_model_dir); inputValue("#cc-tts-python", models.tts_python);
     inputValue("#cc-rma-qwen-python", models.rma_qwen_python); inputValue("#cc-rma-qwen-worker", models.rma_qwen_worker); inputValue("#cc-rma-qwen-model", models.rma_qwen_model);
     inputValue("#cc-provider-network", string(harness.provider_network, "system"));
     inputValue("#cc-tools-inherit", harness.inherit_config);
@@ -1415,7 +1419,7 @@ export function mountCompanion(container: HTMLElement): CompanionController {
     }, "cc-route-form");
   });
   form("#cc-local-form", "正在保存本地模型环境…", async () => {
-    const update = { diarization_model: optionalPath("#cc-diarization-model"), speaker_python: optionalPath("#cc-speaker-python"), python: formInput("#cc-local-python"), script: optionalPath("#cc-local-script"), model_dir: optionalPath("#cc-local-model-dir"), voice: formInput("#cc-local-voice") || null, request_timeout_seconds: formNumber("#cc-local-timeout", 1, 600), asr_backend: formInput("#cc-asr-backend"), rma_qwen_python: optionalPath("#cc-rma-qwen-python"), rma_qwen_worker: optionalPath("#cc-rma-qwen-worker"), rma_qwen_model: optionalPath("#cc-rma-qwen-model"), tts_backend: formInput("#cc-tts-backend") || "auto", kokoro_threads: formNumber("#cc-kokoro-threads", 1, 16), kokoro_model_dir: optionalPath("#cc-kokoro-model-dir"), tts_python: optionalPath("#cc-tts-python") };
+    const update = { diarization_model: optionalPath("#cc-diarization-model"), speaker_python: optionalPath("#cc-speaker-python"), python: formInput("#cc-local-python"), script: optionalPath("#cc-local-script"), model_dir: optionalPath("#cc-local-model-dir"), voice: formInput("#cc-local-voice") || null, request_timeout_seconds: formNumber("#cc-local-timeout", 1, 600), asr_backend: formInput("#cc-asr-backend"), rma_qwen_python: optionalPath("#cc-rma-qwen-python"), rma_qwen_worker: optionalPath("#cc-rma-qwen-worker"), rma_qwen_model: optionalPath("#cc-rma-qwen-model"), tts_backend: formInput("#cc-tts-backend") || "auto", kokoro_threads: formNumber("#cc-kokoro-threads", 1, 16), qwen3_model_dir: optionalPath("#cc-qwen3-model-dir"), kokoro_model_dir: optionalPath("#cc-kokoro-model-dir"), tts_python: optionalPath("#cc-tts-python") };
     if (update.asr_backend === "rma_qwen" && (!update.rma_qwen_python || !update.rma_qwen_worker || !update.rma_qwen_model)) throw new Error("使用 RMA Qwen 时，请填写 RMA Python、Worker 和模型目录。");
     await patchConfiguration((config) => { config.models = { ...object(config.models), ...update }; }, "cc-local-form");
     latestModelHealth = null; renderCapabilities(container); $("#cc-models-json").textContent = "本地环境已改变，请重新检查能力状态。";

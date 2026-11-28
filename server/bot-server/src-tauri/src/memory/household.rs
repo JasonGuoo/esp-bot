@@ -394,7 +394,10 @@ impl Store {
         let Some((Some(person),verified))=row else{return Ok(None)};
         let name:Option<String>=db.query_row("SELECT display_name FROM profiles WHERE id=?1",[&person],|r|r.get(0)).optional().map_err(db_error)?;
         let age_band:Option<String>=db.query_row("SELECT age_band FROM profile_details WHERE profile_id=?1",[&person],|r|r.get(0)).optional().map_err(db_error)?;
-        Ok(name.map(|display_name|TurnSpeaker{person_id:person,display_name,nameable:verified,age_band}))
+        Ok(name.map(|display_name|{
+            let nameable=verified && super::names::validate(&display_name).is_ok();
+            TurnSpeaker{person_id:person,display_name,nameable,age_band}
+        }))
     }
 
     /// "我不是小林": keep a correction candidate on this turn's voice for the
@@ -478,7 +481,7 @@ impl Store {
                 if expired||!enabled{return Err("source_not_retained".into());}if payload["expected_revision"].as_u64()!=Some(revision){return Err("source_revision_conflict".into());}vec![id]
             },
             "household.forget"=>{
-                if let Some(day)=payload["daily_conversation_id"].as_str(){validate_id(day)?;let mut q=db.prepare("SELECT t.id FROM household_turns t JOIN household_episodes e ON e.id=t.episode_id WHERE e.daily_id=?1 AND t.forgotten=0").map_err(db_error)?;let rows=q.query_map([day],|r|r.get::<_,String>(0)).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?}
+                if let Some(day)=payload["daily_conversation_id"].as_str(){validate_id(day)?;let mut q=db.prepare("SELECT t.id FROM household_turns t JOIN household_episodes e ON e.id=t.episode_id WHERE e.daily_id=?1 AND (t.forgotten=0 OR EXISTS(SELECT 1 FROM assistant_domain_receipts a WHERE a.source_turn=t.id))").map_err(db_error)?;let rows=q.query_map([day],|r|r.get::<_,String>(0)).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?}
                 else{vec![source_id(&db,required(payload,"conversation_turn_id")?)?]}
             },
             "household.memory.forget"|"household.memory.confirm"=>{
@@ -582,15 +585,17 @@ impl Store {
         super::provenance::queue_household_cleanup(&tx,&id)?;
         tx.execute("UPDATE household_turns SET input_text=?1,source_revision=source_revision+1,updated_at_ms=?2 WHERE id=?3",params![text,now_ms(),id]).map_err(db_error)?;
         tx.execute("INSERT INTO household_source_revisions(turn_id,revision,input_text,reason,at_ms) VALUES(?1,?2,?3,'human_correction',?4)",params![id,revision+1,text,now_ms()]).map_err(db_error)?;
-        revision_changed(&tx,&episode,true)?;super::household_jobs::queue_organize(&tx,&episode)?;tx.commit().map_err(db_error)?;Ok(json!({"ok":true,"source_revision":revision+1}))
+        revision_changed(&tx,&episode,true)?;super::household_jobs::queue_organize(&tx,&episode)?;tx.commit().map_err(db_error)?;
+        self.revoke_reminder_playback(None);Ok(json!({"ok":true,"source_revision":revision+1}))
     }
 
     fn forget_source(&self,payload:&Value)->Result<Value,String>{
         let mut db=self.connection()?;let tx=db.transaction().map_err(db_error)?;
-        let ids=if let Some(day)=payload["daily_conversation_id"].as_str(){validate_id(day)?;let mut q=tx.prepare("SELECT t.id FROM household_turns t JOIN household_episodes e ON e.id=t.episode_id WHERE e.daily_id=?1 AND t.forgotten=0").map_err(db_error)?;let rows=q.query_map([day],|r|r.get::<_,String>(0)).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?}
+        let ids=if let Some(day)=payload["daily_conversation_id"].as_str(){validate_id(day)?;let mut q=tx.prepare("SELECT t.id FROM household_turns t JOIN household_episodes e ON e.id=t.episode_id WHERE e.daily_id=?1 AND (t.forgotten=0 OR EXISTS(SELECT 1 FROM assistant_domain_receipts a WHERE a.source_turn=t.id))").map_err(db_error)?;let rows=q.query_map([day],|r|r.get::<_,String>(0)).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?}
             else{vec![source_id(&tx,required(payload,"conversation_turn_id")?)?]};
-        for id in &ids{forget_one(&tx,id,false)?;}
-        tx.execute("UPDATE households SET policy_revision=policy_revision+1 WHERE singleton=1",[]).map_err(db_error)?;tx.commit().map_err(db_error)?;Ok(json!({"forgotten":ids.len(),"graph_cleanup":"queued"}))
+        for id in &ids{forget_one(&tx,id,false,true)?;}
+        tx.execute("UPDATE households SET policy_revision=policy_revision+1 WHERE singleton=1",[]).map_err(db_error)?;tx.commit().map_err(db_error)?;
+        self.revoke_reminder_playback(None);Ok(json!({"forgotten":ids.len(),"graph_cleanup":"queued"}))
     }
 
     pub fn purge_household_expired(&self)->Result<usize,String>{
@@ -598,7 +603,7 @@ impl Store {
         super::voice_album::expire(&tx)?;
         let (enabled,ttl):(bool,i64)=tx.query_row("SELECT history_enabled,retention_secs FROM households WHERE singleton=1",[],|r|Ok((r.get(0)?,r.get(1)?))).map_err(db_error)?;
         let ids={let mut q=tx.prepare("SELECT id FROM household_turns WHERE forgotten=0 AND source_expired=0 AND ((?1=0 AND (input_text!='' OR assistant_text!='')) OR occurred_at_ms<=?2)").map_err(db_error)?;let rows=q.query_map(params![enabled,now_ms().saturating_sub(ttl.saturating_mul(1000))],|r|r.get::<_,String>(0)).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?};
-        for id in &ids{forget_one(&tx,id,enabled)?;}
+        for id in &ids{forget_one(&tx,id,enabled,false)?;}
         if !ids.is_empty(){tx.execute("UPDATE households SET policy_revision=policy_revision+1 WHERE singleton=1",[]).map_err(db_error)?;}
         tx.commit().map_err(db_error)?;Ok(ids.len())
     }
@@ -610,11 +615,11 @@ impl Store {
 
     pub fn forget_all_household(&self)->Result<(),String>{
         let mut db=self.connection()?;let tx=db.transaction().map_err(db_error)?;
-        let ids={let mut q=tx.prepare("SELECT id FROM household_turns WHERE forgotten=0").map_err(db_error)?;let rows=q.query_map([],|r|r.get::<_,String>(0)).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?};
-        for id in ids{forget_one(&tx,&id,false)?;}
+        let ids={let mut q=tx.prepare("SELECT id FROM household_turns WHERE forgotten=0 OR EXISTS(SELECT 1 FROM assistant_domain_receipts a WHERE a.source_turn=household_turns.id)").map_err(db_error)?;let rows=q.query_map([],|r|r.get::<_,String>(0)).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?};
+        for id in ids{forget_one(&tx,&id,false,true)?;}
         tx.execute("DELETE FROM household_derived",[]).map_err(db_error)?;
         tx.execute("UPDATE households SET policy_revision=policy_revision+1 WHERE singleton=1",[]).map_err(db_error)?;
-        tx.commit().map_err(db_error)
+        tx.commit().map_err(db_error)?;self.revoke_reminder_playback(None);Ok(())
     }
 
     /// A console conversation ID is an activation, while its OpenCode context
@@ -711,7 +716,13 @@ pub(super) fn annotate_segment(db:&Connection,segment:&str,person:Option<&str>,r
 fn strip_embeddings(mut v:Value)->Value{match &mut v{Value::Object(map)=>{for key in ["embedding","wav_base64","pcm_base64","image_base64","audio","token","api_key","text","transcript","content","prompt","message","caption","response","output"]{map.remove(key);}for value in map.values_mut(){*value=strip_embeddings(value.take());}},Value::Array(values)=>{for value in values{*value=strip_embeddings(value.take());}},_=>{}}v}
 fn terms(query:&str)->BTreeSet<String>{let q=query.to_lowercase();let chars:Vec<_>=q.chars().collect();let mut out=BTreeSet::new();for x in q.split_whitespace(){if x.chars().count()<=64{out.insert(x.to_owned());}}for w in chars.windows(2).take(128){out.insert(w.iter().collect());}out}
 
-fn forget_one(db:&Connection,id:&str,expired:bool)->Result<(),String>{
+fn forget_one(db:&Connection,id:&str,expired:bool,revoke_actions:bool)->Result<(),String>{
+    // An explicitly requested reminder has its own lifecycle. Archive expiry
+    // removes dialogue text, while explicit forgetting also withdraws the plan.
+    if revoke_actions {
+        db.execute("UPDATE proactive_reminders SET state='cancelled' WHERE state='pending' AND id IN (SELECT reminder_id FROM assistant_domain_receipts WHERE source_turn=?1)",[id]).map_err(db_error)?;
+        db.execute("DELETE FROM assistant_domain_receipts WHERE source_turn=?1",[id]).map_err(db_error)?;
+    }
     let (episode,external,revision):(String,String,u64)=db.query_row("SELECT episode_id,external_turn_id,source_revision FROM household_turns WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(db_error)?;
     super::provenance::queue_household_cleanup(db,id)?;
     let mut affected=BTreeSet::from([episode.clone()]);
@@ -755,7 +766,7 @@ fn forget_one(db:&Connection,id:&str,expired:bool)->Result<(),String>{
 pub(super) fn forget_profile_data(db:&Connection,profile:&str)->Result<(),String>{
     db.execute("DELETE FROM voice_clips WHERE segment_id IN(SELECT id FROM household_segments WHERE automatic_person_id=?1 OR annotated_person_id=?1)",[profile]).map_err(db_error)?;
     let private={let mut q=db.prepare("SELECT id FROM household_turns WHERE private_profile_id=?1 AND forgotten=0").map_err(db_error)?;let rows=q.query_map([profile],|r|r.get::<_,String>(0)).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?};
-    for turn in private{forget_one(db,&turn,false)?;}
+    for turn in private{forget_one(db,&turn,false,true)?;}
     db.execute("UPDATE household_turns SET private_profile_id=NULL WHERE private_profile_id=?1 AND forgotten=1",[profile]).map_err(db_error)?;
     let turns={let mut q=db.prepare("SELECT DISTINCT t.id,t.episode_id FROM household_turns t JOIN household_segments s ON s.turn_id=t.id WHERE t.forgotten=0 AND (s.automatic_person_id=?1 OR s.annotated_person_id=?1)").map_err(db_error)?;let rows=q.query_map([profile],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(db_error)?;rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?};
     let mut affected=BTreeSet::new();
@@ -789,18 +800,18 @@ pub(super) fn forget_conversation_data(db:&Connection,conversation:&str)->Result
     let mapping:Option<(String,Option<String>)>=db.query_row("SELECT daily_id,private_profile_id FROM household_model_conversations WHERE conversation_id=?1",[conversation],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(db_error)?;
     let mapping=if mapping.is_some(){mapping}else{db.query_row("SELECT id,NULL FROM household_days WHERE id=?1",[conversation],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(db_error)?};
     let ids=if let Some((day,owner))=mapping{
-        let mut q=db.prepare("SELECT t.id FROM household_turns t JOIN household_episodes e ON e.id=t.episode_id WHERE e.daily_id=?1 AND t.private_profile_id IS ?2 AND t.forgotten=0").map_err(db_error)?;
+        let mut q=db.prepare("SELECT t.id FROM household_turns t JOIN household_episodes e ON e.id=t.episode_id WHERE e.daily_id=?1 AND t.private_profile_id IS ?2 AND (t.forgotten=0 OR EXISTS(SELECT 1 FROM assistant_domain_receipts a WHERE a.source_turn=t.id))").map_err(db_error)?;
         let rows=q.query_map(params![day,owner],|r|r.get::<_,String>(0)).map_err(db_error)?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?
     }else{
         // The console sends its activation ID, not the day's model ID. Other
         // activations on the same day retain their source records.
-        let mut q=db.prepare("SELECT t.id FROM household_turns t JOIN household_episodes e ON e.id=t.episode_id WHERE e.activation_id=?1 AND t.forgotten=0").map_err(db_error)?;
+        let mut q=db.prepare("SELECT t.id FROM household_turns t JOIN household_episodes e ON e.id=t.episode_id WHERE e.activation_id=?1 AND (t.forgotten=0 OR EXISTS(SELECT 1 FROM assistant_domain_receipts a WHERE a.source_turn=t.id))").map_err(db_error)?;
         let rows=q.query_map([conversation],|r|r.get::<_,String>(0)).map_err(db_error)?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?
     };
     if !ids.is_empty(){
-        for id in ids{forget_one(db,&id,false)?;}
+        for id in ids{forget_one(db,&id,false,true)?;}
         db.execute("UPDATE households SET policy_revision=policy_revision+1 WHERE singleton=1",[]).map_err(db_error)?;
     }
     Ok(())

@@ -3,3 +3,7 @@ server_tests brain::gateway::tests::runtime_leases_advance_without_reopening_the
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_dir/server/bot-server/src-tauri/target}"
 rust_tests server/xiaodai-core/Cargo.toml --test=codex_fake \
     followup_steers_the_running_turn_and_takes_over_its_output fresh_question_cannot_steer_a_previous_speakers_turn
+
+if [ "$(uname -s)" = Darwin ]; then
+    server_tests brain::gateway::tests::simulator::slow_supplement_keeps_question_and_retires_unheard_answer brain::gateway::tests::simulator::stop_between_supplement_and_capture_closes_only_the_reserved_turn
+fi

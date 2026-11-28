@@ -34,6 +34,43 @@ firmware/idf.sh                 为本项目配置环境并调用 idf.py
 不能同时占用同一个串口。串口日志可能包含敏感信息，先写入受限的
 `firmware/.bringup/`，检查后再分享；不要提交私有 `sdkconfig` 或完整镜像。
 
+## 模拟 Bot
+
+在已配置本项目 ESP-IDF、Mac Clang 和 Cargo 离线依赖的 Mac 上，从仓库根目录运行：
+
+```sh
+./tools/sim-bot           # 一次跨端问答，显示每一步的固件快照
+./tools/sim-bot responsive  # #36 慢回答补话、停止和后台任务期间的连续聊天
+./tools/sim-bot children    # 调用真实 Luna 玩四场 11 轮的儿童游戏，输出逐轮审阅表
+./tools/sim-bot shell     # 手工输入事件，一行一个，Ctrl-D 退出
+./tools/sim-bot runtime   # 设备端交互回归
+./tools/sim-bot gateway   # 网关协议、任务交付、取消和断线回归
+```
+
+默认场景用工作区源码启动临时 Rust 网关、SQLite 和独立配对凭据，通过本机认证 WSS 通信。Mac 原生编译的正式 `bot_runtime` 接收触摸和语音起止事件，生成会话 token。测试适配器用文字“现在几点”代替采集和转写，收到网关接纳和文字回答后，把对应命令交回固件。检查保留的回答、追问状态，以及停止后到达的旧回复。运行数据位于临时目录，已安装 App 可继续运行。
+
+例如，复现“停止后收到迟到回复”。在 shell 模式下，`link` 和 `reply` 均为手工注入；每一行 JSON 都是固件执行后的快照。
+
+```sh
+./tools/sim-bot shell <<'EOF'
+link
+audio-ready
+touch
+tick 1200
+onset
+end
+thinking
+stop
+reply 这是一条迟到的回复
+EOF
+```
+
+最后一行应显示 `rejected` 增加、`session_id` 为 0、`reading` 为空。`tick` 在虚拟时钟上推进 1～600000 毫秒，可重放等待或超时。将输入保存为文本即可用重定向重复同一次操作。完整命令见 `./tools/sim-bot --help`。
+
+日常改动先跑对应的快速入口。功能或修复完成后跑 `./tools/check-functional-regression.sh`；其中 SIM-01～05 覆盖脚本边界、跨端问答、补话、停止和后台聊天。
+
+`responsive` 在本机模型替身收到 HTTP 请求后扣住回答，按用例放行。测试逐轮检查实际请求携带的上下文、网关交付、固件接受或拒绝的内容。在后台任务场景中，真实任务调度器领取任务并写入临时 SQLite，受控处理器在两轮聊天结束后才返回。模型返回的示例文字和模拟显示回执可重复重放。麦克风与扬声器声学、AEC、屏幕显示、Wi-Fi 和板上内存峰值交给 S31 实测。
+
 ## 哪些测试需要写入开发板
 
 | 要验证的行为 | 本机入口 | 是否需要烧录 |

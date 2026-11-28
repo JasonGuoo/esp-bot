@@ -1,0 +1,2 @@
+server_tests brain::gateway::io::tests brain::gateway::tests::authenticated_tls_session_opens_and_unauthorized_upgrade_fails brain::gateway::tests::ordered_wss_commit_requires_exact_declared_frames brain::gateway::tests::a_pending_commit_cannot_be_replaced_and_disconnect_settles_it
+server_tests brain::plain_audio::tests::full_output_queue_keeps_the_final_frame_and_end_together brain::plain_audio::tests::local_tcp_transports_plain_pcm_and_rejects_tampering

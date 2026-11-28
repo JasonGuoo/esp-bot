@@ -6,7 +6,8 @@ components="$firmware_dir/components"
 case "${1:-runtime}" in
     runtime) test_source=test_runtime_near_face.c ;;
     reminders) test_source=test_proactive.c ;;
-    *) echo 'Expected runtime or reminders' >&2; exit 2 ;;
+    simulator) test_source=simulator.c ;;
+    *) echo 'Expected runtime, reminders or simulator' >&2; exit 2 ;;
 esac
 idf="$firmware_dir/.toolchains/esp-idf/components"
 config="$firmware_dir/build/config"
@@ -50,4 +51,4 @@ xcrun clang -isysroot "$(xcrun --sdk macosx --show-sdk-path)" -std=gnu11 -g -O1 
     "$components/attention_manager/attention_manager.c" "$components/bot_voice/bot_voice.c" \
     "$components/bot_responses/bot_responses.c" "$scratch/replies.S" -o "$scratch/runtime"
 "$scratch/runtime"
-echo "$test_source passed (ASan and UBSan)."
+if [ "$test_source" != simulator.c ]; then echo "$test_source passed (ASan and UBSan)."; fi

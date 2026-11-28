@@ -24,6 +24,23 @@ pub struct PlainAudio {
 
 impl Drop for PlainAudio { fn drop(&mut self) { self.task.abort(); } }
 
+/// Backpressure is a retryable tick, not a wait in the control loop. Reserve
+/// the last PCM frame and its end marker atomically so neither can be lost.
+pub(super) fn try_output(tx:&mpsc::Sender<Output>,data:Vec<u8>,finish:Option<(u32,u32)>)->Result<bool,String> {
+    let count=if finish.is_some(){2}else{1};
+    match tx.try_reserve_many(count) {
+        Ok(mut permits)=>{
+            permits.next().expect("reserved PCM frame").send(Output::Frame(data));
+            if let Some((stream,frames))=finish {
+                permits.next().expect("reserved stream end").send(Output::Finish{stream,frames});
+            }
+            Ok(true)
+        },
+        Err(mpsc::error::TrySendError::Full(_))=>Ok(false),
+        Err(mpsc::error::TrySendError::Closed(_))=>Err("plain_audio_disconnected".into()),
+    }
+}
+
 fn frame(key:&hmac::Key, kind:u8, payload:&[u8])->Vec<u8> {
     let mut body=Vec::with_capacity(1+payload.len()+MAC_LEN);
     body.push(kind);body.extend_from_slice(payload);
@@ -92,6 +109,19 @@ pub async fn start(local:IpAddr, peer:IpAddr)->Result<PlainAudio,String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn full_output_queue_keeps_the_final_frame_and_end_together() {
+        let (tx,mut rx)=mpsc::channel(2);
+        tx.try_send(Output::Frame(vec![1])).unwrap_or_else(|_|panic!("empty queue"));
+        assert!(!try_output(&tx,vec![2],Some((7,2))).unwrap());
+        assert_eq!(rx.len(),1,"a failed reservation must not enqueue half of the final pair");
+        assert!(matches!(rx.recv().await,Some(Output::Frame(data)) if data==vec![1]));
+        assert!(try_output(&tx,vec![2],Some((7,2))).unwrap());
+        assert!(matches!(rx.recv().await,Some(Output::Frame(data)) if data==vec![2]));
+        assert!(matches!(rx.recv().await,Some(Output::Finish{stream:7,frames:2})));
+        drop(rx);
+        assert_eq!(try_output(&tx,vec![3],None).unwrap_err(),"plain_audio_disconnected");
+    }
     #[test]
     fn plain_audio_authenticates_frame_and_direction() {
         let key=hmac::Key::new(hmac::HMAC_SHA256,b"temporary test key");

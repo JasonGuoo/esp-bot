@@ -15,6 +15,17 @@ pub async fn run(brain:Weak<Brain>){
         sleep(Duration::from_secs(3)).await;
         let Some(brain)=brain.upgrade()else{break};
         if !brain.accepting.load(Ordering::Acquire){brain.graphiti.stop().await;break;}
+        let projection=std::sync::Arc::clone(&brain);
+        let _=super::storage::run(move||{
+            let _=projection.assistant.refresh(&projection.memory);
+            // Reconcile facts only. An interrupted operation with no domain
+            // receipt is never submitted again just because the App restarted.
+            if let Ok(operations)=projection.tasks.unresolved_operations(){for op in operations{
+                if let Ok(Some(receipt))=projection.memory.assistant_domain_receipt(&op.operation_id,&op.request_hash){
+                    let _=projection.tasks.finish_operation(&op.operation_id,&op.request_hash,"applied",&receipt);
+                }
+            }}
+        }).await;
         let _=brain.memory.purge_expired();
         let _=brain.memory.purge_household_expired();
         if let Ok(ids)=brain.memory.pending_household_cleanup(){

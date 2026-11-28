@@ -138,7 +138,8 @@ class Worker:
                  asr_backend: str = "whisper", rma_python: str | None = None,
                  rma_worker: str | None = None, rma_model: str | None = None,
                  diarization_model: str | None = None, tts_backend: str = "say",
-                 kokoro_model_dir: str | None = None, kokoro_threads: int = 4, kokoro_speaker: int = 3):
+                 kokoro_model_dir: str | None = None, kokoro_threads: int = 4, kokoro_speaker: int = 3,
+                 qwen3_model_dir: str | None = None):
         self.store = ModelStore(model_dir)
         self.tts_backend = tts_backend
         self.kokoro_dir = Path(kokoro_model_dir).expanduser() if kokoro_model_dir else None
@@ -146,6 +147,9 @@ class Worker:
         self.kokoro_speaker = kokoro_speaker
         self.kokoro = None
         self.kokoro_failed = False
+        from qwen_robot import QwenRobot
+        self.robot = QwenRobot(qwen3_model_dir) if tts_backend == "qwen3_robot" else None
+        self.robot_failure = None
         self.default_voice = default_voice
         self.tts_rate = tts_rate
         self.diarization_model = Path(diarization_model).expanduser() if diarization_model else None
@@ -195,6 +199,16 @@ class Worker:
             "voice_count": len(self.voice_inventory) if self.voice_inventory is not None else None,
             "loaded": self.kokoro is not None,
         }
+        if self.robot is not None:
+            selected = self.robot.status()
+            models["tts"] = {
+                **selected, "requested_backend": "qwen3_robot",
+                "backend": "macos_say" if self.robot_failure else selected["backend"],
+                "default_voice": self.default_voice if self.robot_failure else selected["default_voice"],
+                "available": tts_supported if self.robot_failure else selected["available"],
+                "fallback_backend": "macos_say", "fallback_reason": self.robot_failure,
+                "fallback_available": tts_supported,
+            }
         models["diarization"] = {"backend": "pyannote_community_1", "available": bool(self.diarization_model and (self.diarization_model / "config.yaml").is_file() and installed("pyannote.audio")), "loaded": self.diarization_pipeline is not None, "downloaded_by_worker": False}
         return {
             "protocol_version": PROTOCOL_VERSION,
@@ -507,7 +521,7 @@ class Worker:
         return {"voices": self.voice_inventory, "installed_only": True}
 
     def _kokoro_wanted(self) -> bool:
-        if self.tts_backend == "say" or self.kokoro_failed or self.kokoro_dir is None:
+        if self.tts_backend not in {"auto", "kokoro"} or self.kokoro_failed or self.kokoro_dir is None:
             return False
         model = self.kokoro_dir / "model.onnx"
         return (model.is_file() or (self.kokoro_dir / "model.int8.onnx").is_file()) and installed("sherpa_onnx")
@@ -561,6 +575,31 @@ class Worker:
             fail("tts_text_invalid", f"Supply between 1 and {MAX_TTS_CHARACTERS} text characters.")
         if any(ord(char) < 32 and char not in "\n\t\r" for char in text):
             fail("tts_text_invalid", "Speech text contains unsupported control characters.")
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ServiceError("tts_text_invalid", "Speech text contains invalid Unicode.") from exc
+        rate = payload.get("rate", self.tts_rate)
+        if type(rate) is not int or rate < 100 or rate > 260:
+            fail("tts_rate_invalid", "Speech rate must be an integer between 100 and 260.")
+        if self.robot is not None and not self.robot_failure:
+            try:
+                wav = self.robot.synthesize(text, rate)
+                _, frames = pcm_from_wav(wav, MAX_TTS_SECONDS)
+                from qwen_robot import VOICE
+                return {
+                    "wav_base64": base64.b64encode(wav).decode("ascii"), "sample_rate": SAMPLE_RATE,
+                    "channels": 1, "format": "pcm_s16le", "container": "wav",
+                    "duration_ms": round(frames * 1000 / SAMPLE_RATE),
+                    "voice": VOICE, "backend": "qwen3_mlx_robot", "streaming": False,
+                }
+            except ServiceError as exc:
+                if exc.code == "tts_output_too_large":
+                    raise
+                self.robot_failure = exc.code
+            except Exception:
+                self.robot_failure = "tts_robot_failed"
+            self.robot.unload()
         if self._kokoro_wanted():
             rate = payload.get("rate", self.tts_rate)
             if type(rate) is not int or rate < 100 or rate > 260:
@@ -575,6 +614,12 @@ class Worker:
                 # Any Kokoro failure falls back to macOS say for this worker's life.
                 self.kokoro_failed = True
                 self.kokoro = None
+        result = self._say_tts(text, payload.get("voice"), rate)
+        if self.robot is not None:
+            result.update(requested_backend="qwen3_robot", fallback_reason=self.robot_failure)
+        return result
+
+    def _say_tts(self, text: str, voice: str | None, rate: int) -> dict:
         # `say` has [[...]] control directives. They must be spoken literally,
         # never interpreted from a model response or an external web page.
         text = text.replace("[", "［").replace("]", "］")
@@ -582,11 +627,7 @@ class Worker:
             encoded = text.encode("utf-8")
         except UnicodeEncodeError as exc:
             raise ServiceError("tts_text_invalid", "Speech text contains invalid Unicode.") from exc
-        rate = payload.get("rate", self.tts_rate)
-        if type(rate) is not int or rate < 100 or rate > 260:
-            fail("tts_rate_invalid", "Speech rate must be an integer between 100 and 260.")
         available = self.voices()["voices"]
-        voice = payload.get("voice")
         if voice is None:
             voice = self.default_voice
         if not isinstance(voice, str) or len(voice) > 128:
@@ -668,6 +709,9 @@ class Worker:
         }
 
     def unload(self) -> dict:
+        if self.robot is not None:
+            self.robot.unload()
+        self.kokoro = None
         if self.rma_asr is not None:
             self.rma_asr.stop()
         self.speaker = None
@@ -786,7 +830,8 @@ def main() -> int:
     parser.add_argument("--rma-qwen-worker")
     parser.add_argument("--rma-qwen-model")
     parser.add_argument("--diarization-model")
-    parser.add_argument("--tts-backend", choices=("say", "kokoro"), default="say")
+    parser.add_argument("--tts-backend", choices=("say", "kokoro", "qwen3_robot"), default="say")
+    parser.add_argument("--qwen3-model-dir")
     parser.add_argument("--kokoro-model-dir")
     parser.add_argument("--kokoro-threads", type=int, default=4)
     parser.add_argument("--kokoro-speaker", type=int, default=3)
@@ -820,7 +865,8 @@ def main() -> int:
     try:
         worker = Worker(args.model_dir, args.tts_voice, args.tts_rate, args.asr_backend,
                         args.rma_qwen_python, args.rma_qwen_worker, args.rma_qwen_model, args.diarization_model,
-                        args.tts_backend, args.kokoro_model_dir, args.kokoro_threads, args.kokoro_speaker)
+                        args.tts_backend, args.kokoro_model_dir, args.kokoro_threads, args.kokoro_speaker,
+                        args.qwen3_model_dir)
     except Exception as exc:
         diagnostics.write(f"local-models startup_failed type={type(exc).__name__}\n")
         return 1

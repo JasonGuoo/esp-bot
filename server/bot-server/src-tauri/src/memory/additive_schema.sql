@@ -45,3 +45,41 @@ CREATE TABLE IF NOT EXISTS proactive_journal (
     reason TEXT
 );
 CREATE INDEX IF NOT EXISTS proactive_journal_day ON proactive_journal(local_date, at_ms);
+
+-- Only names checked on a real write get a policy receipt. Existing names are
+-- left intact and must be revalidated before being used as a spoken identity.
+CREATE TABLE IF NOT EXISTS profile_name_validation (
+    profile_id TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
+    policy_version TEXT NOT NULL,
+    validated_at_ms INTEGER NOT NULL
+);
+
+-- The operation coordinator stores only a digest and a reference to this
+-- domain transaction. No original transcript or audio is retained here.
+CREATE TABLE IF NOT EXISTS assistant_domain_receipts (
+    operation_id TEXT PRIMARY KEY,
+    request_hash TEXT NOT NULL,
+    source_turn TEXT NOT NULL REFERENCES household_turns(id) ON DELETE CASCADE,
+    source_revision INTEGER NOT NULL,
+    reminder_id TEXT REFERENCES proactive_reminders(id) ON DELETE CASCADE,
+    result_json TEXT NOT NULL,
+    committed_at_ms INTEGER NOT NULL
+);
+-- Explicit forgetting is distinguished from archive expiry by the domain service.
+DROP TRIGGER IF EXISTS assistant_reminder_source_forgotten;
+
+CREATE TRIGGER IF NOT EXISTS assistant_reminder_source_removed
+BEFORE DELETE ON household_turns
+BEGIN
+    UPDATE proactive_reminders SET state='cancelled' WHERE state='pending' AND id IN
+        (SELECT reminder_id FROM assistant_domain_receipts WHERE source_turn=OLD.id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS assistant_reminder_source_corrected
+AFTER UPDATE OF input_text ON household_turns
+WHEN NEW.input_text!=OLD.input_text AND OLD.input_text!='' AND NEW.source_expired=0
+BEGIN
+    UPDATE proactive_reminders SET state='cancelled' WHERE state='pending' AND id IN
+        (SELECT reminder_id FROM assistant_domain_receipts WHERE source_turn=NEW.id);
+    DELETE FROM assistant_domain_receipts WHERE source_turn=NEW.id;
+END;

@@ -45,6 +45,9 @@ if ! verify_jar "$jar"; then
 fi
 
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Library/Developer/CommandLineTools}"
+# Core is vendored source. Share the host build cache instead of creating a
+# target/ directory inside server/xiaodai-core during linked regressions.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_dir/server/bot-server/src-tauri/target}"
 rust_tests() {
     manifest=$1 suite=$2
     shift 2

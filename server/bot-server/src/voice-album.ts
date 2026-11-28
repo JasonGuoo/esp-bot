@@ -1,4 +1,5 @@
 import { base64ToBuffer } from "./capture";
+import { namePolicyError } from "./name-policy";
 import "./voice-album.css";
 
 type Group = { id: number; revision: number; name: string | null; person_id: string | null; count: number; latest_ms: number };
@@ -48,10 +49,10 @@ export function mountVoiceAlbum(panel: HTMLElement, request: Request, profilesCh
   function clear() { stop(); status.textContent = ""; area.replaceChildren(); }
   function error(cause: unknown) {
     const reason = String(cause);
-    const message = reason.includes("voice_group_changed") ? "这组有了新片段，请刷新后再试。"
+    const message = namePolicyError(reason) ?? (reason.includes("voice_group_changed") ? "这组有了新片段，请刷新后再试。"
       : reason.includes("voice_choose_existing_person") ? "已有这个名字，请从家庭成员中选择。"
       : reason.includes("voice_name_required") ? "请先填写一个名字。"
-      : "暂时无法完成操作，请重试。";
+      : "暂时无法完成操作，请重试。");
     status.textContent = message;
     if (reason.includes("voice_group_changed")) status.append(" ", button("刷新", () => void refresh(active?.id)));
   }

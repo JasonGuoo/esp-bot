@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc,Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
@@ -126,6 +126,7 @@ pub struct Core {
     codex: CodexEngine,
     direct: Arc<DirectNet>,
     health: Arc<Health>,
+    inflight: Arc<Semaphore>,
 }
 
 impl Core {
@@ -143,6 +144,7 @@ impl Core {
     }
 
     fn build(config: Config, codex: CodexEngine) -> Result<Self, CoreError> {
+        if config.routes.len()>16 || config.order.len()>16 {return Err(CoreError("route capacity exceeded".into()));}
         for id in &config.order {
             if !config.routes.iter().any(|r| &r.id == id) {
                 return Err(CoreError(format!("order references unknown route '{id}'")));
@@ -162,7 +164,8 @@ impl Core {
             }
         }
         let health = Arc::new(Health::new(config.health.clone()));
-        Ok(Self { client, config: Arc::new(config), keys: Arc::new(keys), codex, direct: Default::default(), health })
+        Ok(Self { client, config: Arc::new(config), keys: Arc::new(keys), codex, direct: Default::default(), health,
+            inflight:Arc::new(Semaphore::new(4)) })
     }
 
     pub fn config(&self) -> &Config {
@@ -277,6 +280,7 @@ impl Core {
     }
 
     fn routes(&self) -> Vec<Route> {
+        if self.config.routes.len()>16 || self.config.order.len()>16 {return Vec::new();}
         self.config
             .order
             .iter()
@@ -345,16 +349,43 @@ impl Core {
         self.start_messages(messages, cancel, false)
     }
 
+    /// Answer with the configured stateless routes while the conversation thread
+    /// is occupied. Shares clients, keys and health history, never starts/steers
+    /// Luna, and never enables a route disabled by the caller's engine mode.
+    pub fn respond_stateless(&self, messages: Vec<Message>, cancel: CancellationToken) -> Option<Turn> {
+        if !self.http_enabled() || self.routes().is_empty() { return None; }
+        let mut core=self.clone();
+        let mut config=(*self.config).clone();
+        config.mode=EngineMode::HttpOnly;
+        core.config=Arc::new(config);
+        Some(core.start_messages(messages,cancel,false))
+    }
+
     fn start_messages(&self, messages: Vec<Message>, cancel: CancellationToken, allow_steer: bool) -> Turn {
         let (tx, rx) = mpsc::unbounded_channel();
         let token = cancel.child_token();
+        let guard = token.clone().drop_guard();
+        // Reconfiguration is cheap and infallible; admission still enforces
+        // the resource limits before any route or persistent thread is touched.
+        if self.config.routes.len() > 16 || self.config.order.len()>16 || messages.len() > 128
+            || messages.iter().map(|m| m.content.len()).sum::<usize>() > 512 * 1024 {
+            let _ = tx.send(Event::Error { message: "core input budget exceeded".into(), timings: Timings::default() });
+            return Turn { rx, cancel: token, _guard: guard };
+        }
+        let Ok(slot)=Arc::clone(&self.inflight).try_acquire_owned() else {
+            let _=tx.send(Event::Error{message:"core semantic capacity exceeded".into(),timings:Timings::default()});
+            return Turn{rx,cancel:token,_guard:guard};
+        };
         // Barge-in: reserve a still-running Codex turn for this follow-up before anything can
         // cancel it (e.g. the caller dropping the previous Turn), so it can be steered.
         if allow_steer && self.codex_enabled() {
             self.codex.claim_for_followup(&token);
         }
-        let guard = token.clone().drop_guard();
-        tokio::spawn(drive(self.clone(), messages, token.clone(), tx, allow_steer));
+        let (core,worker_cancel)=(self.clone(),token.clone());
+        tokio::spawn(async move {
+            let _slot=slot;
+            drive(core,messages,worker_cancel,tx,allow_steer).await;
+        });
         Turn { rx, cancel: token, _guard: guard }
     }
 }
@@ -555,7 +586,7 @@ async fn drive(core: Core, messages: Vec<Message>, cancel: CancellationToken, ou
         *sentences += 1;
     };
 
-    let outcome = loop {
+    let outcome = 'stream: loop {
         let can_start_more = winner.is_none() && next_stage < stages.len();
         let sleep_until = deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600));
         tokio::select! {
@@ -582,8 +613,12 @@ async fn drive(core: Core, messages: Vec<Message>, cancel: CancellationToken, ou
                             let _ = out.send(Event::FirstToken { route: label(&cands[i]), ms: now });
                         }
                         if winner == Some(i) {
+                            if full.len().saturating_add(s.len())>64*1024 {
+                                break Outcome::Failed("answer byte budget exceeded".into());
+                            }
                             full.push_str(&s);
                             for sentence in splitter.push(&s) {
+                                if sentences>=128 {break 'stream Outcome::Failed("answer sentence budget exceeded".into());}
                                 emit(sentence, &mut sentences, &mut t);
                             }
                         }
@@ -633,8 +668,10 @@ async fn drive(core: Core, messages: Vec<Message>, cancel: CancellationToken, ou
     for (tok, _) in &attempts {
         tok.cancel();
     }
-    for (_, h) in attempts {
-        let _ = h.await;
+    for (_, mut h) in attempts {
+        // An uncooperative transport cleanup must not hold a semantic slot
+        // indefinitely. Codex has its own ordered interrupt/recovery boundary.
+        if tokio::time::timeout(Duration::from_millis(100),&mut h).await.is_err() {h.abort();}
     }
     // Latency log: one sample per started attempt that can be judged.
     let win_ms = winner.and_then(|w| first_at[w]);
@@ -668,6 +705,10 @@ async fn drive(core: Core, messages: Vec<Message>, cancel: CancellationToken, ou
     let ev = match outcome {
         Outcome::Done => {
             if let Some(s) = splitter.flush() {
+                if sentences >= 128 {
+                    let _ = out.send(Event::Error { message: "core output budget exceeded".into(), timings: t });
+                    return;
+                }
                 emit(s, &mut sentences, &mut t);
             }
             t.total_ms = ms();

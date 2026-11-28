@@ -23,7 +23,7 @@ SQLite 是原始档案和派生记录的权威数据源。Graphiti 是可以删�
 | 自动声纹 | 仅产生候选，不能选择私人记忆范围、获得家长权限或批准打印 |
 | 私人范围 | 显式 `private_profile_id` 保留；不会因匹配到某个人而变为共享范围 |
 
-配置文件仍是现有数据根目录中的 `brain.json`；新安装默认数据根为 `~/小呆 Server/`，已有安装沿用[目录迁移规则](../../mac-bot-server.md)。记忆数据库仍为数据根下的 `memory/memory.sqlite3`。
+配置文件仍是现有数据根目录中的 `brain.json`；新安装默认数据根为 `~/Xiaodai_Server/`，已有安装沿用[目录迁移规则](../../mac-bot-server.md)。记忆数据库仍为数据根下的 `memory/memory.sqlite3`。
 
 新建家庭时读取下列 `memory` 字段。家庭建立后，家庭设置页和 `household.settings.set` 修改 SQLite 内的实际设置，不以重启覆盖用户选择：
 

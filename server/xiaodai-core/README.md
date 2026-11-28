@@ -18,7 +18,7 @@ No memory, ASR, TTS or device protocol here; a brain wraps it.
 ```rust
 use fast_responder::{Core, Config, EngineMode, Event, CancellationToken};
 
-let core = Core::new(Config::default())?;   // mode = Dual, workspace_root = "/Users/jason/小呆 Server"
+let core = Core::new(Config::default())?;   // mode = Dual, workspace_root = "/Users/jason/Xiaodai_Server"
 core.warmup().await;                        // HTTP pre-connect + Codex spawn/initialize/model list/primed thread
 let cancel = CancellationToken::new();
 let mut turn = core.respond("你好", cancel.clone());
@@ -53,7 +53,7 @@ this turn). `core.health()` returns the same rolling stats + Luna state + recent
 
 ## Workspace access (`Config.workspace_root`)
 
-Default `/Users/jason/小呆 Server` (override with `XIAODAI_WORKSPACE_ROOT`).
+Default `/Users/jason/Xiaodai_Server` (override with `XIAODAI_WORKSPACE_ROOT`).
 - Codex: thread `cwd` = root, sandbox `workspace-write`, each turn sends
   `sandboxPolicy {type: workspaceWrite, writableRoots: [root], networkAccess: true}`, `approvalPolicy: never`.
   If an approval request still arrives, it is **accepted only when everything it touches is inside the root**
@@ -183,7 +183,7 @@ cargo run --release --bin fast-bench -- fallback     # simulated Luna outage -> 
 cargo run --release --bin fast-bench -- delegate     # ONE harmless Luna -> Grok Bot round trip (sends a real task)
 cargo run --release --bin fast-bench -- health       # rolling latency stats + Luna state
 ```
-Bench runs write their latency log and scratch files only under `~/小呆 Server/runtime/tmp/xiaodai-core-test`
+Bench runs write their latency log and scratch files only under `~/Xiaodai_Server/runtime/tmp/xiaodai-core-test`
 (unless `XIAODAI_LATENCY_LOG` is set); tests use no log file (one unit test writes there and removes its folder).
 Options: `--codex-model`, `--codex-effort`, `--codex-tier`, `--fallback-ms`, `--barge-in steer|interrupt`, `--env-file`. Keys come from env or `.env`;
 key values, tokens and ~/.codex auth contents are never read, printed or logged.

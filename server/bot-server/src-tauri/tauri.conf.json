@@ -39,6 +39,7 @@
     ],
     "resources": {
       "../local-models/worker.py": "local-models/worker.py",
+      "../local-models/qwen_robot.py": "local-models/qwen_robot.py",
       "../local-models/model_store.py": "local-models/model_store.py",
       "../local-models/models.json": "local-models/models.json",
       "../local-models/rma_qwen.py": "local-models/rma_qwen.py",
@@ -50,6 +51,8 @@
       "../local-models/diarization.py": "local-models/diarization.py",
       "../local-models/graphiti_worker.py": "local-models/graphiti_worker.py",
       "../local-models/media_prepare.py": "local-models/media_prepare.py",
+      "../local-models/teaching_render.py": "local-models/teaching_render.py",
+      "../local-models/svm_radial_v1.json": "local-models/svm_radial_v1.json",
       "../local-models/requirements-diarization.txt": "local-models/requirements-diarization.txt",
       "../local-models/requirements-graphiti.txt": "local-models/requirements-graphiti.txt"
     },

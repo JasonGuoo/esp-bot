@@ -42,7 +42,7 @@ Vite 不监听 Rust 的 `src-tauri/target`、本地模型、Python 环境和 `ru
 
 在同页选择“三家模型的网络”并保存、重载、启动后，GLM、DeepSeek、Qwen 的模型请求可绑定活动 Wi-Fi 或有线网卡。按钮“测试网卡直连”不使用额度。[网络行为及限制](../../docs/mac-opencode.md#模型走哪张网卡)。
 
-`brain.json` 位于 `~/小呆 Server/brain.json`。
+`brain.json` 位于 `~/Xiaodai_Server/brain.json`。
 模型、端点与优先级在 **模型与密钥** 编辑；本机模型环境在 **本地能力**；启动偏好和完整 JSON 在 **运行设置**。
 **2026-11-13 默认顺序：GLM → DeepSeek Flash**；Qwen 默认停用，仍可在控制台重新启用。
 旧默认配置的升级条件见 [模型顺序迁移](../../docs/mac-opencode.md#旧配置的模型顺序升级)。更新并重新打开 App 后生效；单独拉取源码不会改变已运行的 App。11 月 13 日的默认顺序变更当时仅交付源码和文档。配置密钥不代表已确认账户额度或模型可用性。

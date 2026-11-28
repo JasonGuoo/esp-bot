@@ -39,6 +39,9 @@ pub fn failure_line(error: &str, seed: &str) -> Option<(&'static str, &'static s
     if code == "all_routes_unavailable" {
         return Some(("我需要的服务现在不可用，请在 Mac 上检查模型设置。", "confused"));
     }
+    if code == "brain_core_busy" {
+        return Some(("我还在处理前面的回答，稍等一下再问我吧。", "thinking"));
+    }
     let transient = code.starts_with("brain_core") || code.starts_with("core_")
         || code.starts_with("harness") || code.starts_with("opencode") || code.contains("timeout") || code == "model_error";
     (transient && !code.starts_with("tts")).then(|| pick(OOPS, seed))

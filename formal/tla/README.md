@@ -9,12 +9,19 @@
 | 家人在旁边说话，或一个已设置的定时提醒到了 | 被动观察不能开启远端收音。提醒只占用播报，完整唤醒或有意触摸才打开对话。过期的语音起始事件不能进入新一轮。 | [ListeningGate](firmware/ListeningGate/ListeningGate.tla) · [固件状态机](../../firmware/components/bot_runtime/bot_runtime.c) · [提醒回归](../../firmware/components/bot_runtime/tests/test_proactive.c) |
 | 「请告诉我……树叶为什么是绿色的」在正式提交前接着说 | 停顿可以触发一次预识别。新音频抵达要丢掉旧候选，Mac 等本轮声明的帧到齐后才接纳完整提问。 | [UtteranceCommit](protocol/UtteranceCommit/UtteranceCommit.tla) · [设备提交](../../firmware/components/brain_link/brain_secure.c) · [Mac 音频输入](../../server/bot-server/src-tauri/src/brain/media.rs) · [网关回环测试](../../server/bot-server/src-tauri/src/brain/gateway.rs) |
 | 用户问完了，声纹还没回来，或者答案要想一会儿 | 普通回答可以先走。慢回答在条件允许时可简短应一次，刚唤醒、近期刚应过或已收到首个回答内容时抑制提示。两句音频即便以后一句先准备好，也依原顺序送出。 | [ReplyTiming](macos/ReplyTiming/ReplyTiming.tla) · [识别任务](../../server/bot-server/src-tauri/src/brain/orchestration.rs) · [工作进程通道](../../server/bot-server/src-tauri/src/brain/worker.rs) · [流式回答](../../server/bot-server/src-tauri/src/brain/fast_core.rs) |
-| 讲小兔故事时，用户点「补一句」，说「把小兔换成小狗」 | 补话紧接原轮时，保留原问题，并只将有完整播放回执的前文标为已播。还没播过正文也能补话。「重新说」、停止、跨会话及跳过一轮均不能复用这次补话许可。 | [Supplement](protocol/Supplement/Supplement.tla) · [网关](../../server/bot-server/src-tauri/src/brain/gateway.rs) · [补话上下文](../../server/bot-server/src-tauri/src/brain/orchestration.rs) · [对话核心替身测试](../../server/xiaodai-core/tests/codex_fake.rs) |
+| 讲小兔故事时，用户点「补一句」，说「把小兔换成小狗」 | 补话紧接原轮时，保留原问题，并只将有完整播放回执的前文标为已播。还没播过正文也能补话。点补话后立即停止，网关接纳当前轮或为这次补话预留的直接后继轮次的关闭请求。「重新说」、停止、跨会话及跳过一轮均不能复用这次补话许可。 | [Supplement](protocol/Supplement/Supplement.tla) · [网关](../../server/bot-server/src-tauri/src/brain/gateway.rs) · [补话上下文](../../server/bot-server/src-tauri/src/brain/orchestration.rs) · [对话核心替身测试](../../server/xiaodai-core/tests/codex_fake.rs) |
 | 思考中补一句，模型先把补话通知送出，steer 的确认还没被调用方处理 | 确认之前的通知先留在这次请求的屏障里。确认成功才交给新的回答者，而且只交一次；拒绝、超时或原轮已结束则丢掉这次补话的早到输出，沿原有的新轮退路。上一次补话的通知不能清掉下一次的等待。 | [SteerHandoff](macos/SteerHandoff/SteerHandoff.tla) · [Codex steer](../../server/xiaodai-core/src/codex.rs) · [替身回归](../../server/xiaodai-core/tests/codex_fake.rs) |
 | 话说完之前先提交，或失败提示还在准备时控制台取消了这一轮 | 尾帧没到不能进模型。停止、排空超时或新的一轮先抬高计数，迟到的帧和过期的失败或提醒提示都不能再获得播放权。 | [DeferredGateway](macos/DeferredGateway/DeferredGateway.tla) · [网关](../../server/bot-server/src-tauri/src/brain/gateway.rs) · [提交孪生](protocol/UtteranceCommit/UtteranceCommit.tla) |
 | 小呆正在播报，用户点停止，或等它讲完接着问 | 停止释放播放权，旧回执不能启动下一轮。未打断时，在当前回答所需的显示、播放、最终呈现回执都到齐后才能进入追问。委派说明同样要等最后一段的回执，后台任务不因此结束。 | [TurnPlayback](protocol/TurnPlayback/TurnPlayback.tla) · [固件及 Mac 事件映射](../../docs/specs/household-companion/tla/README.md) |
 | 「帮我查资料」之后又问别的，或者结果在断线后才到 | 本轮可以先结束。结果留在收件箱里，不靠旧的播放许可播出。下次设备自己开始的轮次，没说话就先说简短结果；直接提新问题则先回答，结果改期。丢了通知可以再扫，不把任务重跑一遍。 | [TaskDelivery](macos/TaskDelivery/TaskDelivery.tla) · [任务库](../../server/bot-server/src-tauri/src/brain/tasks.rs) · [网关](../../server/bot-server/src-tauri/src/brain/gateway.rs) |
 | 「小呆，晚安啦」和「讲个晚安故事」 | 前一句是道别，短回应完成后安静退出。后一句是请求，继续讲故事。「先别说再见」和「谢谢小呆，继续讲」也要保持对话。 | [ConversationClose](macos/ConversationClose/ConversationClose.tla) · [真实中文输入与判定](../../server/bot-server/src-tauri/src/brain/flow.rs) · [播报结束后关闭会话](../../server/bot-server/src-tauri/src/brain/gateway.rs) |
+| 网络写不动，或旧语音已经在发送队列里时点停止 | writer 独立、有界；本地停止推进代次，未开始的旧输出丢弃，在途写的旧回执不能授权新轮。 | [GatewayDispatch](protocol/GatewayDispatch/GatewayDispatch.tla) · [实际 writer](../../server/bot-server/src-tauri/src/brain/gateway/io.rs) |
+| 两个连接同时准备同一份任务结果 | 只有赢得持久 CAS 的连接能发送；失败者不能撤销获胜者的租约。 | [DeliveryClaim](macos/DeliveryClaim/DeliveryClaim.tla) · [网关](../../server/bot-server/src-tauri/src/brain/gateway.rs) |
+| Luna 还占着上一轮的会话，新问题抵达 | 有界等待后使用已有 HTTP 策略；不借用或改写 Luna 线程，容量满明确拒绝。 | [LunaAdmission](macos/LunaAdmission/LunaAdmission.tla) · [核心适配](../../server/bot-server/src-tauri/src/brain/fast_core.rs) |
+| 模型不断输出，消费者或 RPC ACK 很慢 | 消息和字节有界；保留已交付前缀，溢出明确失败，不静默跳过语义。 | [SemanticBuffers](macos/SemanticBuffers/SemanticBuffers.tla) · [RPC](../../server/xiaodai-core/src/codex.rs) |
+| 名字输入是角色称呼或辱骂，旧资料又已有此名字 | 新写入先共用校验；旧资料保留供更正，不据此作口头身份称呼。 | [NameAdmission](macos/NameAdmission/NameAdmission.tla) · [名字策略](../../server/bot-server/src-tauri/src/memory/names.rs) |
+| “一分钟后提醒我喝水”、取消或遗忘后旧回执才来 | 唯一意图只提交一次；只读查询不写库；取消撤播放权但保留已经听见的事实；归档过期与主动遗忘分开。 | [CapabilityExecution](macos/CapabilityExecution/CapabilityExecution.tla) · [助理入口](../../server/bot-server/src-tauri/src/brain/capability_dispatch.rs) · [原子领域事务](../../server/bot-server/src-tauri/src/memory/assistant_actions.rs) |
+| 空闲结果查询被数据库锁住，或停止清理很迟才执行 | Stop 和状态继续处理；准备工作有上限；清理只撤旧租约，不能误停下一轮。 | [CancellationCleanup](macos/CancellationCleanup/CancellationCleanup.tla) · [有限后台工作](../../server/bot-server/src-tauri/src/brain/gateway/jobs.rs) |
 
 ## 修改与新增功能
 
@@ -22,9 +29,9 @@
 
 [Issue #36](https://github.com/JasonGuoo/esp-bot/issues/36) 的[十步规格](../../docs/specs/responsive-assistant/implementation-plan.md)和[验收映射](../../docs/specs/responsive-assistant/acceptance.md)规划交互控制、网关等待、Luna 隔离、独立任务交付、能力操作与迟到身份工作流。**本次为文档-only：未修改运行行为、`.tla`、`.cfg` 或 `checks.sh`，没有新模型检查或实板通过声明。**
 
-后续首次实现各行为时，在同一 PR 更新受影响的现有孪生并建立所需新孪生。规划的 `macos/ResponsiveControl`、`protocol/GatewayDispatch`、`macos/LunaWorker`、`macos/TaskDelivery` 等名称目前仅是规格中的路径，不是已经存在或运行的模型。能力、身份、上下文和恢复的模型范围以验收映射为准。#35 的 steer 交接是 Mac 侧并发，先用 `macos/SteerHandoff` 记录「早到通知只交接一次、撤回后不漏进新回答者、旧通知不能清掉新的等待」；它不替代尚未实现的 LunaWorker。RA-00 不改 `TurnPlayback`：模块契约已经允许 final 内容段在独立任务仍运行时结束播放，这次只是 Mac 不再比契约更严。RA-04 给 `TurnPlayback` 加上委派前台：最后一段的硬件回执仍然是进入追问的条件，后台任务不因此变成完成。`macos/TaskDelivery` 检查收件箱和租约。
+后续首次实现各行为时，在同一 PR 更新受影响的现有孪生并建立所需新孪生。当时规划的目录随后分步实现：`macos/TaskDelivery` 已随 RA-04 加入；11 月 27 日新增 `protocol/GatewayDispatch` 及上表五个 Mac 模型。`macos/ResponsiveControl` 和完整 `macos/LunaWorker` 仍未实现。能力、身份、上下文和恢复的模型范围以验收映射为准。#35 的 steer 交接是 Mac 侧并发，先用 `macos/SteerHandoff` 记录「早到通知只交接一次、撤回后不漏进新回答者、旧通知不能清掉新的等待」；它不替代尚未实现的 LunaWorker。RA-00 不改 `TurnPlayback`：模块契约已经允许 final 内容段在独立任务仍运行时结束播放，这次只是 Mac 不再比契约更严。RA-04 给 `TurnPlayback` 加上委派前台：最后一段的硬件回执仍然是进入追问的条件，后台任务不因此变成完成。`macos/TaskDelivery` 检查收件箱和租约。
 
-控制循环的进展不应依赖模型/网络/数据库必定完成；业务完成则明确其健康与公平调度假设。有界队列、丢弃/合并策略、来源撤回、未知效果核对、重连与持久回执均需对应实现回归。当前六个模型和下方 11 月 20 日记录仍只证明原有范围。
+控制循环的进展不应依赖模型/网络/数据库必定完成；业务完成则明确其健康与公平调度假设。有界队列、丢弃/合并策略、来源撤回、未知效果核对、重连与持久回执均需对应实现回归。下方 11 月 20 日记录只证明当时六个模型的范围；11 月 27 日的新增模型和本机检查见[集成记录](../../docs/review-local-integration-2026-11-27.md)，不能扩展为完整 RA-01～10 或实板通过。
 
 ### 通用要求
 
@@ -33,7 +40,12 @@
 3. 表达用户可观察的错误，例如上一轮的硬件完成通知使新一轮提前追问。写出绝不能发生的结果，需要保证进展时也写出在什么条件下最终必须完成。为输入数量、队列、轮次数给出有限边界，为线程或设备进展给出公平性假设。发生反例时，将原话或事件顺序带回实现，修复后重跑模型和回归。
 4. 在变更交付中记录影响判断、运行命令、实际结果和仍待验证的部分。首音延迟、误截句、回答是否接住补充、语气是否合宜，使用实际录音、回执、对话回放或真人试听评价。无板时先完成本机可重复的检查。
 
+
+小机器人 / 系统声音回退、独立首句通道、Stop 及迟到结果归属见 [LocalSpeech](macos/LocalSpeech/README.md)。
+
 ## 本机运行
+
+新增功能或修复完成后使用统一的 [功能回归入口](../../tests/regression/README.md)：`./tools/check-functional-regression.sh`。它同时执行以下所有孪生、实际代码回归与本机构建，并保留按用户场景区分的报告。单独模型入口仍用于定向排查。
 
 ```sh
 ./tools/check-tla-twins.sh

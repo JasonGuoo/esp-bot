@@ -30,7 +30,7 @@ ASR 默认是多语言 Whisper small 的 MLX 转换，权重 revision 为 `45f39
 
 ## 2. Mac 环境准备
 
-以下命令使用当前数据目录 `~/小呆 Server/`。已有旧版数据时，先按
+以下命令使用当前数据目录 `~/Xiaodai_Server/`。已有旧版数据时，先按
 [Mac Server 迁移说明](../../../docs/mac-bot-server.md) 迁移，再准备或修改模型目录。
 
 使用原生 Apple Silicon 的 Python 3.11 或 3.12，避免在 Rosetta 的 x86_64 Python 中安装 MLX。在仓库的 `server/bot-server/local-models` 目录执行：
@@ -39,13 +39,13 @@ ASR 默认是多语言 Whisper small 的 MLX 转换，权重 revision 为 `45f39
 python3.11 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 
-XIAODAI_MODEL_DIR="$HOME/小呆 Server/models/local"
+XIAODAI_MODEL_DIR="$HOME/Xiaodai_Server/models/local"
 .venv/bin/python provision_models.py --model-dir "$XIAODAI_MODEL_DIR" --only asr speaker face
 ```
 
 `requirements.txt` 固定三个模型适配库的版本，其他直接依赖给出兼容范围。它不是已解析的完整环境锁；PyTorch 与 torchaudio 需要由安装器解析为匹配版本。没有为用户的 Mac 声称依赖已安装成功。Whisper 的 NumPy 输入绕过文件解码器，因此本适配路径不需要为了输入 WAV 另装 ffmpeg。
 
-模型路径必须与 `~/小呆 Server/brain.json` 的 `models.model_dir` 相同；上例对应新配置默认的 `models/local`。已有配置可以保留自选路径。把 `models.python` 配成这个 venv 中 Python 的**绝对路径**，不能继续指向另一个没有安装依赖的 `python3`。开发时 `models.script` 指向本目录 `worker.py` 的绝对路径；打包时可使用应用已解析的资源路径。
+模型路径必须与 `~/Xiaodai_Server/brain.json` 的 `models.model_dir` 相同；上例对应新配置默认的 `models/local`。已有配置可以保留自选路径。把 `models.python` 配成这个 venv 中 Python 的**绝对路径**，不能继续指向另一个没有安装依赖的 `python3`。开发时 `models.script` 指向本目录 `worker.py` 的绝对路径；打包时可使用应用已解析的资源路径。
 
 下载器仅在上述显式命令中联网。下载到固定 revision，先写临时文件，检查大小及已有上游 SHA256，再原子替换文件，最后写 `installation.json`。它不运行网络返回的模型代码或音视频样例。已有文件只有与固定摘要或安装收据一致才会复用。更新模型前停止本地模型进程；不要并发运行两个下载器。
 
@@ -137,3 +137,40 @@ stdout 保留独立文件描述符用于协议，第三方库的 stdout/stderr �
 | `request_too_large` | 请求被拒绝且进程退出；缩小输入并重新启动 |
 
 本机合成语音已用于 ASR 和 TTS 检查；真人语音音质、身份阈值及机器人端到端链路仍需单独验收。未运行 CI。
+
+
+## 6. 小机器人语音（本机 Qwen3）
+
+2026-11-28 owner 选择 Vivian/little-robot-v1。复用 MLX Audio 0.6.8 的
+CustomVoice 1.7B 8bit；模型与专用 Python 放在 App 外，不覆盖 ASR 环境。
+在控制台「管理 → 本机模型」选择小机器人，并填写 TTS Python、Qwen3 模型目录。
+底层配置为 `models.tts_backend="qwen3_robot"`、`models.tts_python`、
+`models.qwen3_model_dir`，后两个路径必须为绝对路径。系统声音字段用于失败回退。
+保存后重载服务。
+
+安装单独 venv 后，可显式用 `pip install -r requirements-qwen3.lock` 复现本机环境。
+权重使用 `qwen_robot.py` 中固定模型 revision，首次加载核对两份 safetensors 的
+SHA256；还需本机 ffmpeg 带 rubberband filter。Worker 不下载依赖或模型。
+
+发音使用 Vivian、固定中文温暖语气、seed 7、temperature 0.7；robot-v1 音效与
+试听一致。保留完整 WAV 协议：内部 MLX 流式块只用来约束 token、时长和异常，
+不会作为未经完整检查的音频前缀交给设备。超过 1,400 codec token 不伪装成完成。
+普通模型/音效故障在当前进程寿命内回退系统声音，响应与健康检查保留明确
+`fallback_reason`；输出超长则拒绝并要求分段。Rust 的取消、超时和进程组所有权
+继续覆盖 MLX 与 ffmpeg；首句和普通 TTS 各占原有独立通道，最多各加载一份模型。
+首次启动/取消后的重新加载有冷启动成本，不等同于试听中预热后的首块延迟。
+
+本机默认回归不进行大模型推理：`test_qwen_robot.py` 调真实 PCM/音效/回退路径，
+Rust 测试检查通道选择、Stop 杀死实际后代和旧结果隔离。显式真实模型验收：
+
+```sh
+python3 tools/smoke-robot-tts.py \
+  --python "/absolute/tts-venv/bin/python" \
+  --model "/absolute/qwen3-custom-1.7b-8bit" \
+  --output "/absolute/new-private-report-directory"
+```
+
+从仓库根运行。成功必须是实际 Qwen robot 后端、完整非静音 PCM、已加载且通过
+权重校验，若发生系统回退则验收失败。另运行统一功能集与
+`./tools/check-tla-twins.sh macos/LocalSpeech`。实板音量、听感及离线唤醒音色一致性
+仍需 S31；这些检查不授予新的收音、联网或播放许可。

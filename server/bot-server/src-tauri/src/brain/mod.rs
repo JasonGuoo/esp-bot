@@ -14,9 +14,14 @@ mod memory_worker;
 mod rpc;
 mod timing;
 pub mod contracts;
+pub mod control_contracts;
+mod storage;
+mod capability_registry;
+mod capability_dispatch;
 pub mod tasks;
 pub mod task_delivery;
 pub mod presentation;
+mod teaching_visuals;
 pub mod artifacts;
 mod capabilities;
 mod orchestration;
@@ -182,6 +187,7 @@ pub struct Brain {
     active: StdMutex<HashMap<String, ActiveTurn>>,
     identity_jobs: StdMutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     pub tasks: Arc<tasks::TaskService>,
+    assistant: Arc<capability_registry::Registry>,
     device_states: StdMutex<HashMap<String,Value>>,
     device_volumes: device_volume::DeviceVolumes,
     progress_audio: Mutex<HashMap<String,Value>>,
@@ -235,9 +241,11 @@ impl Brain {
         let (cancellation_events, _) = broadcast::channel(64);
         let (foreground_generation, _) = watch::channel(0);
         let tasks = tasks::TaskService::open(runtime_dir.join("tasks"), config.tasks.clone(), Arc::clone(&sink))?;
+        let assistant=Arc::new(capability_registry::Registry::new());
+        assistant.refresh(&memory)?;
         let graphiti=Arc::new(memory::graphiti::GraphitiClient::new(&config.memory.graphiti,graphiti_script));
         let brain = Arc::new(Self { models: ModelWorker::new(config.models.clone(), config_dir.clone()), config, config_dir,
-            harness, fast, memory, credentials, sink, turn_gate:AsyncRwLock::new(()), active:StdMutex::new(HashMap::new()), identity_jobs:StdMutex::new(HashMap::new()), tasks, device_states:StdMutex::new(HashMap::new()), device_volumes:Default::default(), progress_audio:Mutex::new(HashMap::new()), acks:Default::default(), ack_warmup:Mutex::new(None), naming:StdMutex::new(HashMap::new()), understood:StdMutex::new(HashMap::new()), closing:Default::default(), failure_audio:Mutex::new(HashMap::new()), latency:Default::default(), graphiti, accepting:AtomicBool::new(false),
+            harness, fast, memory, credentials, sink, turn_gate:AsyncRwLock::new(()), active:StdMutex::new(HashMap::new()), identity_jobs:StdMutex::new(HashMap::new()), tasks, assistant, device_states:StdMutex::new(HashMap::new()), device_volumes:device_volume::DeviceVolumes::default(), progress_audio:Mutex::new(HashMap::new()), acks:Default::default(), ack_warmup:Mutex::new(None), naming:StdMutex::new(HashMap::new()), understood:StdMutex::new(HashMap::new()), closing:Default::default(), failure_audio:Mutex::new(HashMap::new()), latency:Default::default(), graphiti, accepting:AtomicBool::new(false),
             cancellation_events, progress_events, foreground_generation, background:Mutex::new(None), memory_script, gateway:Mutex::new(None) });
         brain.install_task_handlers()?;
         Ok(brain)

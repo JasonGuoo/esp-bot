@@ -60,6 +60,24 @@ pipeline is vendored, and no claim of real-device validation is made.
 - Speech output rights and system voice availability follow the applicable
   installed OS/voice terms. There is no voice-cloning implementation here.
 
+## Qwen3 local little-robot voice
+
+- Reuses `mlx-audio==0.6.8` (MIT), `load_model` and
+  `generate_custom_voice`; no inference implementation is vendored.
+  https://github.com/Neywa-Labs/mlx-audio
+- Upstream Qwen3-TTS: https://github.com/QwenLM/Qwen3-TTS . The local
+  `mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit` model card declares
+  Apache-2.0. Pinned revision and weight SHA256 values live in `qwen_robot.py`;
+  model weights remain outside the repository and App bundle.
+- Voice: the built-in Vivian preset with a fixed Chinese instruction. The
+  robot timbre is an ffmpeg `rubberband` pitch shift plus a 6 ms echo and limiter,
+  matching the owner's audition. It is not a cloned or native child voice.
+- ffmpeg and its Rubber Band filter are separately installed executables;
+  neither is bundled here. Their build-specific licenses (including Rubber
+  Band's GPL/commercial terms) must be reviewed before redistributing them.
+- `requirements-qwen3.lock` records the actual isolated Mac audition environment;
+  do not install it over the ASR/identity environment.
+
 The model manifest separates code, weights and platform-provided resources.
 Package dependencies retain their own licenses. The repository does not add a
 claim that an upstream benchmark or license statement certifies this product.

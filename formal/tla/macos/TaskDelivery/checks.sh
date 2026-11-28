@@ -14,3 +14,7 @@ server_tests \
     brain::gateway::tests::a_question_defers \
     brain::gateway::tests::a_silent_turn \
     brain::gateway::tests::a_task_result_offer
+
+if [ "$(uname -s)" = Darwin ]; then
+    server_tests brain::gateway::tests::simulator::running_background_task_allows_two_chat_turns_and_retains_its_result
+fi

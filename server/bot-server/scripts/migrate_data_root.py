@@ -3,7 +3,8 @@
 
 Stop the old app first. Session transfer uses OpenCode's own export/import;
 the old global database is read through a temporary SQLite snapshot and is
-never modified. Secrets remain in the macOS Keychain.
+never modified. Legacy provider Keychain entries are not read or migrated;
+managed model keys come from the current App session or launch environment.
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ import tempfile
 
 APP = Path(__file__).resolve().parents[1]
 OLD_DEFAULT = Path.home() / "Library/Application Support/ai.reasonia.espbot.server"
-DEST_DEFAULT = Path.home() / "小呆 Server"
+DEST_DEFAULT = Path.home() / "Xiaodai_Server"
 
 
 def read_jsonc_object(path: Path) -> dict:
@@ -215,7 +216,7 @@ def main() -> None:
         models["python"] = str(root / "engines/model-python/bin/python")
         sources = root / "engines/local-models"
         sources.mkdir(mode=0o700, parents=True)
-        for name in ("worker.py", "model_store.py", "rma_qwen.py", "memory_extract.py", "say_guard.py", "models.json"):
+        for name in ("worker.py", "model_store.py", "rma_qwen.py", "memory_extract.py", "say_guard.py", "qwen_robot.py", "models.json"):
             shutil.copy2(APP / "local-models" / name, sources / name)
         models["script"] = str(sources / "worker.py")
         if models.get("asr_backend") == "rma_qwen":
@@ -254,7 +255,7 @@ def main() -> None:
         config_path.chmod(0o600)
         print("Transferring only 小呆 OpenCode sessions…", flush=True)
         count = transfer_sessions(root, args.old_opencode_data, Path(harness["executable"]))
-        (root / "README.md").write_text("# 小呆 Server\n\n记忆、家庭成员资料、OpenCode 会话、模型和工作文件保存在此目录。\n工作区：`runtime/opencode/workspace`。API Key 仍由 macOS 钥匙串保护。\n", encoding="utf-8")
+        (root / "README.md").write_text("# Xiaodai_Server\n\n记忆、家庭成员资料、OpenCode 会话、模型和工作文件保存在此目录。\n工作区：`runtime/opencode/workspace`。模型 API Key 仅来自当前 App 会话或启动环境。\n", encoding="utf-8")
         marker.unlink()
         print(f"Migration complete: {count} Bot session(s). Original data and Keychain entries were retained.")
     except Exception:

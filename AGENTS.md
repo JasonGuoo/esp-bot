@@ -2,6 +2,9 @@
 
 ## 小呆的 TLA+ 孪生与对话验收
 
+- **2026-11-28 owner 要求：新增功能和 bug fix 完成后，必须运行补充功能回归集 `./tools/check-functional-regression.sh`。** 先补/更新 [用户场景与精确用例映射](tests/regression/SCENARIOS.md)，保留真实实现回归；定向检查用于开发迭代，不能代替最终完整运行。按 [suite 说明](tests/regression/README.md)保留报告，分别说明本机自动结果、实板/真实模型 not_run 和仍未实现能力；不使用 GitHub CI。
+- **2026-11-27 owner 要求：所有新开发的功能必须在同一变更中提供可重复运行的测试案例，用于后续回归验证。** 覆盖正常行为和实际相关的失败、边界、取消/重试场景，调用真实实现；不能仅以构建成功、手工说明或模拟预期结果代替测试案例。没有板或模型时仍编写可在本机执行的适用回归，并明确列出待实板/真实模型验收项。
+- 必要时新增或更新 TLA+ 孪生，将模型、TLC 配置、实现回归和运行入口一起保留；模型检查与实际代码回归互补。反例及本次发现的缺陷要保留为回归用例。该要求优先于下方历史交付中的“不要求测试”表述，不改变禁止 CI 的约定。
 - 每次修改或新增功能，都要评估会影响哪个用户场景、由哪一端决定，以及相关 TLA+ 孪生是否需要更新。各平台新增核心行为，或改变状态迁移、跨端协议、并发任务、取消、队列容量与等待策略时，在同一变更中编写或更新模型、TLC 配置和对应的实现回归。既有核心路径缺模型，就在改动该路径时补齐。行为保持一致时，复跑相关检查并在交付中写明依据。纯文案或资源修改列出影响判断即可。
 - 对话优先从人会遇到的情形出发。覆盖说到一半停顿又继续、慢回答的短回应、声纹迟到、补一句或重新说、停止、播完再追问、明确道别。写清用户已经听到了什么、新话应承接哪一轮，以及什么时候小呆应当安静。遇到反例，保留触发它的话或事件顺序作为实现回归。
 - 目录统一为 `formal/tla/<责任域>/<模型名>/`。固件归 `firmware`，Mac App、服务和模型工作进程归 `macos`，两端共同遵守的时序归 `protocol`。在配置好的 Mac 上运行 `./tools/check-tla-twins.sh`，也可指定受影响的模型。分别记录模型结果、实际代码运行、板上声学及真人体验的证据。目录、场景与本机命令见 [TLA+ 孪生索引](formal/tla/README.md)。
@@ -113,9 +116,9 @@
 ## Delivery and testing policy
 
 - **Do not create or configure CI pipelines** for this project. Do not add GitHub Actions verification jobs or treat CI as a merge prerequisite.
-- Prioritize delivering modular, reviewable source code and clear integration contracts. If a real device, toolchain or practical test environment is unavailable, **write the code without attempting or requiring tests**.
+- Prioritize modular, reviewable source code and clear integration contracts. Every new feature must include regression cases. If a device, model or toolchain is unavailable, write applicable local regressions, record unavailable checks as not_run, and distinguish those from hardware acceptance; never claim an unavailable environment was exercised.
 - State the verification status precisely in the handoff: distinguish written code from builds, device runs, and camera/motor calibration actually performed. Never call an untested implementation "verified".
-- Do not add testing infrastructure or workflow changes solely for reassurance. Existing local/manual test examples may remain for optional future use; do not execute or enforce them without a concrete reason or explicit request.
+- Reuse the existing local test commands and TLA+ runner. Run the regressions relevant to each new feature or fix in the real local environment; add no CI or unrelated workflow infrastructure.
 - Preserve separation between `vision_attention` (all face tracks and eye estimates), `attention` (selected target + head/eye motion planning), `face` (LVGL expression rendering), and server modules.
 - Hardware target: **ESP32-S31-Korvo-1 V1.1 / ESP32-S31**, not ESP32-S3.
 

@@ -666,6 +666,28 @@ fn parse_structured(text: &str) -> Option<Value> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn actual_route_selection_skips_transport_and_5xx_until_cooldown_expires() {
+        let root=std::env::temp_dir().join(format!("xiaodai-route-selection-{}",Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut config=super::super::HarnessConfig::default();config.routes.truncate(2);
+        for route in &mut config.routes {route.enabled=true;route.base_url=None;route.api_key_env=None;}
+        let preferred=config.routes[0].clone();let backup=config.routes[1].id.clone();
+        let harness=Harness::new(config,root.join("harness"),root.clone(),Arc::new(|_|{}),Arc::new(super::super::secrets::SessionKeys::default())).unwrap();
+        for error in [json!({"cause":{"code":"ECONNREFUSED"}}),json!({"status":503})] {
+            let failure=super::super::routing::classify(&error,&preferred,None);
+            harness.routing.lock().unwrap().record(&preferred.id,&failure,&harness.config);
+            let eligible=harness.available_routes().unwrap();
+            assert_eq!(eligible.iter().map(|route|route.id.as_str()).collect::<Vec<_>>(),vec![backup.as_str()]);
+            let mut routing=harness.routing.lock().unwrap();
+            let health=routing.routes.get_mut(&preferred.id).unwrap();
+            assert_eq!(health.retry_at_ms-health.failed_at_ms,45_000);
+            health.retry_at_ms=now_ms().saturating_sub(1);drop(routing);
+            assert_eq!(harness.available_routes().unwrap()[0].id,preferred.id);
+        }
+        drop(harness);let _=std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn native_review_requires_a_matching_bounded_call() {
         let read = json!({"resources":["/tmp/test.txt"]});

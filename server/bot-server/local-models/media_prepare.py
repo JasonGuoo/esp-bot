@@ -409,7 +409,11 @@ def render(request, output):
         if not isinstance(diagram, dict):
             fail("diagram_invalid")
         diagram_type = diagram.get("type", "concept")
-        if diagram_type == "fraction":
+        if diagram_type == "svm_radial":
+            from teaching_render import render_svm
+            proof, print_text = render_svm(diagram, draw, font, draw_lines)
+            metadata.update(proof)
+        elif diagram_type == "fraction":
             denominator = int(number(diagram.get("denominator"), 1, 20, "fraction_denominator_invalid"))
             numerator = int(number(diagram.get("numerator"), 0, denominator, "fraction_numerator_invalid"))
             if denominator != diagram.get("denominator") or numerator != diagram.get("numerator"):
@@ -426,7 +430,10 @@ def render(request, output):
             high = number(diagram.get("end", 10), -1000000, 1000000, "number_line_invalid")
             if low >= high:
                 fail("number_line_invalid")
-            ticks = int(number(diagram.get("ticks", 6), 2, 12, "number_line_ticks_invalid"))
+            tick_count = number(diagram.get("ticks", 6), 2, 12, "number_line_ticks_invalid")
+            ticks = int(tick_count)
+            if ticks != tick_count:
+                fail("number_line_ticks_invalid")
             draw.line((35, 130, 445, 130), fill="#263747", width=3)
             for i in range(ticks):
                 x = 35 + 410 * i / (ticks - 1)

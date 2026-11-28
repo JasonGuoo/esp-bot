@@ -20,7 +20,7 @@ OpenCode 仍是唯一 Agent 引擎。`agent.work` 的 handler 由 Brain 注册�
 
 ## 配置与依赖
 
-实际配置位置以控制台显示的 `config_path` 为准，新安装通常使用 `~/小呆 Server/brain.json`。以下是需要合并到现有配置的 `tasks` 示例，绝对路径占位符要替换成自己的路径：
+实际配置位置以控制台显示的 `config_path` 为准，新安装通常使用 `~/Xiaodai_Server/brain.json`。以下是需要合并到现有配置的 `tasks` 示例，绝对路径占位符要替换成自己的路径：
 
 ```json
 {
@@ -36,7 +36,7 @@ OpenCode 仍是唯一 Agent 引擎。`agent.work` 的 handler 由 Brain 注册�
     "allowed_media_hosts": [],
     "default_printer": null,
     "print_monitor_seconds": 120,
-    "stroke_data_path": "/Users/你的用户名/小呆 Server/models/hanzi/graphics.txt"
+    "stroke_data_path": "/Users/你的用户名/Xiaodai_Server/models/hanzi/graphics.txt"
   }
 }
 ```
